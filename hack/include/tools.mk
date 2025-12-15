@@ -29,7 +29,6 @@ install.ginkgo:
 install.protoc-plugins:
 	@$(GO) install google.golang.org/protobuf/cmd/protoc-gen-go@v1.35.2
 	@$(GO) install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
-	@$(GO) install github.com/onexstack/protoc-gen-defaults@v0.0.2
 	@$(GO) install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-grpc-gateway@v2.24.0
 	@$(GO) install github.com/grpc-ecosystem/grpc-gateway/v2/protoc-gen-openapiv2@v2.24.0	
 
