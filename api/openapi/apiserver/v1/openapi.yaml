@@ -1,0 +1,81 @@
+consumes:
+    - application/json
+produces:
+    - application/json
+schemes:
+    - http
+swagger: "2.0"
+info:
+    contact:
+        email: pooky.shi@foxmail.com
+        name: SAP AI Core Proxy
+        url: https://github.com/shipengqi/sap-ai-core-proxy
+    license:
+        name: MIT License
+        url: https://github.com/shipengqi/sap-ai-core-proxy/blob/master/LICENSE
+    title: apiserver/v1/healthz.proto
+    version: version not set
+paths:
+    /healthz:
+        get:
+            operationId: Healthz
+            responses:
+                "200":
+                    description: A successful response.
+                    schema:
+                        $ref: '#/definitions/v1HealthzResponse'
+                default:
+                    description: An unexpected error response.
+                    schema:
+                        $ref: '#/definitions/rpcStatus'
+            summary: 服务健康检查
+            tags:
+                - 服务治理
+definitions:
+    protobufAny:
+        additionalProperties: {}
+        properties:
+            '@type':
+                type: string
+        type: object
+    rpcStatus:
+        properties:
+            code:
+                format: int32
+                type: integer
+            details:
+                items:
+                    $ref: '#/definitions/protobufAny'
+                    type: object
+                type: array
+            message:
+                type: string
+        type: object
+    v1HealthzResponse:
+        properties:
+            message:
+                title: message 表示可选的状态消息，描述服务健康的更多信息
+                type: string
+                x-order: !!float 2
+            status:
+                $ref: '#/definitions/v1ServiceStatus'
+                title: status 表示服务的健康状态
+                x-order: !!float 0
+            timestamp:
+                title: timestamp 表示请求的时间戳
+                type: string
+                x-order: !!float 1
+        title: HealthzResponse 表示健康检查的响应结构体
+        type: object
+    v1ServiceStatus:
+        default: Healthy
+        description: |-
+            - Healthy: Healthy 表示服务健康
+             - Unhealthy: Unhealthy 表示服务不健康
+        enum:
+            - Healthy
+            - Unhealthy
+        title: ServiceStatus 表示服务的健康状态
+        type: string
+tags:
+    - name: SAP AI Core Proxy

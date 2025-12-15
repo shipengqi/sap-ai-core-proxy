@@ -1,12 +1,12 @@
 {
     "swagger": "2.0",
     "info": {
-      "title": "SAP AI Core Proxy",
+      "title": "sap-ai-core-proxy",
       "version": "1.0",
       "contact": {
-        "name": "sap-ai-core-proxy",
+        "name": "SAP AI Core Proxy",
         "url": "https://github.com/shipengqi/sap-ai-core-proxy",
-        "email": "colin404@foxmail.com"
+        "email": "pooky.shi@foxmail.com"
       },
       "license": {
         "name": "MIT License",
@@ -15,7 +15,7 @@
     },
     "tags": [
       {
-        "name": "sap-ai-core-proxy"
+        "name": "SAP AI Core Proxy"
       }
     ],
     "schemes": [
@@ -70,6 +70,16 @@
               }
           },
           "title": "HealthzResponse 表示健康检查的响应结构体"
+      },
+      "v1ServiceStatus": {
+        "type": "string",
+        "enum": [
+          "Healthy",
+          "Unhealthy"
+        ],
+        "default": "Healthy",
+        "description": "- Healthy: Healthy 表示服务健康\n - Unhealthy: Unhealthy 表示服务不健康",
+        "title": "ServiceStatus 表示服务的健康状态"
       },
       "protobufAny": {
         "type": "object",

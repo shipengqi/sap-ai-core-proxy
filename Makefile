@@ -16,11 +16,11 @@ include hack/include/all.mk
 define USAGE_OPTIONS
 
 选项:
-  BINS             要构建的二进制文件。默认值为cmd中的所有文件。
+  BINS             要构建的二进制文件。默认值为 'cmd' 中的所有文件。
                    此选项可用于以下命令：make build
                    示例：make build BINS="miniblog"
   VERSION          编译到二进制文件中的版本信息。
-  V                设置为1以启用详细的构建信息输出。默认值为0。
+  V                设置为 1 以启用详细的构建信息输出。默认值为 0。
 endef
 export USAGE_OPTIONS
 
