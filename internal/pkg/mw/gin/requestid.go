@@ -1,0 +1,29 @@
+package gin
+
+import (
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+
+	"github.com/shipengqi/sap-ai-core-proxy/pkg/contextx"
+	"github.com/shipengqi/sap-ai-core-proxy/pkg/known"
+)
+
+// RequestID is a middleware that injects a 'X-Request-ID' into the context and request/response header of each request.
+func RequestID() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Check for incoming header, use it if exists
+		rid := c.GetHeader(known.XRequestID)
+
+		if rid == "" {
+			rid = uuid.New().String()
+		}
+
+		ctx := contextx.WithRequestID(c.Request.Context(), rid)
+		c.Request = c.Request.WithContext(ctx)
+
+		// Set XRequestIDKey header
+		c.Writer.Header().Set(known.XRequestID, rid)
+
+		c.Next()
+	}
+}
