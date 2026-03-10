@@ -1,5 +1,38 @@
-# 日志文件
-*.log
+# Dependencies
+node_modules/
 
-# 自定义文件
-/_output
+# Build output
+dist/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test coverage
+coverage/
+
+# Reference files (downloaded for development)
+reference_*.ts
+
+# Token files (used for testing)
+token.txt
+
+# Requests directory (debug logging)
+requests/
