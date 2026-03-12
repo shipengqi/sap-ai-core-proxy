@@ -32,7 +32,7 @@ class SapAiCoreProxy {
 
   constructor() {
     this.app = express();
-    this.port = parseInt(process.env.PORT || '3000', 10);
+    this.port = parseInt(process.env.PORT || '3001', 10);
 
     // Initialize credentials from environment
     const credentials: SapAiCoreCredentials = {
