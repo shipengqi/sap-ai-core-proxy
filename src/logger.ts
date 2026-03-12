@@ -23,8 +23,22 @@ class Logger {
     const timestamp = new Date().toISOString();
     const formattedArgs = args.length > 0 
       ? ' ' + args.map(arg => {
+          if (arg === null) {
+            return 'null';
+          }
+          if (arg === undefined) {
+            return 'undefined';
+          }
           if (typeof arg === 'object') {
             try {
+              // Handle Error objects specially
+              if (arg instanceof Error) {
+                return JSON.stringify({
+                  name: arg.name,
+                  message: arg.message,
+                  stack: arg.stack,
+                }, null, 2);
+              }
               return JSON.stringify(arg, null, 2);
             } catch {
               return String(arg);

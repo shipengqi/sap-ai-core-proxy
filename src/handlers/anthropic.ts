@@ -70,7 +70,11 @@ export class AnthropicHandler {
         payload = this.buildPayload(req, systemPrompt, anthropicMessages);
       }
 
-      logger.debug(`Anthropic request to ${url}`, { model, stream, messageCount: messages.length, useConverseStream });
+      logger.debug(`Anthropic request to ${url}`);
+      logger.debug('  Model: ' + model);
+      logger.debug('  Stream: ' + stream);
+      logger.debug('  Message Count: ' + messages.length);
+      logger.debug('  Use Converse Stream: ' + useConverseStream);
 
       if (stream) {
         if (useConverseStream) {
@@ -146,7 +150,28 @@ export class AnthropicHandler {
   }
 
   /**
+   * Extracts text content from OpenAI message content field
+   * Handles both string and array formats
+   */
+  private extractTextContent(content: string | null | undefined | Array<{ type: string; text?: string }>): string {
+    if (!content) {
+      return '';
+    }
+    if (typeof content === 'string') {
+      return content;
+    }
+    if (Array.isArray(content)) {
+      return content
+        .filter((item) => item.type === 'text' && item.text)
+        .map((item) => item.text)
+        .join('');
+    }
+    return String(content);
+  }
+
+  /**
    * Builds the payload for Converse API (newer Claude models)
+   * Uses AWS Bedrock Converse API format
    */
   private buildConversePayload(
     req: OpenAIChatCompletionRequest,
@@ -155,36 +180,65 @@ export class AnthropicHandler {
     const modelInfo = this.deploymentManager.getModelInfo(req.model);
     const maxTokens = req.max_tokens || modelInfo?.maxTokens || 16384;
 
-    // Convert messages to Converse API format
-    const systemMessages: Array<{ text: string }> = [];
-    const converseMessages: Array<{ role: string; content: Array<{ text: string }> }> = [];
+    // Collect system prompt and convert messages to Bedrock Converse API format
+    let systemPrompt = '';
+    const converseMessages: Array<{ role: 'user' | 'assistant'; content: Array<{ text: string }> }> = [];
+
+    // Track user message indices for caching
+    const userMsgIndices: number[] = [];
 
     for (const msg of messages) {
+      // Extract text content (handle both string and array formats)
+      const textContent = this.extractTextContent(msg.content as string | null | Array<{ type: string; text?: string }>);
+      
       if (msg.role === 'system') {
-        if (msg.content) {
-          systemMessages.push({ text: msg.content });
+        // Concatenate system messages
+        if (textContent) {
+          systemPrompt += (systemPrompt ? '\n' : '') + textContent;
         }
       } else {
+        const role = msg.role === 'assistant' ? 'assistant' : 'user';
+        if (role === 'user') {
+          userMsgIndices.push(converseMessages.length);
+        }
         converseMessages.push({
-          role: msg.role === 'assistant' ? 'assistant' : 'user',
-          content: [{ text: msg.content || '' }],
+          role: role as 'user' | 'assistant',
+          content: [{ text: textContent }],
         });
       }
     }
+
+    // Apply caching to last two user messages (like Cline does)
+    const lastUserMsgIndex = userMsgIndices[userMsgIndices.length - 1] ?? -1;
+    const secondLastMsgUserIndex = userMsgIndices[userMsgIndices.length - 2] ?? -1;
+
+    const messagesWithCache = converseMessages.map((message, index) => {
+      if (index === lastUserMsgIndex || index === secondLastMsgUserIndex) {
+        // Add cachePoint to the end of the content array
+        return {
+          ...message,
+          content: [
+            ...message.content,
+            { cachePoint: { type: 'default' } },
+          ],
+        };
+      }
+      return message;
+    });
 
     const payload: Record<string, unknown> = {
       inferenceConfig: {
         maxTokens: maxTokens,
         temperature: req.temperature ?? 0.0,
       },
-      messages: converseMessages,
+      messages: messagesWithCache,
     };
 
-    // Add system messages with caching support
-    if (systemMessages.length > 0) {
+    // Add system messages with caching support (like Cline does)
+    if (systemPrompt) {
       payload.system = [
-        ...systemMessages,
-        { cachePoint: { type: 'default' } }, // Add cache point for system prompt
+        { text: systemPrompt },
+        { cachePoint: { type: 'default' } },
       ];
     }
 
@@ -240,84 +294,106 @@ export class AnthropicHandler {
     res: Response,
     model: string
   ): Promise<void> {
-    // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-
     const completionId = `chatcmpl-${uuidv4()}`;
     const created = Math.floor(Date.now() / 1000);
 
     try {
+      // First, make a non-streaming request to validate the request
+      // This helps catch errors before setting up the stream
       const response = await axios.post(url, payload, {
         headers,
         responseType: 'stream',
+        validateStatus: (status) => status < 500, // Accept 4xx to handle them ourselves
       });
+
+      // If we got an error status, read the error response
+      if (response.status >= 400) {
+        let errorBody = '';
+        for await (const chunk of response.data) {
+          errorBody += chunk.toString('utf-8');
+        }
+        
+        logger.error('Converse streaming request error response:');
+        logger.error('  Status: ' + response.status);
+        logger.error('  Body: ' + errorBody);
+        
+        // Parse error message
+        let errorMessage = 'Request failed';
+        try {
+          const errorData = JSON.parse(errorBody);
+          if (errorData.error?.message) {
+            errorMessage = errorData.error.message;
+          } else if (errorData.errors?.message) {
+            errorMessage = errorData.errors.message;
+          } else if (errorData.message) {
+            errorMessage = errorData.message;
+          } else {
+            errorMessage = errorBody;
+          }
+        } catch {
+          errorMessage = errorBody || 'Unknown error';
+        }
+        
+        res.status(response.status).json({
+          error: {
+            message: errorMessage,
+            type: 'api_error',
+            param: null,
+            code: response.status.toString(),
+          },
+        });
+        return;
+      }
+
+      // Set SSE headers only after successful connection
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Accel-Buffering', 'no');
 
       let buffer = '';
       let inputTokens = 0;
       let outputTokens = 0;
 
+      logger.debug('Converse stream connected, waiting for data...');
+
       response.data.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString('utf-8');
+        const chunkStr = chunk.toString('utf-8');
+        logger.debug('Received raw chunk (' + chunkStr.length + ' chars)');
+        
+        buffer += chunkStr;
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
         for (const line of lines) {
           if (line.trim() === '') continue;
+          
+          logger.debug('Processing line: ' + line.substring(0, 200));
 
+          // Try to parse as SSE format first (data: {...})
           if (line.startsWith('data: ')) {
             try {
-              // Parse with relaxed JSON handling
-              const jsonStr = line.slice(6);
+              let jsonStr = line.slice(6);
+              // SAP AI Core may return single-quoted JSON (Python style)
+              // Convert to standard double-quoted JSON
+              jsonStr = this.convertPythonJsonToStandardJson(jsonStr);
               const data = JSON.parse(jsonStr);
-              
-              // Handle metadata (token usage)
-              if (data.metadata?.usage) {
-                inputTokens = data.metadata.usage.inputTokens || 0;
-                outputTokens = data.metadata.usage.outputTokens || 0;
-                
-                // Include cached tokens
-                const cacheReadInputTokens = data.metadata.usage.cacheReadInputTokens || 0;
-                const cacheWriteInputTokens = data.metadata.usage.cacheWriteInputTokens || 0;
-                inputTokens = inputTokens + cacheReadInputTokens + cacheWriteInputTokens;
-              }
-
-              // Handle content block delta (text generation)
-              if (data.contentBlockDelta?.delta?.text) {
-                const textChunk: OpenAIChatCompletionChunk = {
-                  id: completionId,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: { content: data.contentBlockDelta.delta.text },
-                    finish_reason: null,
-                  }],
-                };
-                res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
-              }
-
-              // Handle reasoning content if present
-              if (data.contentBlockDelta?.delta?.reasoningContent?.text) {
-                // For now, we include reasoning in the content
-                const reasoningChunk: OpenAIChatCompletionChunk = {
-                  id: completionId,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: { content: data.contentBlockDelta.delta.reasoningContent.text },
-                    finish_reason: null,
-                  }],
-                };
-                res.write(`data: ${JSON.stringify(reasoningChunk)}\n\n`);
-              }
+              logger.debug('Parsed SSE data: ' + JSON.stringify(data).substring(0, 100));
+              this.processConverseStreamData(data, completionId, created, model, res, { inputTokens, outputTokens });
             } catch (e) {
-              logger.debug('Failed to parse Converse streaming chunk:', line);
+              logger.debug('Failed to parse SSE chunk:', line.substring(0, 100));
+            }
+          } else {
+            // Try to parse as raw JSON (SAP AI Core may send raw JSON lines)
+            try {
+              let jsonStr = line;
+              jsonStr = this.convertPythonJsonToStandardJson(jsonStr);
+              const data = JSON.parse(jsonStr);
+              logger.debug('Parsed raw JSON data');
+              this.processConverseStreamData(data, completionId, created, model, res, { inputTokens, outputTokens });
+            } catch (e) {
+              // Not JSON, log it
+              logger.debug('Non-JSON line: ' + line.substring(0, 100));
             }
           }
         }
@@ -354,8 +430,60 @@ export class AnthropicHandler {
       });
 
     } catch (error: unknown) {
-      const axiosError = error as { response?: { data?: unknown }; message?: string };
-      logger.error('Converse streaming request failed:', axiosError.message);
+      const axiosError = error as { 
+        response?: { status?: number; data?: unknown }; 
+        message?: string;
+        config?: { url?: string };
+      };
+      
+      // Log detailed error information
+      logger.error('Converse streaming request failed:');
+      logger.error('  Message: ' + (axiosError.message || 'Unknown'));
+      logger.error('  Status: ' + (axiosError.response?.status || 'N/A'));
+      logger.error('  URL: ' + (axiosError.config?.url || 'N/A'));
+      
+      // Safely stringify response data
+      let responseDataStr = 'N/A';
+      try {
+        if (axiosError.response?.data) {
+          if (typeof axiosError.response.data === 'string') {
+            responseDataStr = axiosError.response.data;
+          } else if (Buffer.isBuffer(axiosError.response.data)) {
+            responseDataStr = axiosError.response.data.toString('utf-8');
+          } else {
+            responseDataStr = JSON.stringify(axiosError.response.data, null, 2);
+          }
+        }
+      } catch (e) {
+        responseDataStr = 'Unable to stringify response data';
+      }
+      logger.error('  Response Data: ' + responseDataStr);
+      
+      // Extract error message
+      let errorMessage = axiosError.message || 'Unknown error';
+      const responseData = axiosError.response?.data;
+      if (responseData && typeof responseData === 'object') {
+        const data = responseData as Record<string, unknown>;
+        if (data.errors && typeof data.errors === 'object') {
+          const errors = data.errors as Record<string, unknown>;
+          errorMessage = (errors.message as string) || JSON.stringify(data.errors);
+        } else if (data.message) {
+          errorMessage = data.message as string;
+        }
+      }
+
+      // If headers haven't been sent yet, send a proper error response
+      if (!res.headersSent) {
+        res.status(axiosError.response?.status || 500).json({
+          error: {
+            message: errorMessage,
+            type: 'api_error',
+            param: null,
+            code: (axiosError.response?.status || 500).toString(),
+          },
+        });
+        return;
+      }
       
       const errorChunk: OpenAIChatCompletionChunk = {
         id: completionId,
@@ -364,13 +492,78 @@ export class AnthropicHandler {
         model,
         choices: [{
           index: 0,
-          delta: { content: `Error: ${axiosError.message}` },
+          delta: { content: `Error: ${errorMessage}` },
           finish_reason: 'stop',
         }],
       };
       res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
+    }
+  }
+
+  /**
+   * Processes Converse stream data and writes to response
+   */
+  private processConverseStreamData(
+    data: Record<string, unknown>,
+    completionId: string,
+    created: number,
+    model: string,
+    res: Response,
+    usage: { inputTokens: number; outputTokens: number }
+  ): void {
+    // Handle metadata (token usage)
+    const metadata = data.metadata as Record<string, unknown> | undefined;
+    if (metadata?.usage) {
+      const usageData = metadata.usage as Record<string, number>;
+      usage.inputTokens = usageData.inputTokens || 0;
+      usage.outputTokens = usageData.outputTokens || 0;
+      
+      // Include cached tokens
+      const cacheReadInputTokens = usageData.cacheReadInputTokens || 0;
+      const cacheWriteInputTokens = usageData.cacheWriteInputTokens || 0;
+      usage.inputTokens = usage.inputTokens + cacheReadInputTokens + cacheWriteInputTokens;
+    }
+
+    // Handle content block delta (text generation)
+    if (data.contentBlockDelta) {
+      const delta = data.contentBlockDelta as Record<string, unknown>;
+      const deltaContent = delta.delta as Record<string, unknown>;
+      
+      if (deltaContent?.text) {
+        const textChunk: OpenAIChatCompletionChunk = {
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created,
+          model,
+          choices: [{
+            index: 0,
+            delta: { content: deltaContent.text as string },
+            finish_reason: null,
+          }],
+        };
+        res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
+      }
+
+      // Handle reasoning content if present
+      if (deltaContent?.reasoningContent) {
+        const reasoningContent = deltaContent.reasoningContent as Record<string, unknown>;
+        if (reasoningContent.text) {
+          const reasoningChunk: OpenAIChatCompletionChunk = {
+            id: completionId,
+            object: 'chat.completion.chunk',
+            created,
+            model,
+            choices: [{
+              index: 0,
+              delta: { content: reasoningContent.text as string },
+              finish_reason: null,
+            }],
+          };
+          res.write(`data: ${JSON.stringify(reasoningChunk)}\n\n`);
+        }
+      }
     }
   }
 
@@ -599,6 +792,45 @@ export class AnthropicHandler {
   }
 
   /**
+   * Converts Python-style JSON (single quotes) to standard JSON (double quotes)
+   * SAP AI Core may return single-quoted JSON in streaming responses
+   */
+  private convertPythonJsonToStandardJson(jsonStr: string): string {
+    // Replace single quotes with double quotes, but be careful about escaped quotes
+    // This is a simple conversion that works for most cases
+    let result = '';
+    let inString = false;
+    let stringChar = '';
+    
+    for (let i = 0; i < jsonStr.length; i++) {
+      const char = jsonStr[i];
+      const prevChar = i > 0 ? jsonStr[i - 1] : '';
+      
+      if (!inString) {
+        if (char === "'" || char === '"') {
+          inString = true;
+          stringChar = char;
+          result += '"'; // Always use double quotes
+        } else {
+          result += char;
+        }
+      } else {
+        if (char === stringChar && prevChar !== '\\') {
+          inString = false;
+          result += '"'; // Always use double quotes
+        } else if (char === '"' && stringChar === "'") {
+          // Escape double quotes inside single-quoted strings
+          result += '\\"';
+        } else {
+          result += char;
+        }
+      }
+    }
+    
+    return result;
+  }
+
+  /**
    * Extracts content from Anthropic response
    */
   private extractContent(data: Record<string, unknown>): string {
@@ -635,16 +867,53 @@ export class AnthropicHandler {
    */
   private handleError(error: unknown, res: Response): void {
     const axiosError = error as { 
-      response?: { status?: number; data?: unknown }; 
-      message?: string 
+      response?: { status?: number; data?: unknown; headers?: Record<string, string> }; 
+      message?: string;
+      config?: { url?: string; method?: string };
     };
 
-    logger.error('Anthropic handler error:', axiosError.message);
+    // Log detailed error information
+    logger.error('Anthropic handler error:', {
+      message: axiosError.message,
+      status: axiosError.response?.status,
+      url: axiosError.config?.url,
+      method: axiosError.config?.method,
+      responseData: axiosError.response?.data,
+    });
 
     const statusCode = axiosError.response?.status || 500;
-    const errorMessage = typeof axiosError.response?.data === 'object' 
-      ? JSON.stringify(axiosError.response.data)
-      : axiosError.message || 'Internal server error';
+    
+    // Extract error message from various response formats
+    let errorMessage = 'Internal server error';
+    const responseData = axiosError.response?.data;
+    
+    if (responseData) {
+      if (typeof responseData === 'string') {
+        errorMessage = responseData;
+      } else if (typeof responseData === 'object') {
+        const data = responseData as Record<string, unknown>;
+        // Handle SAP AI Core error format: { errors: { message: string } }
+        if (data.errors && typeof data.errors === 'object') {
+          const errors = data.errors as Record<string, unknown>;
+          errorMessage = (errors.message as string) || JSON.stringify(data.errors);
+        } 
+        // Handle standard error format: { error: { message: string } }
+        else if (data.error && typeof data.error === 'object') {
+          const err = data.error as Record<string, unknown>;
+          errorMessage = (err.message as string) || JSON.stringify(data.error);
+        }
+        // Handle message field directly
+        else if (data.message) {
+          errorMessage = data.message as string;
+        }
+        // Fallback to stringify
+        else {
+          errorMessage = JSON.stringify(responseData);
+        }
+      }
+    } else if (axiosError.message) {
+      errorMessage = axiosError.message;
+    }
 
     res.status(statusCode).json({
       error: {
