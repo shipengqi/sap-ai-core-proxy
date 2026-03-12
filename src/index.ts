@@ -111,6 +111,20 @@ class SapAiCoreProxy {
    * Sets up API routes
    */
   private setupRoutes(): void {
+    // Root endpoint - API info
+    this.app.get('/', (_req: Request, res: Response) => {
+      res.json({
+        name: 'SAP AI Core Proxy',
+        version: '1.0.0',
+        status: 'ok',
+        endpoints: {
+          models: '/v1/models',
+          chat: '/v1/chat/completions',
+          health: '/health',
+        },
+      });
+    });
+
     // Health check
     this.app.get('/health', (_req: Request, res: Response) => {
       res.json({ status: 'ok', timestamp: new Date().toISOString() });
