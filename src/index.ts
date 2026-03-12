@@ -367,8 +367,8 @@ class SapAiCoreProxy {
       logger.warn('Deployments will be fetched on first request');
     }
 
-    this.app.listen(this.port, () => {
-      logger.info(`SAP AI Core Proxy listening on port ${this.port}`);
+    this.app.listen(this.port, '0.0.0.0', () => {
+      logger.info(`SAP AI Core Proxy listening on 0.0.0.0:${this.port}`);
       logger.info('Endpoints:');
       logger.info(`  GET  /health - Health check`);
       logger.info(`  GET  /v1/models - List available models`);
