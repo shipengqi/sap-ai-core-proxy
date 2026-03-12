@@ -143,10 +143,11 @@ class SapAiCoreProxy {
     });
 
     // 404 handler
-    this.app.use((_req: Request, res: Response) => {
+    this.app.use((req: Request, res: Response) => {
+      logger.warn(`Unknown endpoint: ${req.method} ${req.path}`);
       res.status(404).json({
         error: {
-          message: 'Not found',
+          message: `Endpoint not found: ${req.method} ${req.path}`,
           type: 'invalid_request_error',
           param: null,
           code: '404',
