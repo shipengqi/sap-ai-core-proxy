@@ -21,7 +21,7 @@ A TypeScript proxy server that provides an OpenAI-compatible API for SAP AI Core
 - o1, o3-mini, o3, o4-mini
 
 ### Anthropic Models (Claude)
-- anthropic--claude-4.6-sonnet
+- anthropic--claude-4.6-sonnet, anthropic--claude-4.6-opus
 - anthropic--claude-4.5-sonnet, anthropic--claude-4.5-opus, anthropic--claude-4.5-haiku
 - anthropic--claude-4-sonnet, anthropic--claude-4-opus
 - anthropic--claude-3.7-sonnet, anthropic--claude-3.5-sonnet
@@ -181,8 +181,53 @@ curl http://localhost:3000/v1/chat/completions \
 | `/health` | GET | Health check |
 | `/v1/models` | GET | List available models |
 | `/v1/models/:modelId` | GET | Get specific model info |
-| `/v1/chat/completions` | POST | Chat completion |
+| `/v1/chat/completions` | POST | Chat completion (OpenAI-compatible) |
+| `/v1/messages` | POST | Chat completion (Anthropic Messages API - Claude Code) |
+| `/v1/messages/count_tokens` | POST | Token counting (Anthropic - Claude Code) |
 | `/admin/refresh-deployments` | POST | Force refresh deployment cache |
+
+## Claude Code Support
+
+This proxy supports [Claude Code CLI](https://claude.ai/code) and the Claude Code VSCode extension by implementing the native Anthropic Messages API.
+
+### Setup
+
+Configure Claude Code to use the proxy:
+
+```bash
+export ANTHROPIC_BASE_URL=http://localhost:3001
+export ANTHROPIC_API_KEY=any-value   # The proxy handles SAP AI Core auth automatically
+```
+
+Then run Claude Code normally:
+
+```bash
+claude
+```
+
+Or for the VSCode extension, set the API Base URL to `http://localhost:3001` in the extension settings.
+
+### Model Names
+
+Claude Code sends standard Anthropic model names. The proxy automatically maps them to SAP AI Core model names:
+
+| Claude Code model name | SAP AI Core model name |
+|------------------------|------------------------|
+| `claude-sonnet-4-6` | `anthropic--claude-4.6-sonnet` |
+| `claude-opus-4-6` | `anthropic--claude-4.6-opus` |
+| `claude-sonnet-4-5` | `anthropic--claude-4.5-sonnet` |
+| `claude-opus-4-5` | `anthropic--claude-4.5-opus` |
+| `claude-haiku-4-5` | `anthropic--claude-4.5-haiku` |
+| `claude-sonnet-4` | `anthropic--claude-4-sonnet` |
+| `claude-opus-4` | `anthropic--claude-4-opus` |
+| `claude-3-7-sonnet-20250219` | `anthropic--claude-3.7-sonnet` |
+| `claude-3-5-sonnet-20241022` | `anthropic--claude-3.5-sonnet` |
+| `claude-3-5-haiku-20241022` | `anthropic--claude-3.5-haiku` |
+| `claude-3-opus-20240229` | `anthropic--claude-3-opus` |
+| `claude-3-sonnet-20240229` | `anthropic--claude-3-sonnet` |
+| `claude-3-haiku-20240307` | `anthropic--claude-3-haiku` |
+
+You can also use SAP AI Core model names directly (e.g. `--model anthropic--claude-4.5-sonnet`).
 
 ## Project Structure
 

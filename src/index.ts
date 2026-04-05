@@ -6,6 +6,7 @@ import { DeploymentManager } from './deployments';
 import { OpenAIHandler } from './handlers/openai';
 import { AnthropicHandler } from './handlers/anthropic';
 import { GeminiHandler } from './handlers/gemini';
+import { AnthropicMessagesHandler } from './handlers/anthropic-messages';
 import { logger } from './logger';
 import { 
   SapAiCoreCredentials, 
@@ -28,6 +29,7 @@ class SapAiCoreProxy {
   private openaiHandler: OpenAIHandler;
   private anthropicHandler: AnthropicHandler;
   private geminiHandler: GeminiHandler;
+  private anthropicMessagesHandler: AnthropicMessagesHandler;
   private port: number;
 
   constructor() {
@@ -52,6 +54,7 @@ class SapAiCoreProxy {
     this.openaiHandler = new OpenAIHandler(this.authManager, this.deploymentManager);
     this.anthropicHandler = new AnthropicHandler(this.authManager, this.deploymentManager);
     this.geminiHandler = new GeminiHandler(this.authManager, this.deploymentManager);
+    this.anthropicMessagesHandler = new AnthropicMessagesHandler(this.authManager, this.deploymentManager);
 
     // Setup middleware and routes
     this.setupMiddleware();
@@ -139,6 +142,10 @@ class SapAiCoreProxy {
 
     // Additional endpoints for compatibility
     this.app.get('/v1/models/:modelId', this.handleGetModel.bind(this));
+
+    // Anthropic Messages API endpoints (for Claude Code CLI / VSCode extension)
+    this.app.post('/v1/messages', this.anthropicMessagesHandler.handleMessages.bind(this.anthropicMessagesHandler));
+    this.app.post('/v1/messages/count_tokens', this.anthropicMessagesHandler.handleCountTokens.bind(this.anthropicMessagesHandler));
 
     // Refresh deployments endpoint
     this.app.post('/admin/refresh-deployments', this.handleRefreshDeployments.bind(this));
@@ -388,6 +395,8 @@ class SapAiCoreProxy {
       logger.info(`  GET  /health - Health check`);
       logger.info(`  GET  /v1/models - List available models`);
       logger.info(`  POST /v1/chat/completions - Chat completion`);
+      logger.info(`  POST /v1/messages - Anthropic Messages API (Claude Code)`);
+      logger.info(`  POST /v1/messages/count_tokens - Anthropic token counting (Claude Code)`);
       logger.info(`  POST /admin/refresh-deployments - Refresh deployments cache`);
     });
   }
