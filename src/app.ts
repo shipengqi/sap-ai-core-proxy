@@ -58,11 +58,26 @@ function setupMiddleware(app: express.Application): void {
     next();
   });
 
-  // CORS headers
+  // CORS headers - include all headers Claude Code CLI/VSCode extension may send
   app.use((_req: Request, res: Response, next: NextFunction) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Headers', [
+      'Content-Type',
+      'Authorization',
+      'x-api-key',
+      'anthropic-version',
+      'anthropic-beta',
+      'anthropic-dangerous-direct-browser-access',
+      'x-app',
+      'x-stainless-arch',
+      'x-stainless-helper-method',
+      'x-stainless-lang',
+      'x-stainless-os',
+      'x-stainless-package-version',
+      'x-stainless-runtime',
+      'x-stainless-runtime-version',
+    ].join(', '));
     next();
   });
 
