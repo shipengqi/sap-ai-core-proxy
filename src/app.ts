@@ -4,18 +4,26 @@ import { AuthManager } from './sap-ai-core/auth';
 import { DeploymentManager } from './sap-ai-core/deployments';
 import { OpenAIProvider } from './providers/openai';
 import { AnthropicOpenAIProvider } from './providers/anthropic-openai';
-import { GeminiProvider } from './providers/gemini';
+import { GeminiProvider } from './providers/gemini-openai';
 import { AnthropicNativeProvider } from './providers/anthropic-native';
-import { handleListModels, handleGetModel } from './routes/models';
-import { handleChatCompletions } from './routes/chat-completions';
-import { createMessagesHandlers } from './routes/messages';
-import { setupClaudeCodeAuthRoutes } from './routes/claude-code-auth';
+import {
+  createHealthRouter,
+  createAdminRouter,
+  createOpenAICompatibleRouter,
+  createAnthropicRouter,
+} from './routers';
 import { logger } from './logger';
+
+interface AppResult {
+  readonly app: express.Application;
+  readonly authManager: AuthManager;
+  readonly deploymentManager: DeploymentManager;
+}
 
 /**
  * Creates and configures the Express application
  */
-export function createApp(config: AppConfig): express.Application {
+export function createApp(config: AppConfig): AppResult {
   const app = express();
 
   // Initialize managers
@@ -31,10 +39,10 @@ export function createApp(config: AppConfig): express.Application {
   // Setup middleware
   setupMiddleware(app);
 
-  // Setup routes
+  // Setup routes via routers
   setupRoutes(app, deploymentManager, openaiProvider, anthropicOpenAIProvider, geminiProvider, anthropicNativeProvider);
 
-  return app;
+  return { app, authManager, deploymentManager };
 }
 
 /**
@@ -65,7 +73,7 @@ function setupMiddleware(app: express.Application): void {
 }
 
 /**
- * Sets up API routes
+ * Sets up API routes using Express Routers
  */
 function setupRoutes(
   app: express.Application,
@@ -75,68 +83,19 @@ function setupRoutes(
   geminiProvider: GeminiProvider,
   anthropicNativeProvider: AnthropicNativeProvider,
 ): void {
-  // Root endpoint - API info
-  app.get('/', (_req: Request, res: Response) => {
-    res.json({
-      name: 'SAP AI Core Proxy',
-      version: '1.0.0',
-      status: 'ok',
-      endpoints: {
-        models: '/v1/models',
-        chat: '/v1/chat/completions',
-        health: '/health',
-      },
-    });
-  });
+  // Health/info routes at root
+  app.use('/', createHealthRouter());
 
-  // Health check
-  app.get('/health', (_req: Request, res: Response) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
-  });
+  // OpenAI-compatible proxy
+  app.use('/openai-compatible', createOpenAICompatibleRouter(
+    deploymentManager, openaiProvider, anthropicOpenAIProvider, geminiProvider,
+  ));
 
-  // Model endpoints
-  app.get('/v1/models', handleListModels(deploymentManager));
-  app.get('/models', handleListModels(deploymentManager));
-  app.get('/v1/models/:modelId', handleGetModel(deploymentManager));
+  // Anthropic native proxy
+  app.use('/anthropic', createAnthropicRouter(anthropicNativeProvider));
 
-  // Chat completions
-  app.post('/v1/chat/completions', handleChatCompletions(deploymentManager, openaiProvider, anthropicOpenAIProvider, geminiProvider));
-  app.post('/chat/completions', handleChatCompletions(deploymentManager, openaiProvider, anthropicOpenAIProvider, geminiProvider));
-
-  // Anthropic Messages API endpoints (for Claude Code CLI / VSCode extension)
-  const messagesHandlers = createMessagesHandlers(anthropicNativeProvider);
-  app.post('/v1/messages', messagesHandlers.handleMessages);
-  app.post('/v1/messages/count_tokens', messagesHandlers.handleCountTokens);
-
-  // Claude Code auth stub endpoints
-  setupClaudeCodeAuthRoutes(app);
-
-  // Refresh deployments endpoint
-  app.post('/admin/refresh-deployments', async (_req: Request, res: Response) => {
-    try {
-      const deployments = await deploymentManager.refreshDeployments();
-      res.json({
-        success: true,
-        count: deployments.length,
-        deployments: deployments.map(d => ({
-          id: d.id,
-          model: d.details.resources.backend_details.model.name,
-          status: d.status,
-        })),
-      });
-    } catch (error: unknown) {
-      const err = error as { message?: string };
-      logger.error('Failed to refresh deployments:', err.message);
-      res.status(500).json({
-        error: {
-          message: err.message || 'Failed to refresh deployments',
-          type: 'api_error',
-          param: null,
-          code: '500',
-        },
-      });
-    }
-  });
+  // Admin routes
+  app.use('/admin', createAdminRouter(deploymentManager));
 
   // Error handling
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

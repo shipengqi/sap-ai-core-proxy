@@ -1,16 +1,16 @@
 # SAP AI Core LLM Proxy
 
-A TypeScript proxy server that provides an OpenAI-compatible API for SAP AI Core's LLM deployments. This allows you to use any OpenAI SDK or compatible client to interact with models deployed on SAP AI Core.
+A TypeScript proxy server that provides **OpenAI-compatible** and **Anthropic-native** API endpoints for SAP AI Core's LLM deployments. Use any OpenAI SDK, Anthropic SDK, or Claude Code to interact with models deployed on SAP AI Core.
 
 ## Features
 
-- **OpenAI-compatible API**: Drop-in replacement for OpenAI API endpoints
+- **Dual proxy modes**: OpenAI-compatible (`/openai-compatible`) and Anthropic-native (`/anthropic`) API paths
 - **Multi-model support**: OpenAI GPT, Anthropic Claude, Google Gemini, Meta Llama, Mistral, and Perplexity models
 - **Streaming support**: Full Server-Sent Events (SSE) streaming for real-time responses
 - **Automatic authentication**: OAuth token management with automatic refresh
 - **Deployment discovery**: Automatically discovers running model deployments from SAP AI Core
-- **Converse Stream API**: Support for newer Claude models using the Converse Stream endpoint
-- **Gemini native API**: Native support for Gemini models with proper format conversion
+- **Claude Code support**: Native Anthropic Messages API for Claude Code CLI and VSCode extension
+- **Extensible architecture**: Router-per-proxy-type design makes adding new API formats straightforward
 
 ## Supported Models
 
@@ -68,7 +68,7 @@ SAP_AI_CORE_CLIENT_SECRET=your_client_secret
 SAP_AI_CORE_TOKEN_URL=https://your-tenant.authentication.region.hana.ondemand.com
 SAP_AI_CORE_BASE_URL=https://api.ai.your-region.aws.ml.hana.ondemand.com
 SAP_AI_CORE_RESOURCE_GROUP=default
-PORT=3000
+PORT=3001
 LOG_LEVEL=info
 ```
 
@@ -85,6 +85,33 @@ npm run build
 npm start
 ```
 
+## API Endpoints
+
+### OpenAI-Compatible Mode (`/openai-compatible`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/openai-compatible/v1/models` | GET | List available models |
+| `/openai-compatible/v1/models/:modelId` | GET | Get specific model info |
+| `/openai-compatible/v1/chat/completions` | POST | Chat completion |
+
+### Anthropic Native Mode (`/anthropic`)
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/anthropic/v1/messages` | POST | Anthropic Messages API |
+| `/anthropic/v1/messages/count_tokens` | POST | Token counting |
+| `/anthropic/oauth/token` | POST | Claude Code auth stub |
+| `/anthropic/api/*` | GET | Claude Code auth stubs |
+
+### General
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/` | GET | API info |
+| `/health` | GET | Health check |
+| `/admin/refresh-deployments` | POST | Force refresh deployment cache |
+
 ## Usage
 
 ### Using with OpenAI Python SDK
@@ -93,13 +120,12 @@ npm start
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:3000/v1",
+    base_url="http://localhost:3001/openai-compatible/v1",
     api_key="not-needed"  # Authentication is handled by the proxy
 )
 
-# Chat completion
 response = client.chat.completions.create(
-    model="gpt-4o",  # Use any deployed model name
+    model="gpt-4o",
     messages=[
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "Hello, how are you?"}
@@ -115,7 +141,7 @@ print(response.choices[0].message.content)
 import OpenAI from 'openai';
 
 const client = new OpenAI({
-  baseURL: 'http://localhost:3000/v1',
+  baseURL: 'http://localhost:3001/openai-compatible/v1',
   apiKey: 'not-needed',
 });
 
@@ -135,7 +161,7 @@ console.log(response.choices[0].message.content);
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:3000/v1",
+    base_url="http://localhost:3001/openai-compatible/v1",
     api_key="not-needed"
 )
 
@@ -154,48 +180,37 @@ for chunk in stream:
 
 ```bash
 # List available models
-curl http://localhost:3000/v1/models
+curl http://localhost:3001/openai-compatible/v1/models
 
 # Chat completion
-curl http://localhost:3000/v1/chat/completions \
+curl http://localhost:3001/openai-compatible/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o",
     "messages": [{"role": "user", "content": "Hello!"}]
   }'
 
-# Streaming chat completion
-curl http://localhost:3000/v1/chat/completions \
+# Anthropic Messages API
+curl http://localhost:3001/anthropic/v1/messages \
   -H "Content-Type: application/json" \
+  -H "x-api-key: any-value" \
   -d '{
-    "model": "gpt-4o",
-    "messages": [{"role": "user", "content": "Hello!"}],
-    "stream": true
+    "model": "claude-sonnet-4-5",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}]
   }'
 ```
 
-## API Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/health` | GET | Health check |
-| `/v1/models` | GET | List available models |
-| `/v1/models/:modelId` | GET | Get specific model info |
-| `/v1/chat/completions` | POST | Chat completion (OpenAI-compatible) |
-| `/v1/messages` | POST | Chat completion (Anthropic Messages API - Claude Code) |
-| `/v1/messages/count_tokens` | POST | Token counting (Anthropic - Claude Code) |
-| `/admin/refresh-deployments` | POST | Force refresh deployment cache |
-
 ## Claude Code Support
 
-This proxy supports [Claude Code CLI](https://claude.ai/code) and the Claude Code VSCode extension by implementing the native Anthropic Messages API.
+This proxy supports [Claude Code CLI](https://claude.ai/code) and the Claude Code VSCode extension via the Anthropic native proxy mode.
 
 ### Setup
 
 Configure Claude Code to use the proxy:
 
 ```bash
-export ANTHROPIC_BASE_URL=http://localhost:3001
+export ANTHROPIC_BASE_URL=http://localhost:3001/anthropic
 export ANTHROPIC_API_KEY=any-value   # The proxy handles SAP AI Core auth automatically
 ```
 
@@ -205,9 +220,9 @@ Then run Claude Code normally:
 claude
 ```
 
-Or for the VSCode extension, set the API Base URL to `http://localhost:3001` in the extension settings.
+For the VSCode extension, set the API Base URL to `http://localhost:3001/anthropic` in the extension settings.
 
-### Model Names
+### Model Name Mapping
 
 Claude Code sends standard Anthropic model names. The proxy automatically maps them to SAP AI Core model names:
 
@@ -233,34 +248,62 @@ You can also use SAP AI Core model names directly (e.g. `--model anthropic--clau
 
 ```
 src/
-├── index.ts              # Main entry point and Express server
-├── auth.ts               # OAuth authentication manager
-├── deployments.ts        # Deployment discovery and caching
-├── logger.ts             # Logging utility
-├── types.ts              # TypeScript type definitions
-└── handlers/
-    ├── openai.ts         # OpenAI-compatible model handler
-    ├── anthropic.ts      # Anthropic/Claude model handler
-    └── gemini.ts         # Google Gemini model handler
+├── index.ts                  # Entry point
+├── app.ts                    # Express app setup, mounts routers
+├── config.ts                 # Environment configuration
+├── logger.ts                 # Logging utility
+├── routers/                  # Express Router per proxy mode
+│   ├── openai-compatible.ts  # /openai-compatible/* routes
+│   ├── anthropic.ts          # /anthropic/* routes + Claude Code auth stubs
+│   ├── admin.ts              # /admin/* routes
+│   └── health.ts             # / and /health routes
+├── providers/                # LLM provider implementations
+│   ├── openai.ts             # OpenAI models (OpenAI format)
+│   ├── anthropic-openai.ts   # Claude models (OpenAI format)
+│   ├── gemini-openai.ts      # Gemini models (OpenAI format)
+│   └── anthropic-native.ts   # Claude models (Anthropic native format)
+├── utils/                    # Shared utilities
+│   ├── json-parser.ts        # Python-style JSON conversion
+│   ├── content-extractor.ts  # Message content extraction
+│   ├── sse.ts                # SSE header/event helpers
+│   ├── error-handler.ts      # Error extraction and formatting
+│   └── converse-models.ts    # Converse API model list
+├── sap-ai-core/              # SAP AI Core integration
+│   ├── auth.ts               # OAuth token management
+│   ├── deployments.ts        # Model deployment discovery
+│   └── types.ts              # SAP AI Core type definitions
+└── types/                    # Shared TypeScript interfaces
+    ├── openai.ts             # OpenAI API types
+    ├── anthropic.ts          # Anthropic API types
+    └── models.ts             # Model/provider types
 ```
 
 ## How It Works
 
 1. **Authentication**: The proxy authenticates with SAP AI Core using OAuth 2.0 client credentials flow
 2. **Deployment Discovery**: On startup (and periodically), it fetches available model deployments
-3. **Request Translation**: Incoming OpenAI-format requests are translated to the appropriate format for each model provider
-4. **Response Translation**: Responses from SAP AI Core are converted back to OpenAI format
-5. **Streaming**: For streaming requests, SSE streams are properly forwarded and formatted
+3. **Request Routing**: Incoming requests are routed by URL prefix to the appropriate proxy mode
+4. **Request Translation**: Requests are translated to the appropriate format for each model provider
+5. **Response Translation**: Responses from SAP AI Core are converted back to the client's expected format
+6. **Streaming**: For streaming requests, SSE streams are properly forwarded and formatted
 
-## Model Routing
+## Adding a New Proxy Mode
 
-The proxy automatically routes requests to the appropriate handler based on the model name:
+The router-per-proxy-type architecture makes it easy to add new API formats:
 
-- **OpenAI models** (gpt-*, o1, o3-*): Use the standard OpenAI chat completions API
-- **Anthropic models** (anthropic--claude-*): 
-  - Newer models (claude-4.x, claude-3.7): Use Converse Stream API with caching
-  - Older models (claude-3.x): Use Invoke API
-- **Gemini models** (gemini-*): Use Gemini's native generateContent API
+1. Create a new router in `src/routers/` (e.g. `google-native.ts`)
+2. Mount it in `src/app.ts` with `app.use('/google', createGoogleRouter(...))`
+3. Optionally add a new provider in `src/providers/` if the backend format differs
+
+## Model Routing (OpenAI-Compatible Mode)
+
+In the OpenAI-compatible mode, the proxy automatically routes requests to the appropriate provider based on the model name:
+
+- **OpenAI models** (gpt-\*, o1, o3-\*): Standard OpenAI chat completions API
+- **Anthropic models** (anthropic--claude-\*):
+  - Newer models (claude-4.x, claude-3.7, claude-3.5): Converse Stream API with prompt caching
+  - Older models (claude-3-\*): Invoke API
+- **Gemini models** (gemini-\*): Gemini native generateContent API
 
 ## Environment Variables
 
@@ -271,7 +314,7 @@ The proxy automatically routes requests to the appropriate handler based on the 
 | `SAP_AI_CORE_TOKEN_URL` | Yes | - | OAuth token URL |
 | `SAP_AI_CORE_BASE_URL` | Yes | - | SAP AI Core API base URL |
 | `SAP_AI_CORE_RESOURCE_GROUP` | No | `default` | Resource group |
-| `PORT` | No | `3000` | Server port |
+| `PORT` | No | `3001` | Server port |
 | `LOG_LEVEL` | No | `info` | Log level (debug, info, warn, error) |
 
 ## License

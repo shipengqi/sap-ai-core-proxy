@@ -1,8 +1,6 @@
 import dotenv from 'dotenv';
 import { loadConfig } from './config';
 import { createApp } from './app';
-import { DeploymentManager } from './sap-ai-core/deployments';
-import { AuthManager } from './sap-ai-core/auth';
 import { logger } from './logger';
 
 // Load environment variables
@@ -10,19 +8,16 @@ dotenv.config();
 
 /**
  * SAP AI Core LLM Proxy - Entry Point
- * Provides OpenAI-compatible API endpoints backed by SAP AI Core
+ * Provides OpenAI-compatible and Anthropic-native API endpoints backed by SAP AI Core
  */
 async function main(): Promise<void> {
   // Load and validate configuration
   const config = loadConfig();
 
   // Create Express app with all routes
-  const app = createApp(config);
+  const { app, deploymentManager } = createApp(config);
 
   // Pre-fetch deployments
-  const authManager = new AuthManager(config.credentials);
-  const deploymentManager = new DeploymentManager(authManager);
-
   try {
     logger.info('Fetching available deployments...');
     const deployments = await deploymentManager.getDeployments();
@@ -38,10 +33,13 @@ async function main(): Promise<void> {
     logger.info(`SAP AI Core Proxy listening on 0.0.0.0:${config.port}`);
     logger.info('Endpoints:');
     logger.info(`  GET  /health - Health check`);
-    logger.info(`  GET  /v1/models - List available models`);
-    logger.info(`  POST /v1/chat/completions - Chat completion`);
-    logger.info(`  POST /v1/messages - Anthropic Messages API (Claude Code)`);
-    logger.info(`  POST /v1/messages/count_tokens - Anthropic token counting (Claude Code)`);
+    logger.info('  --- OpenAI Compatible ---');
+    logger.info(`  GET  /openai-compatible/v1/models - List available models`);
+    logger.info(`  POST /openai-compatible/v1/chat/completions - Chat completion`);
+    logger.info('  --- Anthropic Native ---');
+    logger.info(`  POST /anthropic/v1/messages - Anthropic Messages API`);
+    logger.info(`  POST /anthropic/v1/messages/count_tokens - Token counting`);
+    logger.info('  --- Admin ---');
     logger.info(`  POST /admin/refresh-deployments - Refresh deployments cache`);
   });
 }

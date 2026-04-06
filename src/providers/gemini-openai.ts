@@ -9,6 +9,7 @@ import {
   OpenAIChatCompletionChunk,
   OpenAIMessage
 } from '../types/openai';
+import { extractTextContent, setSSEHeaders, extractErrorDetails, sendOpenAIError } from '../utils';
 import { logger } from '../logger';
 
 /**
@@ -54,26 +55,6 @@ export class GeminiProvider {
   }
 
   /**
-   * Extracts text content from OpenAI message content field
-   * Handles both string and array formats
-   */
-  private extractTextContent(content: string | null | undefined | Array<{ type: string; text?: string }>): string {
-    if (!content) {
-      return '';
-    }
-    if (typeof content === 'string') {
-      return content;
-    }
-    if (Array.isArray(content)) {
-      return content
-        .filter((item) => item.type === 'text' && item.text)
-        .map((item) => item.text)
-        .join('');
-    }
-    return String(content);
-  }
-
-  /**
    * Converts OpenAI messages to Gemini format
    */
   private convertMessages(messages: OpenAIMessage[]): {
@@ -84,8 +65,7 @@ export class GeminiProvider {
     const contents: Array<{ role: string; parts: Array<{ text: string }> }> = [];
 
     for (const msg of messages) {
-      // Extract text content (handle both string and array formats)
-      const textContent = this.extractTextContent(msg.content as string | null | Array<{ type: string; text?: string }>);
+      const textContent = extractTextContent(msg.content as string | null | Array<{ type: string; text?: string }>);
 
       if (msg.role === 'system') {
         // Collect system messages
@@ -190,11 +170,7 @@ export class GeminiProvider {
     res: Response,
     model: string
   ): Promise<void> {
-    // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
+    setSSEHeaders(res);
 
     const completionId = `chatcmpl-${uuidv4()}`;
     const created = Math.floor(Date.now() / 1000);
@@ -441,57 +417,11 @@ export class GeminiProvider {
    * Handles errors
    */
   private handleError(error: unknown, res: Response): void {
-    const axiosError = error as {
-      response?: { status?: number; data?: unknown };
-      message?: string;
-      config?: { url?: string };
-    };
-
-    logger.error('Gemini handler error:', axiosError.message);
-    if (axiosError.response?.data) {
-      logger.error('  Response data:', axiosError.response.data);
-    }
-
-    const statusCode = axiosError.response?.status || 500;
-
-    // Extract error message
-    let errorMessage = 'Internal server error';
-    const responseData = axiosError.response?.data;
-
-    if (responseData) {
-      if (typeof responseData === 'string') {
-        errorMessage = responseData;
-      } else if (typeof responseData === 'object') {
-        const data = responseData as Record<string, unknown>;
-        // Handle various error formats
-        if (data.error && typeof data.error === 'object') {
-          const err = data.error as Record<string, unknown>;
-          errorMessage = (err.message as string) || JSON.stringify(data.error);
-        } else if (data.errors && typeof data.errors === 'object') {
-          const errors = data.errors as Record<string, unknown>;
-          errorMessage = (errors.message as string) || JSON.stringify(data.errors);
-        } else if (data.message) {
-          errorMessage = data.message as string;
-        } else {
-          errorMessage = JSON.stringify(responseData);
-        }
-      }
-    } else if (axiosError.message) {
-      errorMessage = axiosError.message;
-    }
-
-    // Add helpful context for common errors
-    if (statusCode === 429) {
-      errorMessage = `Rate limit exceeded: ${errorMessage}. Please wait and try again later.`;
-    }
-
-    res.status(statusCode).json({
-      error: {
-        message: errorMessage,
-        type: statusCode === 429 ? 'rate_limit_error' : 'api_error',
-        param: null,
-        code: statusCode.toString(),
-      },
-    });
+    const { statusCode, message } = extractErrorDetails(error);
+    const type = statusCode === 429 ? 'rate_limit_error' : 'api_error';
+    const errorMessage = statusCode === 429
+      ? `Rate limit exceeded: ${message}. Please wait and try again later.`
+      : message;
+    sendOpenAIError(res, statusCode, errorMessage, type);
   }
 }

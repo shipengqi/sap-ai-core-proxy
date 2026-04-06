@@ -15,6 +15,14 @@ import {
   AnthropicToolChoice,
   AnthropicCountTokensResponse,
 } from '../types/anthropic';
+import {
+  convertPythonJsonToStandardJson,
+  setSSEHeaders,
+  sendSSEEvent,
+  extractErrorDetails,
+  sendAnthropicError,
+  useConverseApi,
+} from '../utils';
 import { logger } from '../logger';
 
 /**
@@ -55,20 +63,6 @@ export class AnthropicNativeProvider {
   private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
 
-  // Models that use the converse-stream endpoint (newer Claude models)
-  private readonly converseStreamModels = [
-    'anthropic--claude-4.6-opus',
-    'anthropic--claude-4.6-sonnet',
-    'anthropic--claude-4.5-sonnet',
-    'anthropic--claude-4.5-opus',
-    'anthropic--claude-4.5-haiku',
-    'anthropic--claude-4-sonnet',
-    'anthropic--claude-4-opus',
-    'anthropic--claude-3.7-sonnet',
-    'anthropic--claude-3.5-sonnet',
-    'anthropic--claude-3.5-haiku',
-  ];
-
   constructor(authManager: AuthManager, deploymentManager: DeploymentManager) {
     this.authManager = authManager;
     this.deploymentManager = deploymentManager;
@@ -96,16 +90,6 @@ export class AnthropicNativeProvider {
     // Return as-is if no mapping found - let deployment manager handle it
     logger.warn(`No SAP AI Core mapping found for model: ${model}, using as-is`);
     return model;
-  }
-
-  /**
-   * Determines if a SAP AI Core model should use the Converse API
-   */
-  private useConverseApi(sapModelName: string): boolean {
-    return this.converseStreamModels.some(m =>
-      sapModelName.toLowerCase().includes(m.toLowerCase()) ||
-      m.toLowerCase().includes(sapModelName.toLowerCase())
-    );
   }
 
   /**
@@ -354,7 +338,7 @@ export class AnthropicNativeProvider {
       const baseUrl = this.authManager.getBaseUrl();
       const headers = await this.authManager.buildHeaders();
 
-      const useConverse = this.useConverseApi(sapModelName);
+      const useConverse = useConverseApi(sapModelName);
       const payload = this.buildConversePayload(anthropicReq);
 
       if (anthropicReq.stream) {
@@ -499,11 +483,8 @@ export class AnthropicNativeProvider {
     res.json(anthropicResponse);
   }
 
-  /**
-   * Sends a single Anthropic SSE event
-   */
   private sendAnthropicEvent(res: Response, eventType: string, data: unknown): void {
-    res.write(`event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`);
+    sendSSEEvent(res, eventType, data);
   }
 
   /**
@@ -545,10 +526,7 @@ export class AnthropicNativeProvider {
       }
 
       // Set Anthropic SSE headers
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
+      setSSEHeaders(res);
 
       let inputTokens = 0;
       let outputTokens = 0;
@@ -587,7 +565,7 @@ export class AnthropicNativeProvider {
           if (line.trim() === '') continue;
 
           let jsonStr = line.startsWith('data: ') ? line.slice(6) : line;
-          jsonStr = this.convertPythonJsonToStandardJson(jsonStr);
+          jsonStr = convertPythonJsonToStandardJson(jsonStr);
 
           try {
             const data = JSON.parse(jsonStr) as Record<string, unknown>;
@@ -795,10 +773,7 @@ export class AnthropicNativeProvider {
         return;
       }
 
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
+      setSSEHeaders(res);
 
       let buffer = '';
       let inputTokens = 0;
@@ -972,89 +947,10 @@ export class AnthropicNativeProvider {
   }
 
   /**
-   * Converts Python-style single-quoted JSON to standard double-quoted JSON.
-   * SAP AI Core may return single-quoted JSON in streaming responses.
-   */
-  private convertPythonJsonToStandardJson(jsonStr: string): string {
-    let result = '';
-    let inString = false;
-    let stringChar = '';
-
-    for (let i = 0; i < jsonStr.length; i++) {
-      const char = jsonStr[i];
-      const prevChar = i > 0 ? jsonStr[i - 1] : '';
-
-      if (!inString) {
-        if (char === "'" || char === '"') {
-          inString = true;
-          stringChar = char;
-          result += '"';
-        } else {
-          result += char;
-        }
-      } else {
-        if (char === stringChar && prevChar !== '\\') {
-          inString = false;
-          result += '"';
-        } else if (char === '"' && stringChar === "'") {
-          result += '\\"';
-        } else {
-          result += char;
-        }
-      }
-    }
-
-    return result;
-  }
-
-  /**
    * Handles errors and sends appropriate Anthropic-format error responses
    */
   private handleError(error: unknown, res: Response): void {
-    const axiosError = error as {
-      response?: { status?: number; data?: unknown };
-      message?: string;
-      config?: { url?: string };
-    };
-
-    logger.error('AnthropicMessagesHandler error:', {
-      message: axiosError.message,
-      status: axiosError.response?.status,
-      url: axiosError.config?.url,
-    });
-
-    const statusCode = axiosError.response?.status || 500;
-
-    let errorMessage = 'Internal server error';
-    const responseData = axiosError.response?.data;
-
-    if (responseData) {
-      if (typeof responseData === 'string') {
-        errorMessage = responseData;
-      } else if (typeof responseData === 'object') {
-        const data = responseData as Record<string, unknown>;
-        if (data.errors && typeof data.errors === 'object') {
-          const errors = data.errors as Record<string, unknown>;
-          errorMessage = (errors.message as string) || JSON.stringify(data.errors);
-        } else if (data.error && typeof data.error === 'object') {
-          const err = data.error as Record<string, unknown>;
-          errorMessage = (err.message as string) || JSON.stringify(data.error);
-        } else if (data.message) {
-          errorMessage = data.message as string;
-        } else {
-          errorMessage = JSON.stringify(responseData);
-        }
-      }
-    } else if (axiosError.message) {
-      errorMessage = axiosError.message;
-    }
-
-    res.status(statusCode).json({
-      type: 'error',
-      error: {
-        type: 'api_error',
-        message: errorMessage,
-      },
-    });
+    const { statusCode, message } = extractErrorDetails(error);
+    sendAnthropicError(res, statusCode, message);
   }
 }

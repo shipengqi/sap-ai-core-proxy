@@ -9,6 +9,7 @@ import {
   OpenAIChatCompletionChunk,
   OpenAIMessage
 } from '../types/openai';
+import { setSSEHeaders, extractErrorDetails, sendOpenAIError } from '../utils';
 import { logger } from '../logger';
 
 /**
@@ -127,11 +128,7 @@ export class OpenAIProvider {
     res: Response,
     model: string
   ): Promise<void> {
-    // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
+    setSSEHeaders(res);
 
     const completionId = `chatcmpl-${uuidv4()}`;
     const created = Math.floor(Date.now() / 1000);
@@ -243,25 +240,7 @@ export class OpenAIProvider {
    * Handles errors
    */
   private handleError(error: unknown, res: Response): void {
-    const axiosError = error as {
-      response?: { status?: number; data?: unknown };
-      message?: string
-    };
-
-    logger.error('OpenAI handler error:', axiosError.message);
-
-    const statusCode = axiosError.response?.status || 500;
-    const errorMessage = typeof axiosError.response?.data === 'object'
-      ? JSON.stringify(axiosError.response.data)
-      : axiosError.message || 'Internal server error';
-
-    res.status(statusCode).json({
-      error: {
-        message: errorMessage,
-        type: 'api_error',
-        param: null,
-        code: statusCode.toString(),
-      },
-    });
+    const { statusCode, message } = extractErrorDetails(error);
+    sendOpenAIError(res, statusCode, message);
   }
 }
