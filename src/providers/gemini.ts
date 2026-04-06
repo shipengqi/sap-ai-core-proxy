@@ -1,21 +1,21 @@
 import { Response } from 'express';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthManager } from '../auth';
-import { DeploymentManager } from '../deployments';
-import { 
-  OpenAIChatCompletionRequest, 
+import { AuthManager } from '../sap-ai-core/auth';
+import { DeploymentManager } from '../sap-ai-core/deployments';
+import {
+  OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
   OpenAIChatCompletionChunk,
-  OpenAIMessage 
-} from '../types';
+  OpenAIMessage
+} from '../types/openai';
 import { logger } from '../logger';
 
 /**
  * Handles Gemini model requests via SAP AI Core
  * Converts OpenAI format to Gemini format and back
  */
-export class GeminiHandler {
+export class GeminiProvider {
   private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
 
@@ -76,7 +76,7 @@ export class GeminiHandler {
   /**
    * Converts OpenAI messages to Gemini format
    */
-  private convertMessages(messages: OpenAIMessage[]): { 
+  private convertMessages(messages: OpenAIMessage[]): {
     systemInstruction?: { parts: Array<{ text: string }> };
     contents: Array<{ role: string; parts: Array<{ text: string }> }>;
   } {
@@ -86,7 +86,7 @@ export class GeminiHandler {
     for (const msg of messages) {
       // Extract text content (handle both string and array formats)
       const textContent = this.extractTextContent(msg.content as string | null | Array<{ type: string; text?: string }>);
-      
+
       if (msg.role === 'system') {
         // Collect system messages
         if (!systemInstruction) {
@@ -136,7 +136,7 @@ export class GeminiHandler {
     }
 
     if (req.stop !== undefined) {
-      (payload.generationConfig as Record<string, unknown>).stopSequences = 
+      (payload.generationConfig as Record<string, unknown>).stopSequences =
         Array.isArray(req.stop) ? req.stop : [req.stop];
     }
 
@@ -160,7 +160,7 @@ export class GeminiHandler {
     // Convert Gemini response to OpenAI format
     const content = this.extractContent(response.data);
     const usage = this.extractUsage(response.data);
-    
+
     const openaiResponse: OpenAIChatCompletionResponse = {
       id: `chatcmpl-${uuidv4()}`,
       object: 'chat.completion',
@@ -307,7 +307,7 @@ export class GeminiHandler {
     } catch (error: unknown) {
       const axiosError = error as { response?: { data?: unknown }; message?: string };
       logger.error('Gemini streaming request failed:', axiosError.message);
-      
+
       const errorChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: 'chat.completion.chunk',
@@ -422,9 +422,9 @@ export class GeminiHandler {
   private mapFinishReason(data: Record<string, unknown>): 'stop' | 'length' | 'function_call' | 'tool_calls' | 'content_filter' | null {
     const candidates = data.candidates as Array<{ finishReason?: string }> | undefined;
     const finishReason = candidates?.[0]?.finishReason;
-    
+
     if (!finishReason) return null;
-    
+
     switch (finishReason) {
       case 'STOP':
         return 'stop';
@@ -441,8 +441,8 @@ export class GeminiHandler {
    * Handles errors
    */
   private handleError(error: unknown, res: Response): void {
-    const axiosError = error as { 
-      response?: { status?: number; data?: unknown }; 
+    const axiosError = error as {
+      response?: { status?: number; data?: unknown };
       message?: string;
       config?: { url?: string };
     };
@@ -453,11 +453,11 @@ export class GeminiHandler {
     }
 
     const statusCode = axiosError.response?.status || 500;
-    
+
     // Extract error message
     let errorMessage = 'Internal server error';
     const responseData = axiosError.response?.data;
-    
+
     if (responseData) {
       if (typeof responseData === 'string') {
         errorMessage = responseData;

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/Code/sap-ai-core-proxy/src/*.ts /c/Code/sap-ai-core-proxy/src/handlers/*.ts)",
+      "Bash(npx tsc:*)",
+      "Bash(rm src/auth.ts src/deployments.ts src/types.ts)",
+      "Bash(rm -rf src/handlers)",
+      "Bash(npm run:*)",
+      "Bash(wc -l src/**/*.ts)",
+      "mcp__plugin_ecc_sequential-thinking__sequentialthinking",
+      "Read(//c/Users/pooky/.claude/plans//**)",
+      "Read(//c/Users/pooky/.claude//**)"
+    ]
+  }
+}

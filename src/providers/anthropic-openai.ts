@@ -1,21 +1,21 @@
 import { Response } from 'express';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthManager } from '../auth';
-import { DeploymentManager } from '../deployments';
-import { 
-  OpenAIChatCompletionRequest, 
+import { AuthManager } from '../sap-ai-core/auth';
+import { DeploymentManager } from '../sap-ai-core/deployments';
+import {
+  OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
   OpenAIChatCompletionChunk,
-  OpenAIMessage 
-} from '../types';
+  OpenAIMessage
+} from '../types/openai';
 import { logger } from '../logger';
 
 /**
  * Handles Anthropic/Claude model requests via SAP AI Core
- * Converts OpenAI format to Anthropic format and back
+ * Accepts OpenAI format input, converts to Anthropic format and back
  */
-export class AnthropicHandler {
+export class AnthropicOpenAIProvider {
   private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
 
@@ -48,7 +48,7 @@ export class AnthropicHandler {
       const headers = await this.authManager.buildHeaders();
 
       // Check if this model uses the converse-stream endpoint
-      const useConverseStream = this.converseStreamModels.some(m => 
+      const useConverseStream = this.converseStreamModels.some(m =>
         model.toLowerCase().includes(m.toLowerCase()) || m.toLowerCase().includes(model.toLowerCase())
       );
 
@@ -98,9 +98,9 @@ export class AnthropicHandler {
   /**
    * Converts OpenAI messages to Anthropic format
    */
-  private convertMessages(messages: OpenAIMessage[]): { 
-    systemPrompt: string; 
-    anthropicMessages: Array<{ role: string; content: string }> 
+  private convertMessages(messages: OpenAIMessage[]): {
+    systemPrompt: string;
+    anthropicMessages: Array<{ role: string; content: string }>
   } {
     let systemPrompt = '';
     const anthropicMessages: Array<{ role: string; content: string }> = [];
@@ -191,7 +191,7 @@ export class AnthropicHandler {
     for (const msg of messages) {
       // Extract text content (handle both string and array formats)
       const textContent = this.extractTextContent(msg.content as string | null | Array<{ type: string; text?: string }>);
-      
+
       if (msg.role === 'system') {
         // Concatenate system messages
         if (textContent) {
@@ -261,7 +261,7 @@ export class AnthropicHandler {
     // Extract content from Converse response
     const output = response.data.output;
     const content = output?.message?.content?.[0]?.text || '';
-    
+
     const openaiResponse: OpenAIChatCompletionResponse = {
       id: response.data.id || `chatcmpl-${uuidv4()}`,
       object: 'chat.completion',
@@ -313,11 +313,11 @@ export class AnthropicHandler {
         for await (const chunk of response.data) {
           errorBody += chunk.toString('utf-8');
         }
-        
+
         logger.error('Converse streaming request error response:');
         logger.error('  Status: ' + response.status);
         logger.error('  Body: ' + errorBody);
-        
+
         // Parse error message
         let errorMessage = 'Request failed';
         try {
@@ -334,7 +334,7 @@ export class AnthropicHandler {
         } catch {
           errorMessage = errorBody || 'Unknown error';
         }
-        
+
         res.status(response.status).json({
           error: {
             message: errorMessage,
@@ -361,14 +361,14 @@ export class AnthropicHandler {
       response.data.on('data', (chunk: Buffer) => {
         const chunkStr = chunk.toString('utf-8');
         logger.debug('Received raw chunk (' + chunkStr.length + ' chars)');
-        
+
         buffer += chunkStr;
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
         for (const line of lines) {
           if (line.trim() === '') continue;
-          
+
           logger.debug('Processing line: ' + line.substring(0, 200));
 
           // Try to parse as SSE format first (data: {...})
@@ -431,18 +431,18 @@ export class AnthropicHandler {
       });
 
     } catch (error: unknown) {
-      const axiosError = error as { 
-        response?: { status?: number; data?: unknown }; 
+      const axiosError = error as {
+        response?: { status?: number; data?: unknown };
         message?: string;
         config?: { url?: string };
       };
-      
+
       // Log detailed error information
       logger.error('Converse streaming request failed:');
       logger.error('  Message: ' + (axiosError.message || 'Unknown'));
       logger.error('  Status: ' + (axiosError.response?.status || 'N/A'));
       logger.error('  URL: ' + (axiosError.config?.url || 'N/A'));
-      
+
       // Safely stringify response data
       let responseDataStr = 'N/A';
       try {
@@ -459,7 +459,7 @@ export class AnthropicHandler {
         responseDataStr = 'Unable to stringify response data';
       }
       logger.error('  Response Data: ' + responseDataStr);
-      
+
       // Extract error message
       let errorMessage = axiosError.message || 'Unknown error';
       const responseData = axiosError.response?.data;
@@ -485,7 +485,7 @@ export class AnthropicHandler {
         });
         return;
       }
-      
+
       const errorChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: 'chat.completion.chunk',
@@ -520,7 +520,7 @@ export class AnthropicHandler {
       const usageData = metadata.usage as Record<string, number>;
       usage.inputTokens = usageData.inputTokens || 0;
       usage.outputTokens = usageData.outputTokens || 0;
-      
+
       // Include cached tokens
       const cacheReadInputTokens = usageData.cacheReadInputTokens || 0;
       const cacheWriteInputTokens = usageData.cacheWriteInputTokens || 0;
@@ -531,7 +531,7 @@ export class AnthropicHandler {
     if (data.contentBlockDelta) {
       const delta = data.contentBlockDelta as Record<string, unknown>;
       const deltaContent = delta.delta as Record<string, unknown>;
-      
+
       if (deltaContent?.text) {
         const textChunk: OpenAIChatCompletionChunk = {
           id: completionId,
@@ -582,7 +582,7 @@ export class AnthropicHandler {
 
     // Convert Anthropic response to OpenAI format
     const content = this.extractContent(response.data);
-    
+
     const openaiResponse: OpenAIChatCompletionResponse = {
       id: response.data.id || `chatcmpl-${uuidv4()}`,
       object: 'chat.completion',
@@ -647,7 +647,7 @@ export class AnthropicHandler {
             try {
               const data = JSON.parse(line.slice(6));
               const chunks = this.processAnthropicStreamEvent(data, completionId, created, model);
-              
+
               for (const chunk of chunks) {
                 res.write(`data: ${JSON.stringify(chunk)}\n\n`);
               }
@@ -695,7 +695,7 @@ export class AnthropicHandler {
     } catch (error: unknown) {
       const axiosError = error as { response?: { data?: unknown }; message?: string };
       logger.error('Anthropic streaming request failed:', axiosError.message);
-      
+
       const errorChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: 'chat.completion.chunk',
@@ -802,11 +802,11 @@ export class AnthropicHandler {
     let result = '';
     let inString = false;
     let stringChar = '';
-    
+
     for (let i = 0; i < jsonStr.length; i++) {
       const char = jsonStr[i];
       const prevChar = i > 0 ? jsonStr[i - 1] : '';
-      
+
       if (!inString) {
         if (char === "'" || char === '"') {
           inString = true;
@@ -827,7 +827,7 @@ export class AnthropicHandler {
         }
       }
     }
-    
+
     return result;
   }
 
@@ -849,7 +849,7 @@ export class AnthropicHandler {
    */
   private mapStopReason(stopReason: string | undefined): 'stop' | 'length' | 'function_call' | 'tool_calls' | 'content_filter' | null {
     if (!stopReason) return null;
-    
+
     switch (stopReason) {
       case 'end_turn':
       case 'stop_sequence':
@@ -867,8 +867,8 @@ export class AnthropicHandler {
    * Handles errors
    */
   private handleError(error: unknown, res: Response): void {
-    const axiosError = error as { 
-      response?: { status?: number; data?: unknown; headers?: Record<string, string> }; 
+    const axiosError = error as {
+      response?: { status?: number; data?: unknown; headers?: Record<string, string> };
       message?: string;
       config?: { url?: string; method?: string };
     };
@@ -883,11 +883,11 @@ export class AnthropicHandler {
     });
 
     const statusCode = axiosError.response?.status || 500;
-    
+
     // Extract error message from various response formats
     let errorMessage = 'Internal server error';
     const responseData = axiosError.response?.data;
-    
+
     if (responseData) {
       if (typeof responseData === 'string') {
         errorMessage = responseData;
@@ -897,7 +897,7 @@ export class AnthropicHandler {
         if (data.errors && typeof data.errors === 'object') {
           const errors = data.errors as Record<string, unknown>;
           errorMessage = (errors.message as string) || JSON.stringify(data.errors);
-        } 
+        }
         // Handle standard error format: { error: { message: string } }
         else if (data.error && typeof data.error === 'object') {
           const err = data.error as Record<string, unknown>;

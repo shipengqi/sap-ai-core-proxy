@@ -1,8 +1,8 @@
 import { Request, Response } from 'express';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthManager } from '../auth';
-import { DeploymentManager } from '../deployments';
+import { AuthManager } from '../sap-ai-core/auth';
+import { DeploymentManager } from '../sap-ai-core/deployments';
 import {
   AnthropicMessagesRequest,
   AnthropicMessagesResponse,
@@ -14,7 +14,7 @@ import {
   AnthropicTool,
   AnthropicToolChoice,
   AnthropicCountTokensResponse,
-} from '../types';
+} from '../types/anthropic';
 import { logger } from '../logger';
 
 /**
@@ -51,7 +51,7 @@ const ANTHROPIC_TO_SAP_MODEL_MAP: Record<string, string> = {
  * Handles native Anthropic Messages API requests (/v1/messages).
  * Enables Claude Code CLI and Claude Code VSCode extension to work with SAP AI Core.
  */
-export class AnthropicMessagesHandler {
+export class AnthropicNativeProvider {
   private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
 
