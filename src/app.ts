@@ -61,7 +61,7 @@ function setupMiddleware(app: express.Application): void {
   // CORS headers - include all headers Claude Code CLI/VSCode extension may send
   app.use((_req: Request, res: Response, next: NextFunction) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', [
       'Content-Type',
       'Authorization',

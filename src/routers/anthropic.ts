@@ -97,6 +97,14 @@ export function createAnthropicRouter(
 ): Router {
   const router = Router();
 
+  // Health-check / connectivity probe (Claude Code sends HEAD /anthropic)
+  router.head('/', (_req: Request, res: Response) => {
+    res.status(200).end();
+  });
+  router.get('/', (_req: Request, res: Response) => {
+    res.json({ provider: 'anthropic', status: 'ok' });
+  });
+
   // Anthropic Messages API
   router.post('/v1/messages', anthropicNativeProvider.handleMessages.bind(anthropicNativeProvider));
   router.post('/v1/messages/count_tokens', anthropicNativeProvider.handleCountTokens.bind(anthropicNativeProvider));
