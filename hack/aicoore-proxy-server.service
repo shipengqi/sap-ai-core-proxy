@@ -1,0 +1,18 @@
+[Unit]
+Description=SAP AI Core Proxy Server
+After=network.target
+
+[Service]
+User=pooky
+Group=pooky
+WorkingDirectory=/home/pooky/code/sap-ai-core-proxy
+ExecStart=/home/pooky/.nvm/versions/node/v25.9.0/bin/node /home/pooky/code/sap-ai-core-proxy/dist/index.js
+Environment=NODE_ENV=production
+Environment=PATH=/home/pooky/.nvm/versions/node/v25.9.0/bin:/usr/bin:/bin
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
