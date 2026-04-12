@@ -1,21 +1,29 @@
 import { Response } from 'express';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthManager } from '../auth';
-import { DeploymentManager } from '../deployments';
-import { 
-  OpenAIChatCompletionRequest, 
+import { AuthManager } from '../sap-ai-core/auth';
+import { DeploymentManager } from '../sap-ai-core/deployments';
+import {
+  OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
   OpenAIChatCompletionChunk,
-  OpenAIMessage 
-} from '../types';
+  OpenAIMessage
+} from '../types/openai';
+import {
+  convertPythonJsonToStandardJson,
+  extractTextContent,
+  setSSEHeaders,
+  extractErrorDetails,
+  sendOpenAIError,
+  CONVERSE_STREAM_MODELS,
+} from '../utils';
 import { logger } from '../logger';
 
 /**
  * Handles Anthropic/Claude model requests via SAP AI Core
- * Converts OpenAI format to Anthropic format and back
+ * Accepts OpenAI format input, converts to Anthropic format and back
  */
-export class AnthropicHandler {
+export class AnthropicOpenAIProvider {
   private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
 
@@ -23,18 +31,6 @@ export class AnthropicHandler {
     this.authManager = authManager;
     this.deploymentManager = deploymentManager;
   }
-
-  // Models that use the converse-stream endpoint
-  private readonly converseStreamModels = [
-    'anthropic--claude-4.6-opus',
-    'anthropic--claude-4.6-sonnet',
-    'anthropic--claude-4.5-sonnet',
-    'anthropic--claude-4.5-opus',
-    'anthropic--claude-4.5-haiku',
-    'anthropic--claude-4-sonnet',
-    'anthropic--claude-4-opus',
-    'anthropic--claude-3.7-sonnet',
-  ];
 
   /**
    * Handles chat completion request for Anthropic models
@@ -48,7 +44,7 @@ export class AnthropicHandler {
       const headers = await this.authManager.buildHeaders();
 
       // Check if this model uses the converse-stream endpoint
-      const useConverseStream = this.converseStreamModels.some(m => 
+      const useConverseStream = CONVERSE_STREAM_MODELS.some(m =>
         model.toLowerCase().includes(m.toLowerCase()) || m.toLowerCase().includes(model.toLowerCase())
       );
 
@@ -98,9 +94,9 @@ export class AnthropicHandler {
   /**
    * Converts OpenAI messages to Anthropic format
    */
-  private convertMessages(messages: OpenAIMessage[]): { 
-    systemPrompt: string; 
-    anthropicMessages: Array<{ role: string; content: string }> 
+  private convertMessages(messages: OpenAIMessage[]): {
+    systemPrompt: string;
+    anthropicMessages: Array<{ role: string; content: string }>
   } {
     let systemPrompt = '';
     const anthropicMessages: Array<{ role: string; content: string }> = [];
@@ -151,26 +147,6 @@ export class AnthropicHandler {
   }
 
   /**
-   * Extracts text content from OpenAI message content field
-   * Handles both string and array formats
-   */
-  private extractTextContent(content: string | null | undefined | Array<{ type: string; text?: string }>): string {
-    if (!content) {
-      return '';
-    }
-    if (typeof content === 'string') {
-      return content;
-    }
-    if (Array.isArray(content)) {
-      return content
-        .filter((item) => item.type === 'text' && item.text)
-        .map((item) => item.text)
-        .join('');
-    }
-    return String(content);
-  }
-
-  /**
    * Builds the payload for Converse API (newer Claude models)
    * Uses AWS Bedrock Converse API format
    */
@@ -190,8 +166,8 @@ export class AnthropicHandler {
 
     for (const msg of messages) {
       // Extract text content (handle both string and array formats)
-      const textContent = this.extractTextContent(msg.content as string | null | Array<{ type: string; text?: string }>);
-      
+      const textContent = extractTextContent(msg.content as string | null | Array<{ type: string; text?: string }>);
+
       if (msg.role === 'system') {
         // Concatenate system messages
         if (textContent) {
@@ -261,7 +237,7 @@ export class AnthropicHandler {
     // Extract content from Converse response
     const output = response.data.output;
     const content = output?.message?.content?.[0]?.text || '';
-    
+
     const openaiResponse: OpenAIChatCompletionResponse = {
       id: response.data.id || `chatcmpl-${uuidv4()}`,
       object: 'chat.completion',
@@ -313,11 +289,11 @@ export class AnthropicHandler {
         for await (const chunk of response.data) {
           errorBody += chunk.toString('utf-8');
         }
-        
+
         logger.error('Converse streaming request error response:');
         logger.error('  Status: ' + response.status);
         logger.error('  Body: ' + errorBody);
-        
+
         // Parse error message
         let errorMessage = 'Request failed';
         try {
@@ -334,7 +310,7 @@ export class AnthropicHandler {
         } catch {
           errorMessage = errorBody || 'Unknown error';
         }
-        
+
         res.status(response.status).json({
           error: {
             message: errorMessage,
@@ -347,10 +323,7 @@ export class AnthropicHandler {
       }
 
       // Set SSE headers only after successful connection
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
+      setSSEHeaders(res);
 
       let buffer = '';
       let inputTokens = 0;
@@ -361,14 +334,14 @@ export class AnthropicHandler {
       response.data.on('data', (chunk: Buffer) => {
         const chunkStr = chunk.toString('utf-8');
         logger.debug('Received raw chunk (' + chunkStr.length + ' chars)');
-        
+
         buffer += chunkStr;
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
 
         for (const line of lines) {
           if (line.trim() === '') continue;
-          
+
           logger.debug('Processing line: ' + line.substring(0, 200));
 
           // Try to parse as SSE format first (data: {...})
@@ -377,7 +350,7 @@ export class AnthropicHandler {
               let jsonStr = line.slice(6);
               // SAP AI Core may return single-quoted JSON (Python style)
               // Convert to standard double-quoted JSON
-              jsonStr = this.convertPythonJsonToStandardJson(jsonStr);
+              jsonStr = convertPythonJsonToStandardJson(jsonStr);
               const data = JSON.parse(jsonStr);
               logger.debug('Parsed SSE data: ' + JSON.stringify(data).substring(0, 100));
               this.processConverseStreamData(data, completionId, created, model, res, { inputTokens, outputTokens });
@@ -388,7 +361,7 @@ export class AnthropicHandler {
             // Try to parse as raw JSON (SAP AI Core may send raw JSON lines)
             try {
               let jsonStr = line;
-              jsonStr = this.convertPythonJsonToStandardJson(jsonStr);
+              jsonStr = convertPythonJsonToStandardJson(jsonStr);
               const data = JSON.parse(jsonStr);
               logger.debug('Parsed raw JSON data');
               this.processConverseStreamData(data, completionId, created, model, res, { inputTokens, outputTokens });
@@ -431,18 +404,18 @@ export class AnthropicHandler {
       });
 
     } catch (error: unknown) {
-      const axiosError = error as { 
-        response?: { status?: number; data?: unknown }; 
+      const axiosError = error as {
+        response?: { status?: number; data?: unknown };
         message?: string;
         config?: { url?: string };
       };
-      
+
       // Log detailed error information
       logger.error('Converse streaming request failed:');
       logger.error('  Message: ' + (axiosError.message || 'Unknown'));
       logger.error('  Status: ' + (axiosError.response?.status || 'N/A'));
       logger.error('  URL: ' + (axiosError.config?.url || 'N/A'));
-      
+
       // Safely stringify response data
       let responseDataStr = 'N/A';
       try {
@@ -459,7 +432,7 @@ export class AnthropicHandler {
         responseDataStr = 'Unable to stringify response data';
       }
       logger.error('  Response Data: ' + responseDataStr);
-      
+
       // Extract error message
       let errorMessage = axiosError.message || 'Unknown error';
       const responseData = axiosError.response?.data;
@@ -485,7 +458,7 @@ export class AnthropicHandler {
         });
         return;
       }
-      
+
       const errorChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: 'chat.completion.chunk',
@@ -520,7 +493,7 @@ export class AnthropicHandler {
       const usageData = metadata.usage as Record<string, number>;
       usage.inputTokens = usageData.inputTokens || 0;
       usage.outputTokens = usageData.outputTokens || 0;
-      
+
       // Include cached tokens
       const cacheReadInputTokens = usageData.cacheReadInputTokens || 0;
       const cacheWriteInputTokens = usageData.cacheWriteInputTokens || 0;
@@ -531,7 +504,7 @@ export class AnthropicHandler {
     if (data.contentBlockDelta) {
       const delta = data.contentBlockDelta as Record<string, unknown>;
       const deltaContent = delta.delta as Record<string, unknown>;
-      
+
       if (deltaContent?.text) {
         const textChunk: OpenAIChatCompletionChunk = {
           id: completionId,
@@ -582,7 +555,7 @@ export class AnthropicHandler {
 
     // Convert Anthropic response to OpenAI format
     const content = this.extractContent(response.data);
-    
+
     const openaiResponse: OpenAIChatCompletionResponse = {
       id: response.data.id || `chatcmpl-${uuidv4()}`,
       object: 'chat.completion',
@@ -617,10 +590,7 @@ export class AnthropicHandler {
     model: string
   ): Promise<void> {
     // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
+    setSSEHeaders(res);
 
     const completionId = `chatcmpl-${uuidv4()}`;
     const created = Math.floor(Date.now() / 1000);
@@ -647,7 +617,7 @@ export class AnthropicHandler {
             try {
               const data = JSON.parse(line.slice(6));
               const chunks = this.processAnthropicStreamEvent(data, completionId, created, model);
-              
+
               for (const chunk of chunks) {
                 res.write(`data: ${JSON.stringify(chunk)}\n\n`);
               }
@@ -695,7 +665,7 @@ export class AnthropicHandler {
     } catch (error: unknown) {
       const axiosError = error as { response?: { data?: unknown }; message?: string };
       logger.error('Anthropic streaming request failed:', axiosError.message);
-      
+
       const errorChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: 'chat.completion.chunk',
@@ -793,42 +763,11 @@ export class AnthropicHandler {
   }
 
   /**
-   * Converts Python-style JSON (single quotes) to standard JSON (double quotes)
-   * SAP AI Core may return single-quoted JSON in streaming responses
+   * Handles errors
    */
-  private convertPythonJsonToStandardJson(jsonStr: string): string {
-    // Replace single quotes with double quotes, but be careful about escaped quotes
-    // This is a simple conversion that works for most cases
-    let result = '';
-    let inString = false;
-    let stringChar = '';
-    
-    for (let i = 0; i < jsonStr.length; i++) {
-      const char = jsonStr[i];
-      const prevChar = i > 0 ? jsonStr[i - 1] : '';
-      
-      if (!inString) {
-        if (char === "'" || char === '"') {
-          inString = true;
-          stringChar = char;
-          result += '"'; // Always use double quotes
-        } else {
-          result += char;
-        }
-      } else {
-        if (char === stringChar && prevChar !== '\\') {
-          inString = false;
-          result += '"'; // Always use double quotes
-        } else if (char === '"' && stringChar === "'") {
-          // Escape double quotes inside single-quoted strings
-          result += '\\"';
-        } else {
-          result += char;
-        }
-      }
-    }
-    
-    return result;
+  private handleError(error: unknown, res: Response): void {
+    const { statusCode, message } = extractErrorDetails(error);
+    sendOpenAIError(res, statusCode, message);
   }
 
   /**
@@ -849,7 +788,7 @@ export class AnthropicHandler {
    */
   private mapStopReason(stopReason: string | undefined): 'stop' | 'length' | 'function_call' | 'tool_calls' | 'content_filter' | null {
     if (!stopReason) return null;
-    
+
     switch (stopReason) {
       case 'end_turn':
       case 'stop_sequence':
@@ -861,68 +800,5 @@ export class AnthropicHandler {
       default:
         return 'stop';
     }
-  }
-
-  /**
-   * Handles errors
-   */
-  private handleError(error: unknown, res: Response): void {
-    const axiosError = error as { 
-      response?: { status?: number; data?: unknown; headers?: Record<string, string> }; 
-      message?: string;
-      config?: { url?: string; method?: string };
-    };
-
-    // Log detailed error information
-    logger.error('Anthropic handler error:', {
-      message: axiosError.message,
-      status: axiosError.response?.status,
-      url: axiosError.config?.url,
-      method: axiosError.config?.method,
-      responseData: axiosError.response?.data,
-    });
-
-    const statusCode = axiosError.response?.status || 500;
-    
-    // Extract error message from various response formats
-    let errorMessage = 'Internal server error';
-    const responseData = axiosError.response?.data;
-    
-    if (responseData) {
-      if (typeof responseData === 'string') {
-        errorMessage = responseData;
-      } else if (typeof responseData === 'object') {
-        const data = responseData as Record<string, unknown>;
-        // Handle SAP AI Core error format: { errors: { message: string } }
-        if (data.errors && typeof data.errors === 'object') {
-          const errors = data.errors as Record<string, unknown>;
-          errorMessage = (errors.message as string) || JSON.stringify(data.errors);
-        } 
-        // Handle standard error format: { error: { message: string } }
-        else if (data.error && typeof data.error === 'object') {
-          const err = data.error as Record<string, unknown>;
-          errorMessage = (err.message as string) || JSON.stringify(data.error);
-        }
-        // Handle message field directly
-        else if (data.message) {
-          errorMessage = data.message as string;
-        }
-        // Fallback to stringify
-        else {
-          errorMessage = JSON.stringify(responseData);
-        }
-      }
-    } else if (axiosError.message) {
-      errorMessage = axiosError.message;
-    }
-
-    res.status(statusCode).json({
-      error: {
-        message: errorMessage,
-        type: 'api_error',
-        param: null,
-        code: statusCode.toString(),
-      },
-    });
   }
 }

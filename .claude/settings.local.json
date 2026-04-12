@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/Code/sap-ai-core-proxy/src/*.ts /c/Code/sap-ai-core-proxy/src/handlers/*.ts)",
+      "Bash(npx tsc:*)",
+      "Bash(rm src/auth.ts src/deployments.ts src/types.ts)",
+      "Bash(rm -rf src/handlers)",
+      "Bash(npm run:*)",
+      "Bash(wc -l src/**/*.ts)",
+      "mcp__plugin_ecc_sequential-thinking__sequentialthinking",
+      "Read(//c/Users/pooky/.claude/plans//**)",
+      "Read(//c/Users/pooky/.claude//**)",
+      "Bash(gh search:*)",
+      "mcp__plugin_ecc_exa__web_search_exa",
+      "mcp__plugin_ecc_exa__web_fetch_exa",
+      "mcp__plugin_ecc_github__get_file_contents",
+      "Bash(gh repo:*)",
+      "Bash(gh api:*)",
+      "Bash(du -sh ~/.claude/*/)",
+      "mcp__plugin_ecc_memory__read_graph",
+      "Bash(npm list:*)",
+      "Bash(npx -y @modelcontextprotocol/server-memory --help)",
+      "Bash(ls -la /home/pooky/.npm/_npx/f0415454dfb4e463/node_modules/@modelcontextprotocol/server-memory/dist/memory.json*)"
+    ]
+  }
+}

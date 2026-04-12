@@ -1,20 +1,21 @@
 import { Response } from 'express';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthManager } from '../auth';
-import { DeploymentManager } from '../deployments';
-import { 
-  OpenAIChatCompletionRequest, 
+import { AuthManager } from '../sap-ai-core/auth';
+import { DeploymentManager } from '../sap-ai-core/deployments';
+import {
+  OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
   OpenAIChatCompletionChunk,
-  OpenAIMessage 
-} from '../types';
+  OpenAIMessage
+} from '../types/openai';
+import { setSSEHeaders, extractErrorDetails, sendOpenAIError } from '../utils';
 import { logger } from '../logger';
 
 /**
  * Handles OpenAI-compatible model requests
  */
-export class OpenAIHandler {
+export class OpenAIProvider {
   private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
 
@@ -127,11 +128,7 @@ export class OpenAIHandler {
     res: Response,
     model: string
   ): Promise<void> {
-    // Set SSE headers
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
+    setSSEHeaders(res);
 
     const completionId = `chatcmpl-${uuidv4()}`;
     const created = Math.floor(Date.now() / 1000);
@@ -192,7 +189,7 @@ export class OpenAIHandler {
     } catch (error: unknown) {
       const axiosError = error as { response?: { data?: unknown }; message?: string };
       logger.error('Streaming request failed:', axiosError.message);
-      
+
       // Send error as SSE
       const errorChunk: OpenAIChatCompletionChunk = {
         id: completionId,
@@ -221,7 +218,7 @@ export class OpenAIHandler {
     model: string
   ): OpenAIChatCompletionChunk {
     const choices = (data.choices as Array<{ delta?: { content?: string; role?: string }; finish_reason?: string; index?: number }>) || [];
-    
+
     return {
       id: (data.id as string) || completionId,
       object: 'chat.completion.chunk',
@@ -243,25 +240,7 @@ export class OpenAIHandler {
    * Handles errors
    */
   private handleError(error: unknown, res: Response): void {
-    const axiosError = error as { 
-      response?: { status?: number; data?: unknown }; 
-      message?: string 
-    };
-
-    logger.error('OpenAI handler error:', axiosError.message);
-
-    const statusCode = axiosError.response?.status || 500;
-    const errorMessage = typeof axiosError.response?.data === 'object' 
-      ? JSON.stringify(axiosError.response.data)
-      : axiosError.message || 'Internal server error';
-
-    res.status(statusCode).json({
-      error: {
-        message: errorMessage,
-        type: 'api_error',
-        param: null,
-        code: statusCode.toString(),
-      },
-    });
+    const { statusCode, message } = extractErrorDetails(error);
+    sendOpenAIError(res, statusCode, message);
   }
 }

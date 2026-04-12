@@ -1,7 +1,8 @@
 import axios from 'axios';
 import { AuthManager } from './auth';
-import { Deployment, DeploymentsResponse, ModelProvider, ModelInfo } from './types';
-import { logger } from './logger';
+import { Deployment, DeploymentsResponse } from './types';
+import { ModelProvider, ModelInfo } from '../types/models';
+import { logger } from '../logger';
 
 /**
  * Model information mapping
@@ -20,7 +21,7 @@ const MODEL_INFO: Record<string, ModelInfo> = {
   'o3-mini': { provider: 'openai', maxTokens: 100000, contextWindow: 200000, supportsStreaming: false },
   'o3': { provider: 'openai', maxTokens: 100000, contextWindow: 200000, supportsStreaming: true },
   'o4-mini': { provider: 'openai', maxTokens: 100000, contextWindow: 200000, supportsStreaming: true },
-  
+
   // Anthropic Models
   'anthropic--claude-4.6-sonnet': { provider: 'anthropic', maxTokens: 16384, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
   'anthropic--claude-4.5-sonnet': { provider: 'anthropic', maxTokens: 16384, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
@@ -33,21 +34,21 @@ const MODEL_INFO: Record<string, ModelInfo> = {
   'anthropic--claude-3-opus': { provider: 'anthropic', maxTokens: 4096, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
   'anthropic--claude-3-sonnet': { provider: 'anthropic', maxTokens: 4096, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
   'anthropic--claude-3-haiku': { provider: 'anthropic', maxTokens: 4096, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
-  
+
   // Gemini Models
   'gemini-2.5-pro': { provider: 'gemini', maxTokens: 65536, contextWindow: 2097152, supportsStreaming: true, supportsVision: true },
   'gemini-2.5-flash': { provider: 'gemini', maxTokens: 65536, contextWindow: 1048576, supportsStreaming: true, supportsVision: true },
   'gemini-1.5-pro': { provider: 'gemini', maxTokens: 8192, contextWindow: 2097152, supportsStreaming: true, supportsVision: true },
   'gemini-1.5-flash': { provider: 'gemini', maxTokens: 8192, contextWindow: 1048576, supportsStreaming: true, supportsVision: true },
-  
+
   // Perplexity Models
   'sonar-pro': { provider: 'openai', maxTokens: 8192, contextWindow: 200000, supportsStreaming: true },
   'sonar': { provider: 'openai', maxTokens: 8192, contextWindow: 127072, supportsStreaming: true },
-  
+
   // Meta Models (Llama)
   'meta--llama3-70b-instruct': { provider: 'meta', maxTokens: 8192, contextWindow: 8192, supportsStreaming: true },
   'meta--llama3.1-70b-instruct': { provider: 'meta', maxTokens: 8192, contextWindow: 128000, supportsStreaming: true },
-  
+
   // Mistral Models
   'mistralai--mixtral-8x7b-instruct-v01': { provider: 'mistral', maxTokens: 32768, contextWindow: 32768, supportsStreaming: true },
   'mistralai--mistral-large-instruct-2407': { provider: 'mistral', maxTokens: 32768, contextWindow: 128000, supportsStreaming: true },
@@ -89,7 +90,7 @@ export class DeploymentManager {
       });
 
       logger.info(`Found ${runningDeployments.length} running deployments`);
-      
+
       runningDeployments.forEach((d: Deployment) => {
         const modelName = d.details.resources.backend_details.model.name;
         const modelVersion = d.details.resources.backend_details.model.version;
@@ -123,9 +124,9 @@ export class DeploymentManager {
    */
   async findDeploymentForModel(modelName: string): Promise<Deployment | undefined> {
     const deployments = await this.getDeployments();
-    
+
     // Try exact match first
-    let deployment = deployments.find(d => 
+    let deployment = deployments.find(d =>
       d.details.resources.backend_details.model.name === modelName
     );
 
@@ -134,7 +135,7 @@ export class DeploymentManager {
       const baseModelName = modelName.split(':')[0].toLowerCase();
       deployment = deployments.find(d => {
         const deploymentModelName = d.details.resources.backend_details.model.name.toLowerCase();
-        return deploymentModelName === baseModelName || 
+        return deploymentModelName === baseModelName ||
                deploymentModelName.includes(baseModelName) ||
                baseModelName.includes(deploymentModelName);
       });

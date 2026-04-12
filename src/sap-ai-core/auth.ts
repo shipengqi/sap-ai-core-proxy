@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { SapAiCoreCredentials, Token } from './types';
-import { logger } from './logger';
+import { logger } from '../logger';
 
 /**
  * SAP AI Core Authentication Manager
@@ -18,7 +18,7 @@ export class AuthManager {
    * Validates that all required credentials are present
    */
   private validateCredentials(): void {
-    if (!this.credentials.clientId || !this.credentials.clientSecret || 
+    if (!this.credentials.clientId || !this.credentials.clientSecret ||
         !this.credentials.tokenUrl || !this.credentials.baseUrl) {
       throw new Error('Missing required SAP AI Core credentials. Please check your configuration.');
     }
@@ -31,7 +31,7 @@ export class AuthManager {
     this.validateCredentials();
 
     const tokenUrl = this.credentials.tokenUrl.replace(/\/+$/, '') + '/oauth/token';
-    
+
     logger.debug(`Authenticating with SAP AI Core at ${tokenUrl}`);
 
     try {

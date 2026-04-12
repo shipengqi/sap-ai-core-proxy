@@ -1,51 +1,3 @@
-// SAP AI Core Types
-export interface SapAiCoreCredentials {
-  clientId: string;
-  clientSecret: string;
-  tokenUrl: string;
-  baseUrl: string;
-  resourceGroup?: string;
-}
-
-export interface Token {
-  access_token: string;
-  token_type: string;
-  expires_in: number;
-  expires_at: number;
-}
-
-export interface Deployment {
-  id: string;
-  configurationId: string;
-  configurationName: string;
-  scenarioId: string;
-  status: string;
-  targetStatus: string;
-  createdAt: string;
-  modifiedAt: string;
-  submissionTime: string;
-  startTime: string;
-  deploymentUrl: string;
-  details: {
-    resources: {
-      backend_details: {
-        model: {
-          name: string;
-          version: string;
-        };
-      };
-    };
-    scaling?: {
-      backend_details: Record<string, unknown>;
-    };
-  };
-}
-
-export interface DeploymentsResponse {
-  count: number;
-  resources: Deployment[];
-}
-
 // OpenAI Compatible Types
 export interface OpenAIMessage {
   role: 'system' | 'user' | 'assistant' | 'function' | 'tool';
@@ -154,23 +106,4 @@ export interface OpenAIErrorResponse {
     param: string | null;
     code: string | null;
   };
-}
-
-// Model Provider Types
-export type ModelProvider = 'openai' | 'anthropic' | 'gemini' | 'meta' | 'mistral' | 'amazon';
-
-export interface ModelInfo {
-  provider: ModelProvider;
-  maxTokens: number;
-  contextWindow: number;
-  supportsStreaming: boolean;
-  supportsVision?: boolean;
-}
-
-// Configuration
-export interface ProxyConfig {
-  port: number;
-  sapAiCore: SapAiCoreCredentials;
-  defaultResourceGroup: string;
-  logRequests: boolean;
 }
