@@ -21,7 +21,7 @@ A TypeScript proxy server that provides **OpenAI-compatible** and **Anthropic-na
 - o1, o3-mini, o3, o4-mini
 
 ### Anthropic Models (Claude)
-- anthropic--claude-4.6-sonnet, anthropic--claude-4.6-opus
+- anthropic--claude-4.6-sonnet, anthropic--claude-4.6-opus, anthropic--claude-4.6-haiku
 - anthropic--claude-4.5-sonnet, anthropic--claude-4.5-opus, anthropic--claude-4.5-haiku
 - anthropic--claude-4-sonnet, anthropic--claude-4-opus
 - anthropic--claude-3.7-sonnet, anthropic--claude-3.5-sonnet
@@ -230,6 +230,7 @@ Claude Code sends standard Anthropic model names. The proxy automatically maps t
 |------------------------|------------------------|
 | `claude-sonnet-4-6` | `anthropic--claude-4.6-sonnet` |
 | `claude-opus-4-6` | `anthropic--claude-4.6-opus` |
+| `claude-haiku-4-6` | `anthropic--claude-4.6-haiku` |
 | `claude-sonnet-4-5` | `anthropic--claude-4.5-sonnet` |
 | `claude-opus-4-5` | `anthropic--claude-4.5-opus` |
 | `claude-haiku-4-5` | `anthropic--claude-4.5-haiku` |

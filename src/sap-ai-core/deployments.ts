@@ -23,7 +23,9 @@ const MODEL_INFO: Record<string, ModelInfo> = {
   'o4-mini': { provider: 'openai', maxTokens: 100000, contextWindow: 200000, supportsStreaming: true },
 
   // Anthropic Models
-  'anthropic--claude-4.6-sonnet': { provider: 'anthropic', maxTokens: 16384, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
+  'anthropic--claude-4.6-sonnet': { provider: 'anthropic', maxTokens: 32768, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
+  'anthropic--claude-4.6-opus': { provider: 'anthropic', maxTokens: 32768, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
+  'anthropic--claude-4.6-haiku': { provider: 'anthropic', maxTokens: 32768, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
   'anthropic--claude-4.5-sonnet': { provider: 'anthropic', maxTokens: 16384, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
   'anthropic--claude-4.5-opus': { provider: 'anthropic', maxTokens: 16384, contextWindow: 200000, supportsStreaming: true, supportsVision: true },
   'anthropic--claude-4.5-haiku': { provider: 'anthropic', maxTokens: 16384, contextWindow: 200000, supportsStreaming: true, supportsVision: true },

@@ -53,6 +53,7 @@ const ANTHROPIC_TO_SAP_MODEL_MAP: Record<string, string> = {
   // Claude 4.6
   'claude-sonnet-4-6': 'anthropic--claude-4.6-sonnet',
   'claude-opus-4-6': 'anthropic--claude-4.6-opus',
+  'claude-haiku-4-6': 'anthropic--claude-4.6-haiku',
 };
 
 /**
