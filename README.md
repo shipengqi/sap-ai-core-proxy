@@ -226,6 +226,7 @@ For the VSCode extension, set the API Base URL to `http://localhost:3001/anthrop
 
 Claude Code sends standard Anthropic model names. The proxy automatically maps them to SAP AI Core model names:
 
+
 | Claude Code model name | SAP AI Core model name |
 |------------------------|------------------------|
 | `claude-sonnet-4-6` | `anthropic--claude-4.6-sonnet` |

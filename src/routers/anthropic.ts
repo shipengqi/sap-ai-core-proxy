@@ -1,6 +1,28 @@
 import { Router, Request, Response } from 'express';
-import { AnthropicNativeProvider } from '../providers/anthropic-native';
+import { AnthropicNativeProvider, ANTHROPIC_TO_SAP_MODEL_MAP } from '../providers/anthropic-native';
+import { DeploymentManager } from '../sap-ai-core/deployments';
 import { logger } from '../logger';
+
+/**
+ * Builds a reverse map: SAP AI Core model name -> Anthropic standard name.
+ * When multiple Anthropic names map to the same SAP name (e.g. aliases like
+ * "claude-3-5-sonnet-latest" and "claude-3-5-sonnet-20241022" both map to
+ * "anthropic--claude-3.5-sonnet"), we prefer the versioned/canonical name
+ * (the one that does NOT end with "-latest").
+ */
+function buildSapToAnthropicMap(): Record<string, string> {
+  const reverse: Record<string, string> = {};
+  for (const [anthropicName, sapName] of Object.entries(ANTHROPIC_TO_SAP_MODEL_MAP)) {
+    if (!reverse[sapName] || anthropicName.endsWith('-latest')) {
+      // Prefer the first (non-latest) entry; only overwrite with a -latest alias
+      // if nothing is set yet.
+      if (!reverse[sapName]) {
+        reverse[sapName] = anthropicName;
+      }
+    }
+  }
+  return reverse;
+}
 
 /**
  * Registers Claude Code auth stub endpoints on the given router.
@@ -94,8 +116,10 @@ function setupClaudeCodeAuthRoutes(router: Router): void {
  */
 export function createAnthropicRouter(
   anthropicNativeProvider: AnthropicNativeProvider,
+  deploymentManager: DeploymentManager,
 ): Router {
   const router = Router();
+  const sapToAnthropic = buildSapToAnthropicMap();
 
   // Health-check / connectivity probe (Claude Code sends HEAD /anthropic)
   router.head('/', (_req: Request, res: Response) => {
@@ -103,6 +127,66 @@ export function createAnthropicRouter(
   });
   router.get('/', (_req: Request, res: Response) => {
     res.json({ provider: 'anthropic', status: 'ok' });
+  });
+
+  // Models list - dynamically built from running SAP AI Core deployments
+  router.get('/v1/models', async (_req: Request, res: Response) => {
+    try {
+      const deployments = await deploymentManager.getDeployments();
+
+      const data = deployments
+        .filter(d => deploymentManager.getModelProvider(d.details.resources.backend_details.model.name) === 'anthropic')
+        .map(d => {
+          const sapName = d.details.resources.backend_details.model.name;
+          const anthropicName = sapToAnthropic[sapName] ?? sapName;
+          return {
+            type: 'model',
+            id: anthropicName,
+            display_name: anthropicName,
+            created_at: new Date(d.createdAt).toISOString(),
+          };
+        });
+
+      res.json({ object: 'list', data });
+    } catch (error: unknown) {
+      const err = error as { message?: string };
+      logger.error('Failed to list Anthropic models:', err.message);
+      res.status(500).json({
+        type: 'error',
+        error: { type: 'api_error', message: err.message || 'Failed to list models' },
+      });
+    }
+  });
+
+  router.get('/v1/models/:modelId', async (req: Request, res: Response) => {
+    try {
+      const { modelId } = req.params;
+      // modelId may be an Anthropic name; map it to SAP name for lookup
+      const sapName = ANTHROPIC_TO_SAP_MODEL_MAP[modelId] ?? modelId;
+      const deployment = await deploymentManager.findDeploymentForModel(sapName);
+
+      if (!deployment) {
+        res.status(404).json({
+          type: 'error',
+          error: { type: 'not_found_error', message: `Model \`${modelId}\` not found` },
+        });
+        return;
+      }
+
+      res.json({
+        type: 'model',
+        id: modelId,
+        display_name: modelId,
+        created_at: new Date(deployment.createdAt).toISOString(),
+      });
+    } catch (error: unknown) {
+      const err = error as { message?: string };
+      logger.error('Failed to get Anthropic model:', err.message);
+      res.status(500).json({
+        type: 'error',
+        error: { type: 'api_error', message: err.message || 'Failed to get model' },
+      });
+    }
   });
 
   // Anthropic Messages API

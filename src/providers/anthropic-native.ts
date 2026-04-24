@@ -29,7 +29,7 @@ import { logger } from '../logger';
  * Maps standard Anthropic model names to SAP AI Core model names.
  * Also accepts SAP AI Core names directly (passthrough).
  */
-const ANTHROPIC_TO_SAP_MODEL_MAP: Record<string, string> = {
+export const ANTHROPIC_TO_SAP_MODEL_MAP: Record<string, string> = {
   // Claude 4.x series
   'claude-opus-4-5': 'anthropic--claude-4.5-opus',
   'claude-sonnet-4-5': 'anthropic--claude-4.5-sonnet',

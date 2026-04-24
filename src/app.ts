@@ -107,7 +107,7 @@ function setupRoutes(
   ));
 
   // Anthropic native proxy
-  app.use('/anthropic', createAnthropicRouter(anthropicNativeProvider));
+  app.use('/anthropic', createAnthropicRouter(anthropicNativeProvider, deploymentManager));
 
   // Admin routes
   app.use('/admin', createAdminRouter(deploymentManager));
