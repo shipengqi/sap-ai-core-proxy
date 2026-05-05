@@ -99,10 +99,14 @@ npm start
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
+| `/anthropic` | HEAD/GET | Connectivity probe / provider status |
+| `/anthropic/v1/models` | GET | List available models |
 | `/anthropic/v1/messages` | POST | Anthropic Messages API |
 | `/anthropic/v1/messages/count_tokens` | POST | Token counting |
 | `/anthropic/oauth/token` | POST | Claude Code auth stub |
-| `/anthropic/api/*` | GET | Claude Code auth stubs |
+| `/anthropic/api/auth/me` | GET | Claude Code user info stub |
+| `/anthropic/api/organizations` | GET | Claude Code org stub |
+| `/anthropic/api/*` | GET | Claude Code compat catch-all |
 
 ### General
 
@@ -250,33 +254,41 @@ You can also use SAP AI Core model names directly (e.g. `--model anthropic--clau
 
 ```
 src/
-├── index.ts                  # Entry point
-├── app.ts                    # Express app setup, mounts routers
-├── config.ts                 # Environment configuration
-├── logger.ts                 # Logging utility
-├── routers/                  # Express Router per API surface
-│   ├── openai.ts             # /openai/* routes
-│   ├── anthropic.ts          # /anthropic/* routes + Claude Code auth stubs
-│   ├── admin.ts              # /admin/* routes
-│   └── health.ts             # / and /health routes
-├── providers/                # LLM provider implementations
-│   ├── openai.ts             # OpenAI models via OpenAI surface
-│   ├── claude-openai.ts      # Claude models via OpenAI surface
-│   ├── gemini-openai.ts      # Gemini models via OpenAI surface
-│   └── claude-anthropic.ts   # Claude models via Anthropic surface
-├── utils/                    # Shared utilities
-│   ├── json-parser.ts        # Python-style JSON conversion
-│   ├── content-extractor.ts  # Message content extraction
-│   ├── sse.ts                # SSE header/event helpers
-│   └── error-handler.ts      # Error extraction and formatting
-├── sap-ai-core/              # SAP AI Core integration
-│   ├── auth.ts               # OAuth token management
-│   ├── deployments.ts        # Model deployment discovery
-│   └── types.ts              # SAP AI Core type definitions
-└── types/                    # Shared TypeScript interfaces
-    ├── openai.ts             # OpenAI API types
-    ├── anthropic.ts          # Anthropic API types
-    └── models.ts             # Model/provider types
+├── index.ts                        # Entry point
+├── app.ts                          # Express app setup, mounts routers
+├── config.ts                       # Environment configuration
+├── logger.ts                       # Logging utility
+├── model-catalogue.ts              # Authoritative model registry with alias maps
+├── routers/                        # Express Router per API surface
+│   ├── index.ts                    # Router exports
+│   ├── openai.ts                   # /openai/* routes
+│   ├── anthropic.ts                # /anthropic/v1/* routes
+│   ├── claude-code-compat.ts       # /anthropic/oauth/* and /anthropic/api/* stubs
+│   ├── admin.ts                    # /admin/* routes
+│   └── health.ts                   # / and /health routes
+├── providers/                      # LLM provider implementations
+│   ├── index.ts                    # Provider exports
+│   ├── openai.ts                   # OpenAI models via OpenAI surface
+│   ├── claude-openai.ts            # Claude via OpenAI surface (dispatcher)
+│   ├── claude-openai-converse.ts   # Claude Converse API, Claude 3.5+ (OpenAI surface)
+│   ├── claude-openai-invoke.ts     # Claude Invoke API, Claude 3 (OpenAI surface)
+│   ├── gemini-openai.ts            # Gemini models via OpenAI surface
+│   ├── claude-anthropic.ts         # Claude via Anthropic surface (dispatcher)
+│   ├── claude-anthropic-converse.ts # Claude Converse API, Claude 3.5+ (Anthropic surface)
+│   └── claude-anthropic-invoke.ts  # Claude Invoke API, Claude 3 (Anthropic surface)
+├── utils/                          # Shared utilities
+│   ├── json-parser.ts              # Python-style JSON conversion
+│   ├── content-extractor.ts        # Message content extraction
+│   ├── sse.ts                      # SSE header/event helpers
+│   └── error-handler.ts            # Error extraction and formatting
+├── sap-ai-core/                    # SAP AI Core integration
+│   ├── auth.ts                     # OAuth token management
+│   ├── deployments.ts              # Model deployment discovery
+│   └── types.ts                    # SAP AI Core type definitions
+└── types/                          # Shared TypeScript interfaces
+    ├── openai.ts                   # OpenAI API types
+    ├── anthropic.ts                # Anthropic API types
+    └── models.ts                   # Model/provider types
 ```
 
 ## How It Works

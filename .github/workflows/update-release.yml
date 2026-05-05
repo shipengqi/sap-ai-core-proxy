@@ -1,0 +1,121 @@
+name: Update Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g., v1.2.3). Defaults to latest release."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  update-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine tag
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            TAG="${{ github.event.inputs.version }}"
+            [[ "$TAG" != v* ]] && TAG="v${TAG}"
+          else
+            TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName')
+          fi
+
+          VERSION="${TAG#v}"
+          if echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+-'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")
+
+          if [ -n "$PREV_TAG" ]; then
+            RANGE="${PREV_TAG}..${TAG}"
+          else
+            RANGE="${TAG}"
+          fi
+
+          cat > /tmp/gen_changelog.py << 'PYEOF'
+          import subprocess, sys, re
+
+          range_arg = sys.argv[1]
+          result = subprocess.run(
+              ['git', 'log', range_arg, '--pretty=format:%H %s', '--no-merges'],
+              capture_output=True, text=True
+          )
+
+          sections = [
+              ('feat',     '## Features',    re.compile(r'^feat(\([^)]+\))?!?:')),
+              ('fix',      '## Bug Fixes',   re.compile(r'^fix(\([^)]+\))?!?:')),
+              ('refactor', '## Refactors',   re.compile(r'^refactor(\([^)]+\))?!?:')),
+              ('perf',     '## Performance', re.compile(r'^perf(\([^)]+\))?!?:')),
+          ]
+          skip = re.compile(r'^chore: bump version')
+          buckets = {k: [] for k, _, _ in sections}
+          other = []
+
+          for line in result.stdout.strip().splitlines():
+              if not line:
+                  continue
+              sha = line[:40]
+              msg = line[41:]
+              short = sha[:7]
+              entry = f'- {msg} ([{short}](../../commit/{sha}))'
+              if skip.match(msg):
+                  continue
+              matched = False
+              for key, _, pattern in sections:
+                  if pattern.match(msg):
+                      buckets[key].append(entry)
+                      matched = True
+                      break
+              if not matched:
+                  other.append(entry)
+
+          parts = []
+          for key, title, _ in sections:
+              if buckets[key]:
+                  parts.append(title + '\n\n' + '\n'.join(buckets[key]))
+          if other:
+              parts.append('## Other Changes\n\n' + '\n'.join(other))
+
+          changelog = '\n\n'.join(parts) if parts else 'No changes recorded.'
+          with open('/tmp/changelog.md', 'w') as f:
+              f.write(changelog + '\n')
+          PYEOF
+
+          python3 /tmp/gen_changelog.py "$RANGE"
+
+      - name: Update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+          if [ "${{ steps.tag.outputs.prerelease }}" = "true" ]; then
+            gh release edit "$TAG" \
+              --notes-file /tmp/changelog.md \
+              --prerelease
+          else
+            gh release edit "$TAG" \
+              --notes-file /tmp/changelog.md \
+              --latest
+          fi
