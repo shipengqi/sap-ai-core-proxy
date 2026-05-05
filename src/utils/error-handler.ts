@@ -88,3 +88,13 @@ export function sendAnthropicError(
     },
   });
 }
+
+export function handleAnthropicError(error: unknown, res: Response): void {
+  const { statusCode, message } = extractErrorDetails(error);
+  sendAnthropicError(res, statusCode, message);
+}
+
+export function handleOpenAIError(error: unknown, res: Response): void {
+  const { statusCode, message } = extractErrorDetails(error);
+  sendOpenAIError(res, statusCode, message);
+}

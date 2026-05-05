@@ -144,3 +144,17 @@ export interface AnthropicCountTokensRequest {
 export interface AnthropicCountTokensResponse {
   input_tokens: number;
 }
+
+export interface AnthropicModel {
+  type: 'model';
+  id: string;
+  display_name: string;
+  created_at: string;
+}
+
+export interface AnthropicModelsResponse {
+  data: AnthropicModel[];
+  has_more: boolean;
+  first_id: string | null;
+  last_id: string | null;
+}

@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { AuthManager } from './auth';
-import { Deployment, DeploymentsResponse } from './types';
+import { Deployment, DeploymentsResponse, ModelDeployment, DeploymentSummary } from './types';
 import { logger } from '../logger';
 
 /**
@@ -71,7 +71,7 @@ export class DeploymentManager {
   /**
    * Finds a deployment for a given model name
    */
-  async findDeploymentForModel(modelName: string): Promise<Deployment | undefined> {
+  private async findDeploymentForModel(modelName: string): Promise<Deployment | undefined> {
     const deployments = await this.getDeployments();
 
     // Try exact match first
@@ -104,8 +104,30 @@ export class DeploymentManager {
     return deployment.id;
   }
 
-  async refreshDeployments(): Promise<Deployment[]> {
+  async refreshDeployments(): Promise<DeploymentSummary[]> {
     this.lastFetchTime = 0;
-    return this.getDeployments();
+    const deployments = await this.getDeployments();
+    return deployments.map(d => ({
+      id: d.id,
+      sapName: d.details.resources.backend_details.model.name,
+      status: d.status,
+    }));
+  }
+
+  async getDeploymentModels(): Promise<ModelDeployment[]> {
+    const deployments = await this.getDeployments();
+    return deployments.map(d => ({
+      sapName: d.details.resources.backend_details.model.name,
+      createdAt: d.createdAt,
+    }));
+  }
+
+  async findModelDeployment(modelName: string): Promise<ModelDeployment | undefined> {
+    const deployment = await this.findDeploymentForModel(modelName);
+    if (!deployment) return undefined;
+    return {
+      sapName: deployment.details.resources.backend_details.model.name,
+      createdAt: deployment.createdAt,
+    };
   }
 }

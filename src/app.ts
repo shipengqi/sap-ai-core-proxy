@@ -110,7 +110,7 @@ function setupRoutes(
   ));
 
   // Anthropic surface
-  app.use('/anthropic', createAnthropicRouter(claudeAnthropicProvider));
+  app.use('/anthropic', createAnthropicRouter(claudeAnthropicProvider, deploymentManager));
 
   // Claude Code CLI / VSCode extension compatibility shim
   app.use('/anthropic', createClaudeCodeCompatRouter());

@@ -9,7 +9,7 @@ import {
   OpenAIChatCompletionChunk,
   OpenAIMessage
 } from '../types/openai';
-import { setSSEHeaders, extractErrorDetails, sendOpenAIError } from '../utils';
+import { setSSEHeaders, handleOpenAIError } from '../utils';
 import { logger } from '../logger';
 
 /**
@@ -49,7 +49,7 @@ export class OpenAIProvider {
         await this.handleNonStreamingResponse(url, headers, payload, res, model);
       }
     } catch (error: unknown) {
-      this.handleError(error, res);
+      handleOpenAIError(error, res);
     }
   }
 
@@ -236,11 +236,4 @@ export class OpenAIProvider {
     };
   }
 
-  /**
-   * Handles errors
-   */
-  private handleError(error: unknown, res: Response): void {
-    const { statusCode, message } = extractErrorDetails(error);
-    sendOpenAIError(res, statusCode, message);
-  }
 }

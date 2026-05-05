@@ -45,3 +45,14 @@ export interface DeploymentsResponse {
   count: number;
   resources: Deployment[];
 }
+
+export interface ModelDeployment {
+  sapName: string;
+  createdAt: string;
+}
+
+export interface DeploymentSummary {
+  id: string;
+  sapName: string;
+  status: string;
+}

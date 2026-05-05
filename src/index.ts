@@ -35,8 +35,10 @@ async function main(): Promise<void> {
     logger.info(`  GET  /health - Health check`);
     logger.info('  --- OpenAI ---');
     logger.info(`  GET  /openai/v1/models - List available models`);
+    logger.info(`  GET  /openai/v1/models/:modelId - Get model details`);
     logger.info(`  POST /openai/v1/chat/completions - Chat completion`);
     logger.info('  --- Anthropic ---');
+    logger.info(`  GET  /anthropic/v1/models - List available models`);
     logger.info(`  POST /anthropic/v1/messages - Anthropic Messages API`);
     logger.info(`  POST /anthropic/v1/messages/count_tokens - Token counting`);
     logger.info('  --- Admin ---');

@@ -26,13 +26,11 @@ export function buildProviderRegistry(
 function handleListModels(deploymentManager: DeploymentManager) {
   return async (_req: Request, res: Response): Promise<void> => {
     try {
-      const deployments = await deploymentManager.getDeployments();
-
-      const models: OpenAIModel[] = deployments.map(d => ({
-        id: d.details.resources.backend_details.model.name,
+      const models: OpenAIModel[] = (await deploymentManager.getDeploymentModels()).map(m => ({
+        id: m.sapName,
         object: 'model' as const,
-        created: new Date(d.createdAt).getTime() / 1000,
-        owned_by: catalogue.getOwner(d.details.resources.backend_details.model.name),
+        created: new Date(m.createdAt).getTime() / 1000,
+        owned_by: catalogue.getOwner(m.sapName),
       }));
 
       const response: OpenAIModelsResponse = {
@@ -63,9 +61,9 @@ function handleGetModel(deploymentManager: DeploymentManager) {
   return async (req: Request, res: Response): Promise<void> => {
     try {
       const { modelId } = req.params;
-      const deployment = await deploymentManager.findDeploymentForModel(modelId);
+      const model = await deploymentManager.findModelDeployment(modelId);
 
-      if (!deployment) {
+      if (!model) {
         res.status(404).json({
           error: {
             message: `Model ${modelId} not found`,
@@ -77,14 +75,14 @@ function handleGetModel(deploymentManager: DeploymentManager) {
         return;
       }
 
-      const model: OpenAIModel = {
-        id: deployment.details.resources.backend_details.model.name,
+      const openAIModel: OpenAIModel = {
+        id: model.sapName,
         object: 'model',
-        created: new Date(deployment.createdAt).getTime() / 1000,
-        owned_by: catalogue.getOwner(deployment.details.resources.backend_details.model.name),
+        created: new Date(model.createdAt).getTime() / 1000,
+        owned_by: catalogue.getOwner(model.sapName),
       };
 
-      res.json(model);
+      res.json(openAIModel);
     } catch (error: unknown) {
       const err = error as { message?: string };
       logger.error('Failed to get model:', err.message);

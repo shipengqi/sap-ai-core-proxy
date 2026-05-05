@@ -35,7 +35,10 @@
       "Bash(sed -i '' \"s|from '../providers/anthropic-native'|from '../providers/claude-anthropic'|g\" /Users/C5406922/code/sap-ai-core-proxy/src/routers/anthropic.ts)",
       "Bash(sed -i '' 's/AnthropicNativeProvider/ClaudeAnthropicProvider/g' /Users/C5406922/code/sap-ai-core-proxy/src/routers/anthropic.ts)",
       "Bash(npm install *)",
-      "Bash(npm test *)"
+      "Bash(npm test *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(rtk git *)"
     ]
   }
 }

@@ -16,7 +16,7 @@ export function createAdminRouter(deploymentManager: DeploymentManager): Router 
         count: deployments.length,
         deployments: deployments.map(d => ({
           id: d.id,
-          model: d.details.resources.backend_details.model.name,
+          model: d.sapName,
           status: d.status,
         })),
       });
