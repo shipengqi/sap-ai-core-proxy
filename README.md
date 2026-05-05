@@ -4,7 +4,7 @@ A TypeScript proxy server that provides **OpenAI-compatible** and **Anthropic-na
 
 ## Features
 
-- **Dual proxy modes**: OpenAI-compatible (`/openai-compatible`) and Anthropic-native (`/anthropic`) API paths
+- **Dual API surfaces**: OpenAI (`/openai`) and Anthropic (`/anthropic`)
 - **Multi-model support**: OpenAI GPT, Anthropic Claude, Google Gemini, Meta Llama, Mistral, and Perplexity models
 - **Streaming support**: Full Server-Sent Events (SSE) streaming for real-time responses
 - **Automatic authentication**: OAuth token management with automatic refresh
@@ -87,15 +87,15 @@ npm start
 
 ## API Endpoints
 
-### OpenAI-Compatible Mode (`/openai-compatible`)
+### OpenAI Surface (`/openai`)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/openai-compatible/v1/models` | GET | List available models |
-| `/openai-compatible/v1/models/:modelId` | GET | Get specific model info |
-| `/openai-compatible/v1/chat/completions` | POST | Chat completion |
+| `/openai/v1/models` | GET | List available models |
+| `/openai/v1/models/:modelId` | GET | Get specific model info |
+| `/openai/v1/chat/completions` | POST | Chat completion |
 
-### Anthropic Native Mode (`/anthropic`)
+### Anthropic Surface (`/anthropic`)
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -120,7 +120,7 @@ npm start
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:3001/openai-compatible/v1",
+    base_url="http://localhost:3001/openai/v1",
     api_key="not-needed"  # Authentication is handled by the proxy
 )
 
@@ -141,7 +141,7 @@ print(response.choices[0].message.content)
 import OpenAI from 'openai';
 
 const client = new OpenAI({
-  baseURL: 'http://localhost:3001/openai-compatible/v1',
+  baseURL: 'http://localhost:3001/openai/v1',
   apiKey: 'not-needed',
 });
 
@@ -161,7 +161,7 @@ console.log(response.choices[0].message.content);
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="http://localhost:3001/openai-compatible/v1",
+    base_url="http://localhost:3001/openai/v1",
     api_key="not-needed"
 )
 
@@ -180,10 +180,10 @@ for chunk in stream:
 
 ```bash
 # List available models
-curl http://localhost:3001/openai-compatible/v1/models
+curl http://localhost:3001/openai/v1/models
 
 # Chat completion
-curl http://localhost:3001/openai-compatible/v1/chat/completions \
+curl http://localhost:3001/openai/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o",
@@ -253,22 +253,21 @@ src/
 ├── app.ts                    # Express app setup, mounts routers
 ├── config.ts                 # Environment configuration
 ├── logger.ts                 # Logging utility
-├── routers/                  # Express Router per proxy mode
-│   ├── openai-compatible.ts  # /openai-compatible/* routes
+├── routers/                  # Express Router per API surface
+│   ├── openai.ts             # /openai/* routes
 │   ├── anthropic.ts          # /anthropic/* routes + Claude Code auth stubs
 │   ├── admin.ts              # /admin/* routes
 │   └── health.ts             # / and /health routes
 ├── providers/                # LLM provider implementations
-│   ├── openai.ts             # OpenAI models (OpenAI format)
-│   ├── anthropic-openai.ts   # Claude models (OpenAI format)
-│   ├── gemini-openai.ts      # Gemini models (OpenAI format)
-│   └── anthropic-native.ts   # Claude models (Anthropic native format)
+│   ├── openai.ts             # OpenAI models via OpenAI surface
+│   ├── claude-openai.ts      # Claude models via OpenAI surface
+│   ├── gemini-openai.ts      # Gemini models via OpenAI surface
+│   └── claude-anthropic.ts   # Claude models via Anthropic surface
 ├── utils/                    # Shared utilities
 │   ├── json-parser.ts        # Python-style JSON conversion
 │   ├── content-extractor.ts  # Message content extraction
 │   ├── sse.ts                # SSE header/event helpers
-│   ├── error-handler.ts      # Error extraction and formatting
-│   └── converse-models.ts    # Converse API model list
+│   └── error-handler.ts      # Error extraction and formatting
 ├── sap-ai-core/              # SAP AI Core integration
 │   ├── auth.ts               # OAuth token management
 │   ├── deployments.ts        # Model deployment discovery
@@ -288,17 +287,17 @@ src/
 5. **Response Translation**: Responses from SAP AI Core are converted back to the client's expected format
 6. **Streaming**: For streaming requests, SSE streams are properly forwarded and formatted
 
-## Adding a New Proxy Mode
+## Adding a New API Surface
 
-The router-per-proxy-type architecture makes it easy to add new API formats:
+The router-per-surface architecture makes it easy to add new API formats:
 
-1. Create a new router in `src/routers/` (e.g. `google-native.ts`)
+1. Create a new router in `src/routers/` (e.g. `google.ts`)
 2. Mount it in `src/app.ts` with `app.use('/google', createGoogleRouter(...))`
 3. Optionally add a new provider in `src/providers/` if the backend format differs
 
-## Model Routing (OpenAI-Compatible Mode)
+## Model Routing (OpenAI Surface)
 
-In the OpenAI-compatible mode, the proxy automatically routes requests to the appropriate provider based on the model name:
+In the OpenAI surface, the proxy automatically routes requests to the appropriate provider based on the model name:
 
 - **OpenAI models** (gpt-\*, o1, o3-\*): Standard OpenAI chat completions API
 - **Anthropic models** (anthropic--claude-\*):

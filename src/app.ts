@@ -3,14 +3,16 @@ import { AppConfig } from './config';
 import { AuthManager } from './sap-ai-core/auth';
 import { DeploymentManager } from './sap-ai-core/deployments';
 import { OpenAIProvider } from './providers/openai';
-import { AnthropicOpenAIProvider } from './providers/anthropic-openai';
+import { ClaudeOpenAIProvider } from './providers/claude-openai';
 import { GeminiProvider } from './providers/gemini-openai';
-import { AnthropicNativeProvider } from './providers/anthropic-native';
+import { ClaudeAnthropicProvider } from './providers/claude-anthropic';
 import {
   createHealthRouter,
   createAdminRouter,
   createOpenAICompatibleRouter,
   createAnthropicRouter,
+  createClaudeCodeCompatRouter,
+  buildProviderRegistry,
 } from './routers';
 import { logger } from './logger';
 
@@ -32,15 +34,15 @@ export function createApp(config: AppConfig): AppResult {
 
   // Initialize providers
   const openaiProvider = new OpenAIProvider(authManager, deploymentManager);
-  const anthropicOpenAIProvider = new AnthropicOpenAIProvider(authManager, deploymentManager);
+  const claudeOpenAIProvider = new ClaudeOpenAIProvider(authManager, deploymentManager);
   const geminiProvider = new GeminiProvider(authManager, deploymentManager);
-  const anthropicNativeProvider = new AnthropicNativeProvider(authManager, deploymentManager);
+  const claudeAnthropicProvider = new ClaudeAnthropicProvider(authManager, deploymentManager);
 
   // Setup middleware
   setupMiddleware(app);
 
   // Setup routes via routers
-  setupRoutes(app, deploymentManager, openaiProvider, anthropicOpenAIProvider, geminiProvider, anthropicNativeProvider);
+  setupRoutes(app, deploymentManager, openaiProvider, claudeOpenAIProvider, geminiProvider, claudeAnthropicProvider);
 
   return { app, authManager, deploymentManager };
 }
@@ -94,20 +96,24 @@ function setupRoutes(
   app: express.Application,
   deploymentManager: DeploymentManager,
   openaiProvider: OpenAIProvider,
-  anthropicOpenAIProvider: AnthropicOpenAIProvider,
+  claudeOpenAIProvider: ClaudeOpenAIProvider,
   geminiProvider: GeminiProvider,
-  anthropicNativeProvider: AnthropicNativeProvider,
+  claudeAnthropicProvider: ClaudeAnthropicProvider,
 ): void {
   // Health/info routes at root
   app.use('/', createHealthRouter());
 
-  // OpenAI-compatible proxy
-  app.use('/openai-compatible', createOpenAICompatibleRouter(
-    deploymentManager, openaiProvider, anthropicOpenAIProvider, geminiProvider,
+  // OpenAI surface
+  const providerRegistry = buildProviderRegistry(claudeOpenAIProvider, geminiProvider);
+  app.use('/openai', createOpenAICompatibleRouter(
+    deploymentManager, providerRegistry, openaiProvider.handleChatCompletion.bind(openaiProvider),
   ));
 
-  // Anthropic native proxy
-  app.use('/anthropic', createAnthropicRouter(anthropicNativeProvider));
+  // Anthropic surface
+  app.use('/anthropic', createAnthropicRouter(claudeAnthropicProvider));
+
+  // Claude Code CLI / VSCode extension compatibility shim
+  app.use('/anthropic', createClaudeCodeCompatRouter());
 
   // Admin routes
   app.use('/admin', createAdminRouter(deploymentManager));

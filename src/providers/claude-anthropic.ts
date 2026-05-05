@@ -16,81 +16,29 @@ import {
   AnthropicCountTokensResponse,
 } from '../types/anthropic';
 import {
-  convertPythonJsonToStandardJson,
   setSSEHeaders,
   sendSSEEvent,
   extractErrorDetails,
   sendAnthropicError,
-  useConverseApi,
+  parseConverseStream,
+  drainErrorBody,
+  parseErrorMessage,
+  applyPromptCaching,
 } from '../utils';
+import * as catalogue from '../model-catalogue';
 import { logger } from '../logger';
-
-/**
- * Maps standard Anthropic model names to SAP AI Core model names.
- * Also accepts SAP AI Core names directly (passthrough).
- */
-const ANTHROPIC_TO_SAP_MODEL_MAP: Record<string, string> = {
-  // Claude 4.x series
-  'claude-opus-4-5': 'anthropic--claude-4.5-opus',
-  'claude-sonnet-4-5': 'anthropic--claude-4.5-sonnet',
-  'claude-haiku-4-5': 'anthropic--claude-4.5-haiku',
-  'claude-opus-4': 'anthropic--claude-4-opus',
-  'claude-sonnet-4': 'anthropic--claude-4-sonnet',
-  // Claude 3.7
-  'claude-3-7-sonnet-20250219': 'anthropic--claude-3.7-sonnet',
-  'claude-3-7-sonnet-latest': 'anthropic--claude-3.7-sonnet',
-  // Claude 3.5
-  'claude-3-5-sonnet-20241022': 'anthropic--claude-3.5-sonnet',
-  'claude-3-5-sonnet-20240620': 'anthropic--claude-3.5-sonnet',
-  'claude-3-5-sonnet-latest': 'anthropic--claude-3.5-sonnet',
-  'claude-3-5-haiku-20241022': 'anthropic--claude-3.5-haiku',
-  'claude-3-5-haiku-latest': 'anthropic--claude-3.5-haiku',
-  // Claude 3 series
-  'claude-3-opus-20240229': 'anthropic--claude-3-opus',
-  'claude-3-opus-latest': 'anthropic--claude-3-opus',
-  'claude-3-sonnet-20240229': 'anthropic--claude-3-sonnet',
-  'claude-3-haiku-20240307': 'anthropic--claude-3-haiku',
-  // Claude 4.6
-  'claude-sonnet-4-6': 'anthropic--claude-4.6-sonnet',
-  'claude-opus-4-6': 'anthropic--claude-4.6-opus',
-  'claude-haiku-4-6': 'anthropic--claude-4.6-haiku',
-};
 
 /**
  * Handles native Anthropic Messages API requests (/v1/messages).
  * Enables Claude Code CLI and Claude Code VSCode extension to work with SAP AI Core.
  */
-export class AnthropicNativeProvider {
+export class ClaudeAnthropicProvider {
   private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
 
   constructor(authManager: AuthManager, deploymentManager: DeploymentManager) {
     this.authManager = authManager;
     this.deploymentManager = deploymentManager;
-  }
-
-  /**
-   * Maps an Anthropic model name to a SAP AI Core model name.
-   * If the model is already a SAP AI Core name (contains '--'), return as-is.
-   */
-  private mapModelName(model: string): string {
-    // Already a SAP AI Core model name
-    if (model.includes('--')) {
-      return model;
-    }
-    // Check exact match
-    if (ANTHROPIC_TO_SAP_MODEL_MAP[model]) {
-      return ANTHROPIC_TO_SAP_MODEL_MAP[model];
-    }
-    // Fuzzy match: try to find by prefix (handles date-suffixed names)
-    for (const [key, value] of Object.entries(ANTHROPIC_TO_SAP_MODEL_MAP)) {
-      if (model.startsWith(key) || key.startsWith(model)) {
-        return value;
-      }
-    }
-    // Return as-is if no mapping found - let deployment manager handle it
-    logger.warn(`No SAP AI Core mapping found for model: ${model}, using as-is`);
-    return model;
   }
 
   /**
@@ -220,25 +168,6 @@ export class AnthropicNativeProvider {
     const systemPrompt = this.extractSystemPrompt(req.system);
     const messages = this.convertMessagesToConverse(req.messages);
 
-    // Apply cache points to last two user messages (for prompt caching)
-    const userMsgIndices: number[] = [];
-    messages.forEach((msg, idx) => {
-      if (msg.role === 'user') userMsgIndices.push(idx);
-    });
-
-    const lastUserIdx = userMsgIndices[userMsgIndices.length - 1] ?? -1;
-    const secondLastUserIdx = userMsgIndices[userMsgIndices.length - 2] ?? -1;
-
-    const messagesWithCache = messages.map((msg, idx) => {
-      if (idx === lastUserIdx || idx === secondLastUserIdx) {
-        return {
-          ...msg,
-          content: [...(msg.content as unknown[]), { cachePoint: { type: 'default' } }],
-        };
-      }
-      return msg;
-    });
-
     const payload: Record<string, unknown> = {
       inferenceConfig: {
         maxTokens: req.max_tokens,
@@ -246,7 +175,7 @@ export class AnthropicNativeProvider {
         ...(req.top_p !== undefined && { topP: req.top_p }),
         ...(req.stop_sequences?.length && { stopSequences: req.stop_sequences }),
       },
-      messages: messagesWithCache,
+      messages: applyPromptCaching(messages),
     };
 
     if (systemPrompt) {
@@ -331,7 +260,7 @@ export class AnthropicNativeProvider {
     }
 
     // Map model name to SAP AI Core name
-    const sapModelName = this.mapModelName(anthropicReq.model);
+    const sapModelName = catalogue.mapFromAnthropic(anthropicReq.model);
     logger.info(`Anthropic Messages API: model=${anthropicReq.model} → SAP model=${sapModelName}, stream=${anthropicReq.stream}`);
 
     try {
@@ -339,7 +268,7 @@ export class AnthropicNativeProvider {
       const baseUrl = this.authManager.getBaseUrl();
       const headers = await this.authManager.buildHeaders();
 
-      const useConverse = useConverseApi(sapModelName);
+      const useConverse = catalogue.usesConverseApi(sapModelName);
       const payload = this.buildConversePayload(anthropicReq);
 
       if (anthropicReq.stream) {
@@ -508,17 +437,8 @@ export class AnthropicNativeProvider {
       });
 
       if (response.status >= 400) {
-        let errorBody = '';
-        for await (const chunk of response.data) {
-          errorBody += chunk.toString('utf-8');
-        }
-        let errorMessage = 'Request failed';
-        try {
-          const errorData = JSON.parse(errorBody);
-          errorMessage = errorData.error?.message || errorData.message || errorBody;
-        } catch {
-          errorMessage = errorBody || 'Unknown error';
-        }
+        const body = await drainErrorBody(response.data);
+        const errorMessage = parseErrorMessage(body);
         res.status(response.status).json({
           type: 'error',
           error: { type: 'api_error', message: errorMessage },
@@ -526,16 +446,12 @@ export class AnthropicNativeProvider {
         return;
       }
 
-      // Set Anthropic SSE headers
       setSSEHeaders(res);
 
       let inputTokens = 0;
       let outputTokens = 0;
-      let contentBlockIndex = 0;
-      let stopReason: string = 'end_turn';
-      let buffer = '';
+      let stopReason = 'end_turn';
 
-      // Send message_start event
       this.sendAnthropicEvent(res, 'message_start', {
         type: 'message_start',
         message: {
@@ -549,71 +465,70 @@ export class AnthropicNativeProvider {
           usage: { input_tokens: 0, output_tokens: 0 },
         },
       });
-
-      // Send initial ping
       this.sendAnthropicEvent(res, 'ping', { type: 'ping' });
 
-      // Track open tool use blocks: index -> {id, name, inputJson}
-      const openToolBlocks: Map<number, { id: string; name: string; inputJson: string }> = new Map();
-
-      response.data.on('data', (chunk: Buffer) => {
-        const chunkStr = chunk.toString('utf-8');
-        buffer += chunkStr;
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.trim() === '') continue;
-
-          let jsonStr = line.startsWith('data: ') ? line.slice(6) : line;
-          jsonStr = convertPythonJsonToStandardJson(jsonStr);
-
-          try {
-            const data = JSON.parse(jsonStr) as Record<string, unknown>;
-            this.processConverseStreamEvent(
-              data, res, messageId, originalModel,
-              { inputTokens, outputTokens, contentBlockIndex, stopReason, openToolBlocks },
-              (updates) => {
-                if (updates.inputTokens !== undefined) inputTokens = updates.inputTokens;
-                if (updates.outputTokens !== undefined) outputTokens = updates.outputTokens;
-                if (updates.contentBlockIndex !== undefined) contentBlockIndex = updates.contentBlockIndex;
-                if (updates.stopReason !== undefined) stopReason = updates.stopReason;
-              }
-            );
-          } catch {
-            // Not JSON or unparseable line, skip
-          }
+      for await (const event of parseConverseStream(response.data)) {
+        switch (event.type) {
+          case 'metadata':
+            inputTokens = event.inputTokens || inputTokens;
+            outputTokens = event.outputTokens || outputTokens;
+            break;
+          case 'textBlockStart':
+            this.sendAnthropicEvent(res, 'content_block_start', {
+              type: 'content_block_start',
+              index: event.index,
+              content_block: { type: 'text', text: '' },
+            });
+            break;
+          case 'textDelta':
+            this.sendAnthropicEvent(res, 'content_block_delta', {
+              type: 'content_block_delta',
+              index: event.index,
+              delta: { type: 'text_delta', text: event.text },
+            });
+            break;
+          case 'textBlockStop':
+            this.sendAnthropicEvent(res, 'content_block_stop', {
+              type: 'content_block_stop',
+              index: event.index,
+            });
+            break;
+          case 'toolBlockStart':
+            this.sendAnthropicEvent(res, 'content_block_start', {
+              type: 'content_block_start',
+              index: event.index,
+              content_block: { type: 'tool_use', id: event.id, name: event.name, input: {} },
+            });
+            break;
+          case 'toolInputDelta':
+            this.sendAnthropicEvent(res, 'content_block_delta', {
+              type: 'content_block_delta',
+              index: event.index,
+              delta: { type: 'input_json_delta', partial_json: event.partial_json },
+            });
+            break;
+          case 'toolBlockStop':
+            this.sendAnthropicEvent(res, 'content_block_stop', {
+              type: 'content_block_stop',
+              index: event.index,
+            });
+            break;
+          case 'messageStop':
+            stopReason = event.stopReason;
+            break;
         }
+      }
+
+      this.sendAnthropicEvent(res, 'message_delta', {
+        type: 'message_delta',
+        delta: { stop_reason: stopReason, stop_sequence: null },
+        usage: { output_tokens: outputTokens },
       });
-
-      response.data.on('end', () => {
-        // Close any open tool blocks
-        openToolBlocks.forEach((toolBlock, idx) => {
-          this.sendAnthropicEvent(res, 'content_block_stop', {
-            type: 'content_block_stop',
-            index: idx,
-          });
-        });
-
-        // message_delta with stop reason
-        this.sendAnthropicEvent(res, 'message_delta', {
-          type: 'message_delta',
-          delta: { stop_reason: stopReason, stop_sequence: null },
-          usage: { output_tokens: outputTokens },
-        });
-
-        // message_stop
-        this.sendAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
-        res.end();
-      });
-
-      response.data.on('error', (error: Error) => {
-        logger.error('Converse stream error (Anthropic Messages):', error.message);
-        res.end();
-      });
+      this.sendAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
+      res.end();
 
     } catch (error: unknown) {
-      const axiosError = error as { response?: { status?: number; data?: unknown }; message?: string };
+      const axiosError = error as { response?: { status?: number }; message?: string };
       logger.error('Converse stream request failed:', axiosError.message);
 
       if (!res.headersSent) {
@@ -624,122 +539,6 @@ export class AnthropicNativeProvider {
       } else {
         res.end();
       }
-    }
-  }
-
-  /**
-   * Processes a single Converse stream data event and emits Anthropic SSE events
-   */
-  private processConverseStreamEvent(
-    data: Record<string, unknown>,
-    res: Response,
-    messageId: string,
-    originalModel: string,
-    state: {
-      inputTokens: number;
-      outputTokens: number;
-      contentBlockIndex: number;
-      stopReason: string;
-      openToolBlocks: Map<number, { id: string; name: string; inputJson: string }>;
-    },
-    update: (updates: Partial<typeof state>) => void
-  ): void {
-    // Token usage from metadata
-    const metadata = data.metadata as Record<string, unknown> | undefined;
-    if (metadata?.usage) {
-      const usageData = metadata.usage as Record<string, number>;
-      update({
-        inputTokens: (usageData.inputTokens || 0) + (usageData.cacheReadInputTokens || 0) + (usageData.cacheWriteInputTokens || 0),
-        outputTokens: usageData.outputTokens || 0,
-      });
-    }
-
-    // messageStart - initial token counts
-    if (data.messageStart) {
-      const msgStart = data.messageStart as Record<string, unknown>;
-      const usage = msgStart.usage as Record<string, number> | undefined;
-      if (usage) {
-        update({ inputTokens: usage.inputTokens || 0 });
-      }
-    }
-
-    // contentBlockStart - new content block begins
-    if (data.contentBlockStart) {
-      const blockStart = data.contentBlockStart as Record<string, unknown>;
-      const start = blockStart.start as Record<string, unknown> | undefined;
-      const idx = (blockStart.contentBlockIndex as number) ?? state.contentBlockIndex;
-      update({ contentBlockIndex: idx });
-
-      if (start?.toolUse) {
-        // Tool use block
-        const toolUse = start.toolUse as Record<string, unknown>;
-        const toolId = (toolUse.toolUseId as string) || `toolu_${uuidv4().replace(/-/g, '').slice(0, 24)}`;
-        const toolName = toolUse.name as string;
-
-        state.openToolBlocks.set(idx, { id: toolId, name: toolName, inputJson: '' });
-
-        this.sendAnthropicEvent(res, 'content_block_start', {
-          type: 'content_block_start',
-          index: idx,
-          content_block: { type: 'tool_use', id: toolId, name: toolName, input: {} },
-        });
-      } else {
-        // Text block
-        this.sendAnthropicEvent(res, 'content_block_start', {
-          type: 'content_block_start',
-          index: idx,
-          content_block: { type: 'text', text: '' },
-        });
-      }
-    }
-
-    // contentBlockDelta - content delta
-    if (data.contentBlockDelta) {
-      const blockDelta = data.contentBlockDelta as Record<string, unknown>;
-      const delta = blockDelta.delta as Record<string, unknown> | undefined;
-      const idx = (blockDelta.contentBlockIndex as number) ?? state.contentBlockIndex;
-
-      if (delta?.text) {
-        this.sendAnthropicEvent(res, 'content_block_delta', {
-          type: 'content_block_delta',
-          index: idx,
-          delta: { type: 'text_delta', text: delta.text as string },
-        });
-      } else if (delta?.toolUse) {
-        const toolUseDelta = delta.toolUse as Record<string, unknown>;
-        if (toolUseDelta.input !== undefined) {
-          const inputStr = typeof toolUseDelta.input === 'string'
-            ? toolUseDelta.input
-            : JSON.stringify(toolUseDelta.input);
-          const toolBlock = state.openToolBlocks.get(idx);
-          if (toolBlock) {
-            toolBlock.inputJson += inputStr;
-          }
-          this.sendAnthropicEvent(res, 'content_block_delta', {
-            type: 'content_block_delta',
-            index: idx,
-            delta: { type: 'input_json_delta', partial_json: inputStr },
-          });
-        }
-      }
-    }
-
-    // contentBlockStop
-    if (data.contentBlockStop) {
-      const blockStop = data.contentBlockStop as Record<string, unknown>;
-      const idx = (blockStop.contentBlockIndex as number) ?? state.contentBlockIndex;
-      state.openToolBlocks.delete(idx);
-
-      this.sendAnthropicEvent(res, 'content_block_stop', {
-        type: 'content_block_stop',
-        index: idx,
-      });
-    }
-
-    // messageStop - stop reason
-    if (data.messageStop) {
-      const msgStop = data.messageStop as Record<string, unknown>;
-      update({ stopReason: (msgStop.stopReason as string) || 'end_turn' });
     }
   }
 

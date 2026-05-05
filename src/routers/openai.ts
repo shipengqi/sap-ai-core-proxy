@@ -1,33 +1,23 @@
 import { Router, Request, Response } from 'express';
 import { DeploymentManager } from '../sap-ai-core/deployments';
-import { OpenAIProvider } from '../providers/openai';
-import { AnthropicOpenAIProvider } from '../providers/anthropic-openai';
+import { ClaudeOpenAIProvider } from '../providers/claude-openai';
 import { GeminiProvider } from '../providers/gemini-openai';
 import { OpenAIChatCompletionRequest } from '../types/openai';
 import { OpenAIModel, OpenAIModelsResponse } from '../types/openai';
+import { ModelProvider } from '../types/models';
+import * as catalogue from '../model-catalogue';
 import { logger } from '../logger';
 
-/**
- * Gets the owner/provider for a model
- */
-function getModelOwner(modelName: string): string {
-  const lowerName = modelName.toLowerCase();
-  if (lowerName.includes('gpt') || lowerName.includes('o1') || lowerName.includes('o3')) {
-    return 'openai';
-  }
-  if (lowerName.includes('claude') || lowerName.includes('anthropic')) {
-    return 'anthropic';
-  }
-  if (lowerName.includes('gemini')) {
-    return 'google';
-  }
-  if (lowerName.includes('llama') || lowerName.includes('meta')) {
-    return 'meta';
-  }
-  if (lowerName.includes('mistral') || lowerName.includes('mixtral')) {
-    return 'mistral';
-  }
-  return 'sap-ai-core';
+export type ChatCompletionHandler = (req: OpenAIChatCompletionRequest, res: Response) => Promise<void>;
+
+export function buildProviderRegistry(
+  anthropicOpenAIProvider: ClaudeOpenAIProvider,
+  geminiProvider: GeminiProvider,
+): Map<ModelProvider, ChatCompletionHandler> {
+  return new Map([
+    ['anthropic', anthropicOpenAIProvider.handleChatCompletion.bind(anthropicOpenAIProvider)],
+    ['gemini', geminiProvider.handleChatCompletion.bind(geminiProvider)],
+  ]);
 }
 
 /**
@@ -42,7 +32,7 @@ function handleListModels(deploymentManager: DeploymentManager) {
         id: d.details.resources.backend_details.model.name,
         object: 'model' as const,
         created: new Date(d.createdAt).getTime() / 1000,
-        owned_by: getModelOwner(d.details.resources.backend_details.model.name),
+        owned_by: catalogue.getOwner(d.details.resources.backend_details.model.name),
       }));
 
       const response: OpenAIModelsResponse = {
@@ -91,7 +81,7 @@ function handleGetModel(deploymentManager: DeploymentManager) {
         id: deployment.details.resources.backend_details.model.name,
         object: 'model',
         created: new Date(deployment.createdAt).getTime() / 1000,
-        owned_by: getModelOwner(deployment.details.resources.backend_details.model.name),
+        owned_by: catalogue.getOwner(deployment.details.resources.backend_details.model.name),
       };
 
       res.json(model);
@@ -114,10 +104,8 @@ function handleGetModel(deploymentManager: DeploymentManager) {
  * Creates handler for POST /v1/chat/completions - Chat completion dispatch
  */
 function handleChatCompletions(
-  deploymentManager: DeploymentManager,
-  openaiProvider: OpenAIProvider,
-  anthropicOpenAIProvider: AnthropicOpenAIProvider,
-  geminiProvider: GeminiProvider,
+  providerRegistry: Map<ModelProvider, ChatCompletionHandler>,
+  defaultHandler: ChatCompletionHandler,
 ) {
   return async (req: Request, res: Response): Promise<void> => {
     const chatRequest = req.body as OpenAIChatCompletionRequest;
@@ -148,25 +136,10 @@ function handleChatCompletions(
     }
 
     try {
-      // Determine which handler to use based on model provider
-      const provider = deploymentManager.getModelProvider(chatRequest.model);
-
+      const provider = catalogue.getProvider(chatRequest.model);
       logger.info(`Processing chat completion for model: ${chatRequest.model} (provider: ${provider})`);
-
-      switch (provider) {
-        case 'anthropic':
-          await anthropicOpenAIProvider.handleChatCompletion(chatRequest, res);
-          break;
-        case 'gemini':
-          await geminiProvider.handleChatCompletion(chatRequest, res);
-          break;
-        case 'openai':
-        case 'meta':
-        case 'mistral':
-        default:
-          await openaiProvider.handleChatCompletion(chatRequest, res);
-          break;
-      }
+      const handler = providerRegistry.get(provider) ?? defaultHandler;
+      await handler(chatRequest, res);
     } catch (error: unknown) {
       const err = error as { message?: string };
       logger.error('Chat completion failed:', err.message);
@@ -187,13 +160,12 @@ function handleChatCompletions(
 
 /**
  * Creates a router for OpenAI-compatible proxy endpoints.
- * Mounted at /openai-compatible
+ * Mounted at /openai
  */
 export function createOpenAICompatibleRouter(
   deploymentManager: DeploymentManager,
-  openaiProvider: OpenAIProvider,
-  anthropicOpenAIProvider: AnthropicOpenAIProvider,
-  geminiProvider: GeminiProvider,
+  providerRegistry: Map<ModelProvider, ChatCompletionHandler>,
+  defaultHandler: ChatCompletionHandler,
 ): Router {
   const router = Router();
 
@@ -203,8 +175,8 @@ export function createOpenAICompatibleRouter(
   router.get('/models', handleListModels(deploymentManager));
 
   // Chat completions
-  router.post('/v1/chat/completions', handleChatCompletions(deploymentManager, openaiProvider, anthropicOpenAIProvider, geminiProvider));
-  router.post('/chat/completions', handleChatCompletions(deploymentManager, openaiProvider, anthropicOpenAIProvider, geminiProvider));
+  router.post('/v1/chat/completions', handleChatCompletions(providerRegistry, defaultHandler));
+  router.post('/chat/completions', handleChatCompletions(providerRegistry, defaultHandler));
 
   return router;
 }

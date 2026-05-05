@@ -14,8 +14,8 @@ export function createHealthRouter(): Router {
       endpoints: {
         health: '/health',
         openaiCompatible: {
-          models: '/openai-compatible/v1/models',
-          chat: '/openai-compatible/v1/chat/completions',
+          models: '/openai/v1/models',
+          chat: '/openai/v1/chat/completions',
         },
         anthropic: {
           messages: '/anthropic/v1/messages',

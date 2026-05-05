@@ -20,7 +20,22 @@
       "mcp__plugin_ecc_memory__read_graph",
       "Bash(npm list:*)",
       "Bash(npx -y @modelcontextprotocol/server-memory --help)",
-      "Bash(ls -la /home/pooky/.npm/_npx/f0415454dfb4e463/node_modules/@modelcontextprotocol/server-memory/dist/memory.json*)"
+      "Bash(ls -la /home/pooky/.npm/_npx/f0415454dfb4e463/node_modules/@modelcontextprotocol/server-memory/dist/memory.json*)",
+      "Bash(rtk read *)",
+      "Bash(rtk grep *)",
+      "mcp__plugin_claude-mem_mcp-search__smart_outline",
+      "mcp__plugin_claude-mem_mcp-search__smart_search",
+      "Bash(rtk find *)",
+      "Bash(rtk ls *)",
+      "Bash(sed -i '' 's/AnthropicOpenAIProvider/ClaudeOpenAIProvider/g' /Users/C5406922/code/sap-ai-core-proxy/src/providers/claude-openai.ts)",
+      "Bash(sed -i '' \"s|from '../providers/anthropic-openai'|from '../providers/claude-openai'|g\" /Users/C5406922/code/sap-ai-core-proxy/src/providers/claude-openai.ts)",
+      "Bash(sed -i '' \"s|from './openai-compatible'|from './openai'|g\" /Users/C5406922/code/sap-ai-core-proxy/src/routers/index.ts)",
+      "Bash(sed -i '' \"s|from '../providers/anthropic-openai'|from '../providers/claude-openai'|g\" /Users/C5406922/code/sap-ai-core-proxy/src/routers/openai.ts)",
+      "Bash(sed -i '' 's/AnthropicOpenAIProvider/ClaudeOpenAIProvider/g' /Users/C5406922/code/sap-ai-core-proxy/src/routers/openai.ts)",
+      "Bash(sed -i '' \"s|from '../providers/anthropic-native'|from '../providers/claude-anthropic'|g\" /Users/C5406922/code/sap-ai-core-proxy/src/routers/anthropic.ts)",
+      "Bash(sed -i '' 's/AnthropicNativeProvider/ClaudeAnthropicProvider/g' /Users/C5406922/code/sap-ai-core-proxy/src/routers/anthropic.ts)",
+      "Bash(npm install *)",
+      "Bash(npm test *)"
     ]
   }
 }

@@ -158,7 +158,7 @@ export class OpenAIProvider {
               const data = JSON.parse(line.slice(6));
               const chunk = this.transformStreamChunk(data, completionId, created, model);
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            } catch (e) {
+            } catch {
               logger.debug('Failed to parse streaming chunk:', line);
             }
           }
@@ -172,7 +172,7 @@ export class OpenAIProvider {
               const data = JSON.parse(buffer.slice(6));
               const chunk = this.transformStreamChunk(data, completionId, created, model);
               res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            } catch (e) {
+            } catch {
               logger.debug('Failed to parse final streaming chunk');
             }
           }

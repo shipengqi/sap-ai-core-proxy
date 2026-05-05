@@ -1,4 +1,4 @@
 export { OpenAIProvider } from './openai';
-export { AnthropicOpenAIProvider } from './anthropic-openai';
-export { AnthropicNativeProvider } from './anthropic-native';
+export { ClaudeOpenAIProvider } from './claude-openai';
+export { ClaudeAnthropicProvider } from './claude-anthropic';
 export { GeminiProvider } from './gemini-openai';

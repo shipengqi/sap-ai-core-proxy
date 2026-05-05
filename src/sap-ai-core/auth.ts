@@ -63,7 +63,7 @@ export class AuthManager {
     } catch (error: unknown) {
       const axiosError = error as { response?: { status?: number; data?: unknown }; message?: string };
       logger.error('Authentication failed:', axiosError.response?.data || axiosError.message);
-      throw new Error(`Failed to authenticate with SAP AI Core: ${axiosError.message || 'Unknown error'}`);
+      throw new Error(`Failed to authenticate with SAP AI Core: ${axiosError.message || 'Unknown error'}`, { cause: error });
     }
   }
 

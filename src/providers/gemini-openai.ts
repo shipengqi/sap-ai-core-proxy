@@ -10,6 +10,7 @@ import {
   OpenAIMessage
 } from '../types/openai';
 import { extractTextContent, setSSEHeaders, extractErrorDetails, sendOpenAIError } from '../utils';
+import * as catalogue from '../model-catalogue';
 import { logger } from '../logger';
 
 /**
@@ -96,7 +97,7 @@ export class GeminiProvider {
     messages: OpenAIMessage[]
   ): Record<string, unknown> {
     const { systemInstruction, contents } = this.convertMessages(messages);
-    const modelInfo = this.deploymentManager.getModelInfo(req.model);
+    const modelInfo = catalogue.getModelInfo(req.model);
     const maxTokens = req.max_tokens || modelInfo?.maxTokens || 8192;
 
     const payload: Record<string, unknown> = {
@@ -233,7 +234,7 @@ export class GeminiProvider {
                 promptTokens = processed.usageMetadata.promptTokenCount ?? promptTokens;
                 outputTokens = processed.usageMetadata.candidatesTokenCount ?? outputTokens;
               }
-            } catch (e) {
+            } catch {
               logger.debug('Failed to parse Gemini streaming chunk:', line);
             }
           }
