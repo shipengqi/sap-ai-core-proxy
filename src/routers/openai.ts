@@ -60,7 +60,7 @@ function handleListModels(deploymentManager: DeploymentManager) {
 function handleGetModel(deploymentManager: DeploymentManager) {
   return async (req: Request, res: Response): Promise<void> => {
     try {
-      const { modelId } = req.params;
+      const modelId = req.params['modelId'] as string;
       const model = await deploymentManager.findModelDeployment(modelId);
 
       if (!model) {
