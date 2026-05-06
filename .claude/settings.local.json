@@ -38,7 +38,8 @@
       "Bash(npm test *)",
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(rtk git *)"
+      "Bash(rtk git *)",
+      "Bash(node -e \"require\\('express/package.json'\\).version\")"
     ]
   }
 }

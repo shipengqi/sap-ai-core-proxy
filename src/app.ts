@@ -84,7 +84,7 @@ function setupMiddleware(app: express.Application): void {
   });
 
   // Handle OPTIONS requests
-  app.options('*', (_req: Request, res: Response) => {
+  app.options('*path', (_req: Request, res: Response) => {
     res.status(204).end();
   });
 }

@@ -82,7 +82,7 @@ export function createClaudeCodeCompatRouter(): Router {
     res.json({ eligible: true, user: fakeUser });
   });
 
-  router.all('/api/*', (req: Request, res: Response) => {
+  router.all('/api/*path', (req: Request, res: Response) => {
     logger.debug(`Claude Code compat stub: ${req.method} ${req.path}`);
     res.json({ ok: true });
   });
