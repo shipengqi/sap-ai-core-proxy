@@ -1,17 +1,17 @@
 import { Response } from 'express';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthManager } from '../sap-ai-core/auth';
-import { DeploymentManager } from '../sap-ai-core/deployments';
+import { AuthManager } from '../../../sap-ai-core/auth';
+import { DeploymentManager } from '../../../sap-ai-core/deployments';
 import {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
   OpenAIChatCompletionChunk,
   OpenAIMessage
-} from '../types/openai';
-import { extractTextContent, setSSEHeaders, extractErrorDetails, sendOpenAIError } from '../utils';
-import * as catalogue from '../model-catalogue';
-import { logger } from '../logger';
+} from '../../../types/openai';
+import { extractTextContent, setSSEHeaders, extractErrorDetails, sendOpenAIError } from '../../../utils';
+import * as catalogue from '../../../model-catalogue';
+import { logger } from '../../../logger';
 
 /**
  * Handles Gemini model requests via SAP AI Core

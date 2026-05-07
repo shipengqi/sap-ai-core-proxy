@@ -1,16 +1,16 @@
 import { Request, Response } from 'express';
-import { AuthManager } from '../sap-ai-core/auth';
-import { DeploymentManager } from '../sap-ai-core/deployments';
+import { AuthManager } from '../../../sap-ai-core/auth';
+import { DeploymentManager } from '../../../sap-ai-core/deployments';
 import {
   AnthropicMessagesRequest,
   AnthropicContentBlock,
   AnthropicTextContent,
   AnthropicCountTokensResponse,
-} from '../types/anthropic';
-import { ConverseAnthropicProvider } from './claude-anthropic-converse';
-import { InvokeAnthropicProvider } from './claude-anthropic-invoke';
-import * as catalogue from '../model-catalogue';
-import { logger } from '../logger';
+} from '../../../types/anthropic';
+import { ConverseAnthropicProvider } from './converse';
+import { InvokeAnthropicProvider } from './invoke';
+import * as catalogue from '../../../model-catalogue';
+import { logger } from '../../../logger';
 
 function extractSystemPrompt(system: string | Array<{ type: string; text: string }> | undefined): string {
   if (!system) return '';

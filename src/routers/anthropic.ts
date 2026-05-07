@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { ClaudeAnthropicProvider } from '../providers/claude-anthropic';
+import { ClaudeAnthropicProvider } from '../providers';
 import { DeploymentManager } from '../sap-ai-core/deployments';
 import { AnthropicModel, AnthropicModelsResponse } from '../types/anthropic';
 import * as catalogue from '../model-catalogue';

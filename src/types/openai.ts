@@ -107,3 +107,22 @@ export interface OpenAIErrorResponse {
     code: string | null;
   };
 }
+
+export interface OpenAIEmbeddingsRequest {
+  model: string;
+  input: string | string[];
+  encoding_format?: string;
+  dimensions?: number;
+}
+
+export interface OpenAIResponsesRequest {
+  model: string;
+  input: string | unknown[];
+  stream?: boolean;
+  temperature?: number;
+  [key: string]: unknown;
+}
+
+export interface OpenAITranscriptionResponse {
+  text: string;
+}

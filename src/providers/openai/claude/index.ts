@@ -1,11 +1,11 @@
 import { Response } from 'express';
-import { AuthManager } from '../sap-ai-core/auth';
-import { DeploymentManager } from '../sap-ai-core/deployments';
-import { OpenAIChatCompletionRequest } from '../types/openai';
-import { ConverseOpenAIProvider } from './claude-openai-converse';
-import { InvokeOpenAIProvider } from './claude-openai-invoke';
-import * as catalogue from '../model-catalogue';
-import { logger } from '../logger';
+import { AuthManager } from '../../../sap-ai-core/auth';
+import { DeploymentManager } from '../../../sap-ai-core/deployments';
+import { OpenAIChatCompletionRequest } from '../../../types/openai';
+import { ConverseOpenAIProvider } from './converse';
+import { InvokeOpenAIProvider } from './invoke';
+import * as catalogue from '../../../model-catalogue';
+import { logger } from '../../../logger';
 
 /**
  * Entry point for the OpenAI-compatible surface (/v1/chat/completions) for Claude models.

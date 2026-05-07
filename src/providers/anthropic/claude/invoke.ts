@@ -1,20 +1,20 @@
 import { Response } from 'express';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthManager } from '../sap-ai-core/auth';
-import { DeploymentManager } from '../sap-ai-core/deployments';
+import { AuthManager } from '../../../sap-ai-core/auth';
+import { DeploymentManager } from '../../../sap-ai-core/deployments';
 import {
   AnthropicMessagesRequest,
   AnthropicMessagesResponse,
   AnthropicContentBlock,
   AnthropicTextContent,
-} from '../types/anthropic';
+} from '../../../types/anthropic';
 import {
   setSSEHeaders,
   sendSSEEvent,
   handleAnthropicError,
-} from '../utils';
-import { logger } from '../logger';
+} from '../../../utils';
+import { logger } from '../../../logger';
 
 function extractSystemPrompt(system: string | Array<{ type: string; text: string }> | undefined): string {
   if (!system) return '';

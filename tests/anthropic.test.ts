@@ -108,4 +108,40 @@ describe('Anthropic Surface', () => {
       expect(res.body.type).toBe('error');
     });
   });
+
+  describe('Claude Code compat stubs', () => {
+    it('POST /anthropic/oauth/token returns access_token', async () => {
+      const res = await request(app).post('/anthropic/oauth/token').send({});
+      expect(res.status).toBe(200);
+      expect(typeof res.body.access_token).toBe('string');
+      expect(res.body.token_type).toBe('Bearer');
+    });
+
+    it('GET /anthropic/api/auth/me returns user info with api access', async () => {
+      const res = await request(app).get('/anthropic/api/auth/me');
+      expect(res.status).toBe(200);
+      expect(res.body.has_api_access).toBe(true);
+      expect(typeof res.body.id).toBe('string');
+    });
+
+    it('GET /anthropic/api/organizations returns organizations array', async () => {
+      const res = await request(app).get('/anthropic/api/organizations');
+      expect(res.status).toBe(200);
+      expect(Array.isArray(res.body.organizations)).toBe(true);
+      expect(res.body.organizations.length).toBeGreaterThan(0);
+    });
+
+    it('GET /anthropic/api/quota returns usage and limits', async () => {
+      const res = await request(app).get('/anthropic/api/quota');
+      expect(res.status).toBe(200);
+      expect(res.body.usage).toBeDefined();
+      expect(res.body.limits).toBeDefined();
+    });
+
+    it('GET /anthropic/api/unknown-endpoint returns { ok: true } via catch-all', async () => {
+      const res = await request(app).get('/anthropic/api/completely-unknown-path');
+      expect(res.status).toBe(200);
+      expect(res.body.ok).toBe(true);
+    });
+  });
 });

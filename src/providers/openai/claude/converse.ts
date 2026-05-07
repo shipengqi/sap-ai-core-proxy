@@ -1,14 +1,14 @@
 import { Response } from 'express';
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
-import { AuthManager } from '../sap-ai-core/auth';
-import { DeploymentManager } from '../sap-ai-core/deployments';
+import { AuthManager } from '../../../sap-ai-core/auth';
+import { DeploymentManager } from '../../../sap-ai-core/deployments';
 import {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
   OpenAIChatCompletionChunk,
   OpenAIMessage,
-} from '../types/openai';
+} from '../../../types/openai';
 import {
   extractTextContent,
   setSSEHeaders,
@@ -17,9 +17,9 @@ import {
   drainErrorBody,
   parseErrorMessage,
   applyPromptCaching,
-} from '../utils';
-import * as catalogue from '../model-catalogue';
-import { logger } from '../logger';
+} from '../../../utils';
+import * as catalogue from '../../../model-catalogue';
+import { logger } from '../../../logger';
 
 /**
  * Handles Claude 3.5+ models via SAP AI Core Converse API.

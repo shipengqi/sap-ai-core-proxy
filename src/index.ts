@@ -34,9 +34,14 @@ async function main(): Promise<void> {
     logger.info('Endpoints:');
     logger.info(`  GET  /health - Health check`);
     logger.info('  --- OpenAI ---');
-    logger.info(`  GET  /openai/v1/models - List available models`);
-    logger.info(`  GET  /openai/v1/models/:modelId - Get model details`);
-    logger.info(`  POST /openai/v1/chat/completions - Chat completion`);
+    logger.info(`  GET    /openai/v1/models - List available models`);
+    logger.info(`  GET    /openai/v1/models/:modelId - Get model details`);
+    logger.info(`  POST   /openai/v1/chat/completions - Chat completion`);
+    logger.info(`  POST   /openai/v1/embeddings - Embeddings`);
+    logger.info(`  POST   /openai/v1/responses - Responses API (create)`);
+    logger.info(`  GET    /openai/v1/responses/:id - Responses API (retrieve)`);
+    logger.info(`  DELETE /openai/v1/responses/:id - Responses API (delete)`);
+    logger.info(`  POST   /openai/v1/audio/transcriptions - Audio transcription`);
     logger.info('  --- Anthropic ---');
     logger.info(`  GET  /anthropic/v1/models - List available models`);
     logger.info(`  POST /anthropic/v1/messages - Anthropic Messages API`);

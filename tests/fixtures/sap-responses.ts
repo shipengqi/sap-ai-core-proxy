@@ -40,3 +40,30 @@ export const SAP_GEMINI_RESPONSE = {
     totalTokenCount: 18,
   },
 };
+
+// SAP AI Core response for embeddings endpoint
+export const SAP_EMBEDDINGS_RESPONSE = {
+  object: 'list',
+  data: [{
+    object: 'embedding',
+    index: 0,
+    embedding: [0.1, 0.2, 0.3],
+  }],
+  model: 'text-embedding-ada-002',
+  usage: { prompt_tokens: 5, total_tokens: 5 },
+};
+
+// SAP AI Core response for Responses API
+export const SAP_RESPONSES_RESPONSE = {
+  id: 'resp-sap-001',
+  object: 'response',
+  created_at: 1700000000,
+  model: 'gpt-4o',
+  output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Hello from Responses API!' }] }],
+  usage: { input_tokens: 10, output_tokens: 8, total_tokens: 18 },
+};
+
+// SAP AI Core response for audio transcription endpoint
+export const SAP_AUDIO_RESPONSE = {
+  text: 'Hello from Whisper!',
+};

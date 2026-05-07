@@ -2,10 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { AppConfig } from './config';
 import { AuthManager } from './sap-ai-core/auth';
 import { DeploymentManager } from './sap-ai-core/deployments';
-import { OpenAIProvider } from './providers/openai';
-import { ClaudeOpenAIProvider } from './providers/claude-openai';
-import { GeminiProvider } from './providers/gemini-openai';
-import { ClaudeAnthropicProvider } from './providers/claude-anthropic';
+import { OpenAIProvider, ClaudeOpenAIProvider, GeminiProvider, ClaudeAnthropicProvider, EmbeddingsProvider, ResponsesProvider, AudioProvider } from './providers';
 import {
   createHealthRouter,
   createAdminRouter,
@@ -37,12 +34,15 @@ export function createApp(config: AppConfig): AppResult {
   const claudeOpenAIProvider = new ClaudeOpenAIProvider(authManager, deploymentManager);
   const geminiProvider = new GeminiProvider(authManager, deploymentManager);
   const claudeAnthropicProvider = new ClaudeAnthropicProvider(authManager, deploymentManager);
+  const embeddingsProvider = new EmbeddingsProvider(authManager, deploymentManager);
+  const responsesProvider = new ResponsesProvider(authManager, deploymentManager);
+  const audioProvider = new AudioProvider(authManager, deploymentManager);
 
   // Setup middleware
   setupMiddleware(app);
 
   // Setup routes via routers
-  setupRoutes(app, deploymentManager, openaiProvider, claudeOpenAIProvider, geminiProvider, claudeAnthropicProvider);
+  setupRoutes(app, deploymentManager, openaiProvider, claudeOpenAIProvider, geminiProvider, claudeAnthropicProvider, embeddingsProvider, responsesProvider, audioProvider);
 
   return { app, authManager, deploymentManager };
 }
@@ -99,15 +99,23 @@ function setupRoutes(
   claudeOpenAIProvider: ClaudeOpenAIProvider,
   geminiProvider: GeminiProvider,
   claudeAnthropicProvider: ClaudeAnthropicProvider,
+  embeddingsProvider: EmbeddingsProvider,
+  responsesProvider: ResponsesProvider,
+  audioProvider: AudioProvider,
 ): void {
   // Health/info routes at root
   app.use('/', createHealthRouter());
 
   // OpenAI surface
   const providerRegistry = buildProviderRegistry(claudeOpenAIProvider, geminiProvider);
-  app.use('/openai', createOpenAICompatibleRouter(
-    deploymentManager, providerRegistry, openaiProvider.handleChatCompletion.bind(openaiProvider),
-  ));
+  app.use('/openai', createOpenAICompatibleRouter({
+    deploymentManager,
+    providerRegistry,
+    defaultHandler: openaiProvider.handleChatCompletion.bind(openaiProvider),
+    embeddingsProvider,
+    responsesProvider,
+    audioProvider,
+  }));
 
   // Anthropic surface
   app.use('/anthropic', createAnthropicRouter(claudeAnthropicProvider, deploymentManager));

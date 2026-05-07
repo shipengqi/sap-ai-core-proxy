@@ -94,6 +94,11 @@ npm start
 | `/openai/v1/models` | GET | List available models |
 | `/openai/v1/models/:modelId` | GET | Get specific model info |
 | `/openai/v1/chat/completions` | POST | Chat completion |
+| `/openai/v1/embeddings` | POST | Text embeddings |
+| `/openai/v1/responses` | POST | Responses API (create) |
+| `/openai/v1/responses/:id` | GET | Responses API (retrieve) |
+| `/openai/v1/responses/:id` | DELETE | Responses API (delete) |
+| `/openai/v1/audio/transcriptions` | POST | Audio transcription (Whisper) |
 
 ### Anthropic Surface (`/anthropic`)
 
@@ -267,15 +272,24 @@ src/
 │   ├── admin.ts                    # /admin/* routes
 │   └── health.ts                   # / and /health routes
 ├── providers/                      # LLM provider implementations
-│   ├── index.ts                    # Provider exports
-│   ├── openai.ts                   # OpenAI models via OpenAI surface
-│   ├── claude-openai.ts            # Claude via OpenAI surface (dispatcher)
-│   ├── claude-openai-converse.ts   # Claude Converse API, Claude 3.5+ (OpenAI surface)
-│   ├── claude-openai-invoke.ts     # Claude Invoke API, Claude 3 (OpenAI surface)
-│   ├── gemini-openai.ts            # Gemini models via OpenAI surface
-│   ├── claude-anthropic.ts         # Claude via Anthropic surface (dispatcher)
-│   ├── claude-anthropic-converse.ts # Claude Converse API, Claude 3.5+ (Anthropic surface)
-│   └── claude-anthropic-invoke.ts  # Claude Invoke API, Claude 3 (Anthropic surface)
+│   ├── index.ts                    # Barrel export (all providers)
+│   ├── openai/                     # OpenAI-compatible surface
+│   │   ├── native/                 # Native OpenAI models
+│   │   │   ├── chat.ts             # GPT chat completions
+│   │   │   ├── embeddings.ts       # Text embeddings
+│   │   │   ├── responses.ts        # Responses API
+│   │   │   └── audio.ts            # Audio transcription (Whisper)
+│   │   ├── claude/                 # Claude via OpenAI surface
+│   │   │   ├── index.ts            # Dispatcher (Converse vs Invoke)
+│   │   │   ├── converse.ts         # Converse API (Claude 3.5+)
+│   │   │   └── invoke.ts           # Invoke API (Claude 3)
+│   │   └── gemini/                 # Gemini via OpenAI surface
+│   │       └── index.ts            # Gemini generateContent adapter
+│   └── anthropic/                  # Anthropic-native surface
+│       └── claude/                 # Claude via Anthropic surface
+│           ├── index.ts            # Dispatcher (Converse vs Invoke)
+│           ├── converse.ts         # Converse API (Claude 3.5+)
+│           └── invoke.ts           # Invoke API (Claude 3)
 ├── utils/                          # Shared utilities
 │   ├── json-parser.ts              # Python-style JSON conversion
 │   ├── content-extractor.ts        # Message content extraction

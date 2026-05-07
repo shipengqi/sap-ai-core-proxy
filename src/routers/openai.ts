@@ -1,12 +1,14 @@
 import { Router, Request, Response } from 'express';
+import multer from 'multer';
 import { DeploymentManager } from '../sap-ai-core/deployments';
-import { ClaudeOpenAIProvider } from '../providers/claude-openai';
-import { GeminiProvider } from '../providers/gemini-openai';
+import { ClaudeOpenAIProvider, GeminiProvider, EmbeddingsProvider, ResponsesProvider, AudioProvider, MulterRequest } from '../providers';
 import { OpenAIChatCompletionRequest } from '../types/openai';
 import { OpenAIModel, OpenAIModelsResponse } from '../types/openai';
 import { ModelProvider } from '../types/models';
 import * as catalogue from '../model-catalogue';
 import { logger } from '../logger';
+
+const upload = multer({ storage: multer.memoryStorage() });
 
 export type ChatCompletionHandler = (req: OpenAIChatCompletionRequest, res: Response) => Promise<void>;
 
@@ -160,21 +162,38 @@ function handleChatCompletions(
  * Creates a router for OpenAI-compatible proxy endpoints.
  * Mounted at /openai
  */
-export function createOpenAICompatibleRouter(
-  deploymentManager: DeploymentManager,
-  providerRegistry: Map<ModelProvider, ChatCompletionHandler>,
-  defaultHandler: ChatCompletionHandler,
-): Router {
+export function createOpenAICompatibleRouter(opts: {
+  deploymentManager: DeploymentManager;
+  providerRegistry: Map<ModelProvider, ChatCompletionHandler>;
+  defaultHandler: ChatCompletionHandler;
+  embeddingsProvider: EmbeddingsProvider;
+  responsesProvider: ResponsesProvider;
+  audioProvider: AudioProvider;
+}): Router {
   const router = Router();
 
   // Model endpoints
-  router.get('/v1/models', handleListModels(deploymentManager));
-  router.get('/v1/models/:modelId', handleGetModel(deploymentManager));
-  router.get('/models', handleListModels(deploymentManager));
+  router.get('/v1/models', handleListModels(opts.deploymentManager));
+  router.get('/v1/models/:modelId', handleGetModel(opts.deploymentManager));
+  router.get('/models', handleListModels(opts.deploymentManager));
 
   // Chat completions
-  router.post('/v1/chat/completions', handleChatCompletions(providerRegistry, defaultHandler));
-  router.post('/chat/completions', handleChatCompletions(providerRegistry, defaultHandler));
+  router.post('/v1/chat/completions', handleChatCompletions(opts.providerRegistry, opts.defaultHandler));
+  router.post('/chat/completions', handleChatCompletions(opts.providerRegistry, opts.defaultHandler));
+
+  // Embeddings
+  router.post('/v1/embeddings', (req: Request, res: Response) => opts.embeddingsProvider.handleEmbeddings(req, res));
+
+  // Responses API
+  router.post('/v1/responses', (req: Request, res: Response) => opts.responsesProvider.handleCreate(req, res));
+  router.get('/v1/responses/:responseId', (req: Request, res: Response) =>
+    opts.responsesProvider.handleGet(req.params['responseId'] as string, req, res));
+  router.delete('/v1/responses/:responseId', (req: Request, res: Response) =>
+    opts.responsesProvider.handleDelete(req.params['responseId'] as string, req, res));
+
+  // Audio transcription
+  router.post('/v1/audio/transcriptions', upload.single('file'), (req: Request, res: Response) =>
+    opts.audioProvider.handleTranscription(req as MulterRequest, res));
 
   return router;
 }

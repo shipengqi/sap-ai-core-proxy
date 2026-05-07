@@ -26,12 +26,16 @@ function makeDeployment(id: string, modelName: string) {
 export const DEPLOY_OPENAI_ID = 'deploy-openai-001';
 export const DEPLOY_CLAUDE_ID = 'deploy-claude-001';
 export const DEPLOY_GEMINI_ID = 'deploy-gemini-001';
+export const DEPLOY_EMBEDDING_ID = 'deploy-embedding-001';
+export const DEPLOY_WHISPER_ID = 'deploy-whisper-001';
 
 export const DEPLOYMENTS_RESPONSE: DeploymentsResponse = {
-  count: 3,
+  count: 5,
   resources: [
     makeDeployment(DEPLOY_OPENAI_ID, 'gpt-4o'),
     makeDeployment(DEPLOY_CLAUDE_ID, 'anthropic--claude-4.5-sonnet'),
     makeDeployment(DEPLOY_GEMINI_ID, 'gemini-2.5-flash'),
+    makeDeployment(DEPLOY_EMBEDDING_ID, 'text-embedding-ada-002'),
+    makeDeployment(DEPLOY_WHISPER_ID, 'whisper'),
   ],
 };

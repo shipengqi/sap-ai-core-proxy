@@ -39,7 +39,11 @@
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(rtk git *)",
-      "Bash(node -e \"require\\('express/package.json'\\).version\")"
+      "Bash(node -e \"require\\('express/package.json'\\).version\")",
+      "Bash(find /Users/C5406922/code/ai-proxy-sap-aicore -type f -name \"*.ts\" -o -name \"*.js\" -o -name \"*.json\" | head -50)",
+      "Read(//Users/C5406922/code/ai-proxy-sap-aicore/**)",
+      "Bash(grep -E \"\\\\.\\(ts|json\\)$\")",
+      "Bash(rtk wc *)"
     ]
   }
 }
