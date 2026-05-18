@@ -4,6 +4,7 @@ import { extractErrorDetails, sendOpenAIError, sendAnthropicError } from '../src
 import { convertPythonJsonToStandardJson } from '../src/utils/json-parser';
 import { extractTextContent } from '../src/utils/content-extractor';
 import { applyPromptCaching, parseErrorMessage } from '../src/utils/converse-stream';
+import { endStreamOnError } from '../src/utils/sse';
 
 function mockRes() {
   const json = vi.fn();
@@ -187,5 +188,38 @@ describe('parseErrorMessage', () => {
 
   it('returns "Unknown error" for empty body', () => {
     expect(parseErrorMessage('')).toBe('Unknown error');
+  });
+});
+
+describe('endStreamOnError', () => {
+  it('sends 500 JSON when headers have not been sent', () => {
+    const json = vi.fn();
+    const status = vi.fn().mockReturnValue({ json });
+    const res = { headersSent: false, status, write: vi.fn(), end: vi.fn() } as unknown as Response;
+    endStreamOnError(res, new Error('network failed'));
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: expect.objectContaining({ message: 'network failed', type: 'api_error' }),
+      }),
+    );
+  });
+
+  it('writes DONE and ends when headers are already sent', () => {
+    const write = vi.fn();
+    const end = vi.fn();
+    const res = { headersSent: true, status: vi.fn(), write, end } as unknown as Response;
+    endStreamOnError(res, new Error('stream broke'));
+    expect(write).toHaveBeenCalledWith('data: [DONE]\n\n');
+    expect(end).toHaveBeenCalled();
+  });
+});
+
+describe('extractErrorDetails — statusCode fallback', () => {
+  it('uses error.statusCode when there is no response object', () => {
+    const error = Object.assign(new Error('Response not found: xyz'), { statusCode: 404 });
+    const { statusCode, message } = extractErrorDetails(error);
+    expect(statusCode).toBe(404);
+    expect(message).toBe('Response not found: xyz');
   });
 });

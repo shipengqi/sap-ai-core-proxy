@@ -25,7 +25,7 @@ export function extractErrorDetails(error: unknown): ErrorDetails {
     responseData: axiosError.response?.data,
   });
 
-  const statusCode = axiosError.response?.status || 500;
+  const statusCode = axiosError.response?.status || (error as { statusCode?: number }).statusCode || 500;
   let message = 'Internal server error';
   const responseData = axiosError.response?.data;
 

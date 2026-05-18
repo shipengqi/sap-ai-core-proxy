@@ -3,7 +3,7 @@ import request from 'supertest';
 import { Readable } from 'stream';
 import MockAdapter from 'axios-mock-adapter';
 import { createTestApp, createMockAdapter, setupAuthMock } from './helpers/setup';
-import { DEPLOYMENTS_RESPONSE, DEPLOY_OPENAI_ID, DEPLOY_CLAUDE_ID, DEPLOY_GEMINI_ID, DEPLOY_EMBEDDING_ID, DEPLOY_WHISPER_ID } from './fixtures/deployments';
+import { DEPLOYMENTS_RESPONSE, DEPLOY_OPENAI_ID, DEPLOY_CLAUDE_ID, DEPLOY_CLAUDE3_ID, DEPLOY_GEMINI_ID, DEPLOY_EMBEDDING_ID, DEPLOY_WHISPER_ID } from './fixtures/deployments';
 import { SAP_OPENAI_RESPONSE, SAP_CONVERSE_RESPONSE, SAP_GEMINI_RESPONSE, SAP_EMBEDDINGS_RESPONSE, SAP_RESPONSES_RESPONSE, SAP_AUDIO_RESPONSE } from './fixtures/sap-responses';
 
 describe('OpenAI Surface', () => {
@@ -32,7 +32,7 @@ describe('OpenAI Surface', () => {
       expect(res.status).toBe(200);
       expect(res.body.object).toBe('list');
       expect(Array.isArray(res.body.data)).toBe(true);
-      expect(res.body.data.length).toBe(5);
+      expect(res.body.data.length).toBe(6);
 
       const gpt4o = res.body.data.find((m: { id: string }) => m.id === 'gpt-4o');
       expect(gpt4o).toBeDefined();
@@ -119,6 +119,36 @@ describe('OpenAI Surface', () => {
       expect(res.body as string).toContain('Hello!');
       expect(res.body as string).toContain('[DONE]');
     });
+
+    it('returns JSON error when Claude invoke stream receives 429', async () => {
+      const errorStream = Readable.from([Buffer.from(JSON.stringify({ message: 'Rate limit exceeded' }))]);
+      mock
+        .onPost(new RegExp(`${DEPLOY_CLAUDE3_ID}/invoke-with-response-stream`))
+        .reply(429, errorStream);
+
+      const res = await request(app)
+        .post('/openai/v1/chat/completions')
+        .send({ model: 'anthropic--claude-3-haiku', messages: [{ role: 'user', content: 'Hello' }], stream: true });
+
+      expect(res.status).toBe(429);
+      expect(res.body.error).toBeDefined();
+      expect(res.body.error.message).toBe('Rate limit exceeded');
+    });
+
+    it('returns JSON error when Gemini stream receives 429', async () => {
+      const errorStream = Readable.from([Buffer.from(JSON.stringify({ message: 'Quota exceeded' }))]);
+      mock
+        .onPost(new RegExp(`${DEPLOY_GEMINI_ID}/models/gemini-2\\.5-flash:streamGenerateContent`))
+        .reply(429, errorStream);
+
+      const res = await request(app)
+        .post('/openai/v1/chat/completions')
+        .send({ model: 'gemini-2.5-flash', messages: [{ role: 'user', content: 'Hello' }], stream: true });
+
+      expect(res.status).toBe(429);
+      expect(res.body.error).toBeDefined();
+      expect(res.body.error.message).toBe('Quota exceeded');
+    });
   });
 
   describe('POST /openai/v1/embeddings', () => {
@@ -204,6 +234,18 @@ describe('OpenAI Surface', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.error.param).toBe('model');
+    });
+
+    it('GET /openai/v1/responses/:id returns 404 for unknown response ID', async () => {
+      const res = await request(app).get('/openai/v1/responses/resp-does-not-exist');
+      expect(res.status).toBe(404);
+      expect(res.body.error.message).toMatch(/Response not found/);
+    });
+
+    it('DELETE /openai/v1/responses/:id returns 404 for unknown response ID', async () => {
+      const res = await request(app).delete('/openai/v1/responses/resp-does-not-exist-del');
+      expect(res.status).toBe(404);
+      expect(res.body.error.message).toMatch(/Response not found/);
     });
   });
 

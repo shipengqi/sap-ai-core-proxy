@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import request from 'supertest';
+import { Readable } from 'stream';
 import MockAdapter from 'axios-mock-adapter';
 import { createTestApp, createMockAdapter, setupAuthMock } from './helpers/setup';
-import { DEPLOYMENTS_RESPONSE, DEPLOY_CLAUDE_ID } from './fixtures/deployments';
+import { DEPLOYMENTS_RESPONSE, DEPLOY_CLAUDE_ID, DEPLOY_CLAUDE3_ID } from './fixtures/deployments';
 import { SAP_CONVERSE_RESPONSE } from './fixtures/sap-responses';
 
 describe('Anthropic Surface', () => {
@@ -67,6 +68,27 @@ describe('Anthropic Surface', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.type).toBe('message');
+    });
+
+    it('returns JSON error when Claude 3 invoke stream receives 429', async () => {
+      const errorStream = Readable.from([Buffer.from(JSON.stringify({ message: 'Rate limit exceeded' }))]);
+      mock
+        .onPost(new RegExp(`${DEPLOY_CLAUDE3_ID}/invoke-with-response-stream`))
+        .reply(429, errorStream);
+
+      const res = await request(app)
+        .post('/anthropic/v1/messages')
+        .set('x-api-key', 'any-value')
+        .send({
+          model: 'claude-3-haiku-20240307',
+          max_tokens: 1024,
+          messages: [{ role: 'user', content: 'Hello' }],
+          stream: true,
+        });
+
+      expect(res.status).toBe(429);
+      expect(res.body.type).toBe('error');
+      expect(res.body.error.message).toBe('Rate limit exceeded');
     });
   });
 
