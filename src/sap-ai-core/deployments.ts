@@ -1,5 +1,5 @@
-import axios from 'axios';
 import { AuthManager } from './auth';
+import { SapClient } from './client';
 import { Deployment, DeploymentsResponse, ModelDeployment, DeploymentSummary } from './types';
 import { logger } from '../logger';
 
@@ -9,26 +9,24 @@ import { logger } from '../logger';
  */
 export class DeploymentManager {
   private authManager: AuthManager;
+  private client: SapClient;
   private deployments: Deployment[] = [];
   private lastFetchTime: number = 0;
   private cacheDuration: number = 60000; // 1 minute cache
 
   constructor(authManager: AuthManager) {
     this.authManager = authManager;
+    this.client = new SapClient(authManager);
   }
 
   /**
    * Fetches deployments from SAP AI Core
    */
   private async fetchDeployments(): Promise<Deployment[]> {
-    const headers = await this.authManager.buildHeaders();
-    const baseUrl = this.authManager.getBaseUrl();
-    const url = `${baseUrl}/v2/lm/deployments?$top=10000&$skip=0`;
-
-    logger.debug(`Fetching deployments from ${url}`);
+    logger.debug('Fetching deployments from SAP AI Core');
 
     try {
-      const response = await axios.get<DeploymentsResponse>(url, { headers });
+      const response = await this.client.get<DeploymentsResponse>('/v2/lm/deployments?$top=10000&$skip=0');
       const deployments = response.data.resources || [];
 
       // Filter for running deployments with valid model info
@@ -73,24 +71,9 @@ export class DeploymentManager {
    */
   private async findDeploymentForModel(modelName: string): Promise<Deployment | undefined> {
     const deployments = await this.getDeployments();
-
-    // Try exact match first
-    let deployment = deployments.find(d =>
+    return deployments.find(d =>
       d.details.resources.backend_details.model.name === modelName
     );
-
-    // Try partial match (model name without version)
-    if (!deployment) {
-      const baseModelName = modelName.split(':')[0].toLowerCase();
-      deployment = deployments.find(d => {
-        const deploymentModelName = d.details.resources.backend_details.model.name.toLowerCase();
-        return deploymentModelName === baseModelName ||
-               deploymentModelName.includes(baseModelName) ||
-               baseModelName.includes(deploymentModelName);
-      });
-    }
-
-    return deployment;
   }
 
   /**

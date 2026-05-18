@@ -3,25 +3,13 @@ import { AuthManager } from '../../../sap-ai-core/auth';
 import { DeploymentManager } from '../../../sap-ai-core/deployments';
 import {
   AnthropicMessagesRequest,
-  AnthropicContentBlock,
-  AnthropicTextContent,
   AnthropicCountTokensResponse,
 } from '../../../types/anthropic';
+import { extractSystemPrompt, contentBlockToText } from '../../../utils';
 import { ConverseAnthropicProvider } from './converse';
 import { InvokeAnthropicProvider } from './invoke';
 import * as catalogue from '../../../model-catalogue';
 import { logger } from '../../../logger';
-
-function extractSystemPrompt(system: string | Array<{ type: string; text: string }> | undefined): string {
-  if (!system) return '';
-  if (typeof system === 'string') return system;
-  return system.filter(s => s.type === 'text').map(s => s.text).join('\n');
-}
-
-function contentBlockToText(content: string | AnthropicContentBlock[]): string {
-  if (typeof content === 'string') return content;
-  return content.filter(b => b.type === 'text').map(b => (b as AnthropicTextContent).text).join('');
-}
 
 /**
  * Entry point for the Anthropic surface (/v1/messages).

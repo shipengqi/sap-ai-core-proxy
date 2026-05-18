@@ -1,15 +1,15 @@
 import { Response } from 'express';
-import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthManager } from '../../../sap-ai-core/auth';
 import { DeploymentManager } from '../../../sap-ai-core/deployments';
+import { SapClient } from '../../../sap-ai-core/client';
 import {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
   OpenAIChatCompletionChunk,
   OpenAIMessage
 } from '../../../types/openai';
-import { extractTextContent, setSSEHeaders, extractErrorDetails, sendOpenAIError } from '../../../utils';
+import { extractTextContent, setSSEHeaders, extractErrorDetails, sendOpenAIError, endStreamOnError, parseGeminiStream, drainErrorBody, parseErrorMessage } from '../../../utils';
 import * as catalogue from '../../../model-catalogue';
 import { logger } from '../../../logger';
 
@@ -18,37 +18,28 @@ import { logger } from '../../../logger';
  * Converts OpenAI format to Gemini format and back
  */
 export class GeminiProvider {
-  private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
+  private client: SapClient;
 
   constructor(authManager: AuthManager, deploymentManager: DeploymentManager) {
-    this.authManager = authManager;
     this.deploymentManager = deploymentManager;
+    this.client = new SapClient(authManager);
   }
 
-  /**
-   * Handles chat completion request for Gemini models
-   */
   async handleChatCompletion(req: OpenAIChatCompletionRequest, res: Response): Promise<void> {
     const { model, messages, stream = false } = req;
 
     try {
       const deploymentId = await this.deploymentManager.getDeploymentId(model);
-      const baseUrl = this.authManager.getBaseUrl();
-      const headers = await this.authManager.buildHeaders();
-
-      // Use Gemini-specific endpoint
-      const url = `${baseUrl}/v2/inference/deployments/${deploymentId}/models/${model}:streamGenerateContent`;
-
-      // Convert OpenAI messages to Gemini format
       const payload = this.buildPayload(req, messages);
+      const basePath = `/v2/inference/deployments/${deploymentId}/models/${model}`;
 
-      logger.debug(`Gemini request to ${url}`, { model, stream, messageCount: messages.length });
+      logger.debug(`Gemini request: model=${model}, stream=${stream}, messages=${messages.length}`);
 
       if (stream) {
-        await this.handleStreamingResponse(url, headers, payload, res, model);
+        await this.handleStreamingResponse(`${basePath}:streamGenerateContent`, payload, res, model);
       } else {
-        await this.handleNonStreamingResponse(url, headers, payload, res, model);
+        await this.handleNonStreamingResponse(`${basePath}:generateContent`, payload, res, model);
       }
     } catch (error: unknown) {
       this.handleError(error, res);
@@ -124,19 +115,13 @@ export class GeminiProvider {
     return payload;
   }
 
-  /**
-   * Handles non-streaming response
-   */
   private async handleNonStreamingResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     model: string
   ): Promise<void> {
-    // For non-streaming, use generateContent endpoint
-    const nonStreamUrl = url.replace(':streamGenerateContent', ':generateContent');
-    const response = await axios.post(nonStreamUrl, payload, { headers });
+    const response = await this.client.post(path, payload);
 
     // Convert Gemini response to OpenAI format
     const content = this.extractContent(response.data);
@@ -161,205 +146,105 @@ export class GeminiProvider {
     res.json(openaiResponse);
   }
 
-  /**
-   * Handles streaming response
-   */
   private async handleStreamingResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     model: string
   ): Promise<void> {
-    setSSEHeaders(res);
-
     const completionId = `chatcmpl-${uuidv4()}`;
     const created = Math.floor(Date.now() / 1000);
 
     try {
-      const response = await axios.post(url, payload, {
-        headers,
-        responseType: 'stream',
-      });
+      const response = await this.client.postStream(path, payload);
 
-      let buffer = '';
+      if (response.status >= 400) {
+        const body = await drainErrorBody(response.data);
+        sendOpenAIError(res, response.status, parseErrorMessage(body));
+        return;
+      }
+
+      setSSEHeaders(res);
+
       let promptTokens = 0;
       let outputTokens = 0;
 
-      // Send initial chunk with role
       const initialChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: 'chat.completion.chunk',
         created,
         model,
-        choices: [{
-          index: 0,
-          delta: { role: 'assistant' },
-          finish_reason: null,
-        }],
+        choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
       };
       res.write(`data: ${JSON.stringify(initialChunk)}\n\n`);
 
-      response.data.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString('utf-8');
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.trim() === '') continue;
-
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              const processed = this.processStreamChunk(data);
-
-              // Yield text if present
-              if (processed.text) {
-                const textChunk: OpenAIChatCompletionChunk = {
-                  id: completionId,
-                  object: 'chat.completion.chunk',
-                  created,
-                  model,
-                  choices: [{
-                    index: 0,
-                    delta: { content: processed.text },
-                    finish_reason: null,
-                  }],
-                };
-                res.write(`data: ${JSON.stringify(textChunk)}\n\n`);
-              }
-
-              // Track usage
-              if (processed.usageMetadata) {
-                promptTokens = processed.usageMetadata.promptTokenCount ?? promptTokens;
-                outputTokens = processed.usageMetadata.candidatesTokenCount ?? outputTokens;
-              }
-            } catch {
-              logger.debug('Failed to parse Gemini streaming chunk:', line);
-            }
+      for await (const event of parseGeminiStream(response.data)) {
+        switch (event.type) {
+          case 'textDelta': {
+            const chunk: OpenAIChatCompletionChunk = {
+              id: completionId,
+              object: 'chat.completion.chunk',
+              created,
+              model,
+              choices: [{ index: 0, delta: { content: event.text }, finish_reason: null }],
+            };
+            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+            break;
           }
+          case 'metadata':
+            promptTokens = event.promptTokens;
+            outputTokens = event.outputTokens;
+            break;
         }
-      });
+      }
 
-      response.data.on('end', () => {
-        // Send finish chunk
-        const finishChunk: OpenAIChatCompletionChunk = {
+      const finishChunk: OpenAIChatCompletionChunk = {
+        id: completionId,
+        object: 'chat.completion.chunk',
+        created,
+        model,
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      };
+      res.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
+
+      if (promptTokens > 0 || outputTokens > 0) {
+        const usageChunk: OpenAIChatCompletionChunk = {
           id: completionId,
           object: 'chat.completion.chunk',
           created,
           model,
-          choices: [{
-            index: 0,
-            delta: {},
-            finish_reason: 'stop',
-          }],
+          choices: [],
+          usage: {
+            prompt_tokens: promptTokens,
+            completion_tokens: outputTokens,
+            total_tokens: promptTokens + outputTokens,
+          },
         };
-        res.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
-
-        // Send usage chunk if we have usage data
-        if (promptTokens > 0 || outputTokens > 0) {
-          const usageChunk: OpenAIChatCompletionChunk = {
-            id: completionId,
-            object: 'chat.completion.chunk',
-            created,
-            model,
-            choices: [],
-            usage: {
-              prompt_tokens: promptTokens,
-              completion_tokens: outputTokens,
-              total_tokens: promptTokens + outputTokens,
-            },
-          };
-          res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-        }
-        res.write('data: [DONE]\n\n');
-        res.end();
-      });
-
-      response.data.on('error', (error: Error) => {
-        logger.error('Gemini stream error:', error.message);
-        res.end();
-      });
+        res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
+      }
+      res.write('data: [DONE]\n\n');
+      res.end();
 
     } catch (error: unknown) {
-      const axiosError = error as { response?: { data?: unknown }; message?: string };
+      const axiosError = error as { response?: { status?: number }; message?: string };
       logger.error('Gemini streaming request failed:', axiosError.message);
+
+      if (!res.headersSent) {
+        sendOpenAIError(res, axiosError.response?.status || 500, axiosError.message || 'Request failed');
+        return;
+      }
 
       const errorChunk: OpenAIChatCompletionChunk = {
         id: completionId,
         object: 'chat.completion.chunk',
         created,
         model,
-        choices: [{
-          index: 0,
-          delta: { content: `Error: ${axiosError.message}` },
-          finish_reason: 'stop',
-        }],
+        choices: [{ index: 0, delta: { content: `Error: ${axiosError.message}` }, finish_reason: 'stop' }],
       };
       res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
       res.write('data: [DONE]\n\n');
       res.end();
     }
-  }
-
-  /**
-   * Process Gemini streaming response chunk
-   */
-  private processStreamChunk(data: Record<string, unknown>): {
-    text?: string;
-    reasoning?: string;
-    usageMetadata?: {
-      promptTokenCount?: number;
-      candidatesTokenCount?: number;
-      thoughtsTokenCount?: number;
-      cachedContentTokenCount?: number;
-    };
-  } {
-    const result: ReturnType<typeof this.processStreamChunk> = {};
-
-    // Handle thinking content from Gemini's response
-    const candidates = data.candidates as Array<{ content?: { parts?: Array<{ thought?: boolean; text?: string }> } }> | undefined;
-    const candidateForThoughts = candidates?.[0];
-    const partsForThoughts = candidateForThoughts?.content?.parts;
-    let thoughts = '';
-
-    if (partsForThoughts) {
-      for (const part of partsForThoughts) {
-        if (part.thought && part.text) {
-          thoughts += part.text + '\n';
-        }
-      }
-    }
-
-    if (thoughts.trim() !== '') {
-      result.reasoning = thoughts.trim();
-    }
-
-    // Handle regular text content
-    if (candidates && candidates[0]?.content?.parts) {
-      let nonThoughtText = '';
-      for (const part of candidates[0].content.parts) {
-        if (part.text && !part.thought) {
-          nonThoughtText += part.text;
-        }
-      }
-      if (nonThoughtText) {
-        result.text = nonThoughtText;
-      }
-    }
-
-    // Handle usage metadata with caching support
-    const usageMetadata = data.usageMetadata as Record<string, number> | undefined;
-    if (usageMetadata) {
-      result.usageMetadata = {
-        promptTokenCount: usageMetadata.promptTokenCount,
-        candidatesTokenCount: usageMetadata.candidatesTokenCount,
-        thoughtsTokenCount: usageMetadata.thoughtsTokenCount,
-        cachedContentTokenCount: usageMetadata.cachedContentTokenCount,
-      };
-    }
-
-    return result;
   }
 
   /**

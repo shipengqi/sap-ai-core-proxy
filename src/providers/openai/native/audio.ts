@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
-import axios from 'axios';
 import { AuthManager } from '../../../sap-ai-core/auth';
 import { DeploymentManager } from '../../../sap-ai-core/deployments';
+import { SapClient } from '../../../sap-ai-core/client';
 import { handleOpenAIError } from '../../../utils';
 import { logger } from '../../../logger';
 
@@ -10,10 +10,13 @@ export interface MulterRequest extends Request {
 }
 
 export class AudioProvider {
-  constructor(
-    private authManager: AuthManager,
-    private deploymentManager: DeploymentManager,
-  ) {}
+  private deploymentManager: DeploymentManager;
+  private client: SapClient;
+
+  constructor(authManager: AuthManager, deploymentManager: DeploymentManager) {
+    this.deploymentManager = deploymentManager;
+    this.client = new SapClient(authManager);
+  }
 
   async handleTranscription(req: MulterRequest, res: Response): Promise<void> {
     if (!req.file) {
@@ -32,9 +35,7 @@ export class AudioProvider {
 
     try {
       const deploymentId = await this.deploymentManager.getDeploymentId(model);
-      const baseUrl = this.authManager.getBaseUrl();
-      const headers = await this.authManager.buildHeaders();
-      const url = `${baseUrl}/v2/inference/deployments/${deploymentId}/audio/transcriptions?api-version=2024-06-01`;
+      const path = `/v2/inference/deployments/${deploymentId}/audio/transcriptions?api-version=2024-06-01`;
 
       const form = new FormData();
       form.append('file', new Blob([new Uint8Array(req.file.buffer)], { type: req.file.mimetype }), req.file.originalname);
@@ -42,11 +43,8 @@ export class AudioProvider {
         form.append(key, value);
       }
 
-      // Remove Content-Type so axios sets the correct multipart boundary
-      const { 'Content-Type': _, ...forwardHeaders } = headers;
-
-      logger.debug(`Audio transcription request to ${url}`, { model });
-      const response = await axios.post(url, form, { headers: forwardHeaders });
+      logger.debug(`Audio transcription request: model=${model}`);
+      const response = await this.client.postForm(path, form);
       res.json(response.data);
     } catch (error: unknown) {
       handleOpenAIError(error, res);

@@ -1,52 +1,43 @@
 import { Response } from 'express';
-import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthManager } from '../../../sap-ai-core/auth';
 import { DeploymentManager } from '../../../sap-ai-core/deployments';
+import { SapClient } from '../../../sap-ai-core/client';
 import {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
   OpenAIChatCompletionChunk,
   OpenAIMessage
 } from '../../../types/openai';
-import { setSSEHeaders, handleOpenAIError } from '../../../utils';
+import { setSSEHeaders, handleOpenAIError, endStreamOnError } from '../../../utils';
 import { logger } from '../../../logger';
 
 /**
  * Handles OpenAI-compatible model requests
  */
 export class OpenAIProvider {
-  private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
+  private client: SapClient;
 
   constructor(authManager: AuthManager, deploymentManager: DeploymentManager) {
-    this.authManager = authManager;
     this.deploymentManager = deploymentManager;
+    this.client = new SapClient(authManager);
   }
 
-  /**
-   * Handles chat completion request
-   */
   async handleChatCompletion(req: OpenAIChatCompletionRequest, res: Response): Promise<void> {
     const { model, messages, stream = false } = req;
 
     try {
       const deploymentId = await this.deploymentManager.getDeploymentId(model);
-      const baseUrl = this.authManager.getBaseUrl();
-      const headers = await this.authManager.buildHeaders();
-
-      // Build the SAP AI Core URL for OpenAI-compatible models
-      const url = `${baseUrl}/v2/inference/deployments/${deploymentId}/chat/completions?api-version=2024-06-01`;
-
-      // Prepare the payload
+      const path = `/v2/inference/deployments/${deploymentId}/chat/completions?api-version=2024-06-01`;
       const payload = this.buildPayload(req);
 
-      logger.debug(`OpenAI request to ${url}`, { model, stream, messageCount: messages.length });
+      logger.debug(`OpenAI native request: model=${model}, stream=${stream}, messages=${messages.length}`);
 
       if (stream) {
-        await this.handleStreamingResponse(url, headers, payload, res, model);
+        await this.handleStreamingResponse(path, payload, res, model);
       } else {
-        await this.handleNonStreamingResponse(url, headers, payload, res, model);
+        await this.handleNonStreamingResponse(path, payload, res, model);
       }
     } catch (error: unknown) {
       handleOpenAIError(error, res);
@@ -87,17 +78,13 @@ export class OpenAIProvider {
     return payload;
   }
 
-  /**
-   * Handles non-streaming response
-   */
   private async handleNonStreamingResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     model: string
   ): Promise<void> {
-    const response = await axios.post(url, payload, { headers });
+    const response = await this.client.post(path, payload);
 
     const openaiResponse: OpenAIChatCompletionResponse = {
       id: response.data.id || `chatcmpl-${uuidv4()}`,
@@ -118,26 +105,30 @@ export class OpenAIProvider {
     res.json(openaiResponse);
   }
 
-  /**
-   * Handles streaming response
-   */
   private async handleStreamingResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     model: string
   ): Promise<void> {
-    setSSEHeaders(res);
-
     const completionId = `chatcmpl-${uuidv4()}`;
     const created = Math.floor(Date.now() / 1000);
 
     try {
-      const response = await axios.post(url, payload, {
-        headers,
-        responseType: 'stream',
-      });
+      const response = await this.client.postStream(path, payload);
+
+      if (response.status >= 400) {
+        let errorBody = '';
+        for await (const chunk of response.data) {
+          errorBody += chunk.toString('utf-8');
+        }
+        res.status(response.status).json({
+          error: { message: errorBody || 'Request failed', type: 'api_error', param: null, code: response.status.toString() },
+        });
+        return;
+      }
+
+      setSSEHeaders(res);
 
       let buffer = '';
 
@@ -181,10 +172,7 @@ export class OpenAIProvider {
         res.end();
       });
 
-      response.data.on('error', (error: Error) => {
-        logger.error('Stream error:', error.message);
-        res.end();
-      });
+      response.data.on('error', (error: Error) => endStreamOnError(res, error));
 
     } catch (error: unknown) {
       const axiosError = error as { response?: { data?: unknown }; message?: string };

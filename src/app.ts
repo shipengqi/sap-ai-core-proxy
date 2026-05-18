@@ -2,7 +2,7 @@ import express, { Request, Response, NextFunction } from 'express';
 import { AppConfig } from './config';
 import { AuthManager } from './sap-ai-core/auth';
 import { DeploymentManager } from './sap-ai-core/deployments';
-import { OpenAIProvider, ClaudeOpenAIProvider, GeminiProvider, ClaudeAnthropicProvider, EmbeddingsProvider, ResponsesProvider, AudioProvider } from './providers';
+import { OpenAIProvider, ConverseOpenAIProvider, InvokeOpenAIProvider, GeminiProvider, ClaudeAnthropicProvider, EmbeddingsProvider, ResponsesProvider, AudioProvider } from './providers';
 import {
   createHealthRouter,
   createAdminRouter,
@@ -31,7 +31,8 @@ export function createApp(config: AppConfig): AppResult {
 
   // Initialize providers
   const openaiProvider = new OpenAIProvider(authManager, deploymentManager);
-  const claudeOpenAIProvider = new ClaudeOpenAIProvider(authManager, deploymentManager);
+  const converseClaudeProvider = new ConverseOpenAIProvider(authManager, deploymentManager);
+  const invokeClaudeProvider = new InvokeOpenAIProvider(authManager, deploymentManager);
   const geminiProvider = new GeminiProvider(authManager, deploymentManager);
   const claudeAnthropicProvider = new ClaudeAnthropicProvider(authManager, deploymentManager);
   const embeddingsProvider = new EmbeddingsProvider(authManager, deploymentManager);
@@ -42,7 +43,7 @@ export function createApp(config: AppConfig): AppResult {
   setupMiddleware(app);
 
   // Setup routes via routers
-  setupRoutes(app, deploymentManager, openaiProvider, claudeOpenAIProvider, geminiProvider, claudeAnthropicProvider, embeddingsProvider, responsesProvider, audioProvider);
+  setupRoutes(app, deploymentManager, openaiProvider, converseClaudeProvider, invokeClaudeProvider, geminiProvider, claudeAnthropicProvider, embeddingsProvider, responsesProvider, audioProvider);
 
   return { app, authManager, deploymentManager };
 }
@@ -96,7 +97,8 @@ function setupRoutes(
   app: express.Application,
   deploymentManager: DeploymentManager,
   openaiProvider: OpenAIProvider,
-  claudeOpenAIProvider: ClaudeOpenAIProvider,
+  converseClaudeProvider: ConverseOpenAIProvider,
+  invokeClaudeProvider: InvokeOpenAIProvider,
   geminiProvider: GeminiProvider,
   claudeAnthropicProvider: ClaudeAnthropicProvider,
   embeddingsProvider: EmbeddingsProvider,
@@ -107,7 +109,7 @@ function setupRoutes(
   app.use('/', createHealthRouter());
 
   // OpenAI surface
-  const providerRegistry = buildProviderRegistry(claudeOpenAIProvider, geminiProvider);
+  const providerRegistry = buildProviderRegistry(converseClaudeProvider, invokeClaudeProvider, geminiProvider);
   app.use('/openai', createOpenAICompatibleRouter({
     deploymentManager,
     providerRegistry,

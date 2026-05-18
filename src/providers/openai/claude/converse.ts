@@ -1,8 +1,8 @@
 import { Response } from 'express';
-import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthManager } from '../../../sap-ai-core/auth';
 import { DeploymentManager } from '../../../sap-ai-core/deployments';
+import { SapClient } from '../../../sap-ai-core/client';
 import {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
@@ -16,7 +16,8 @@ import {
   parseConverseStream,
   drainErrorBody,
   parseErrorMessage,
-  applyPromptCaching,
+  mapConverseStopReasonToOpenAI,
+  assembleConversePayload,
 } from '../../../utils';
 import * as catalogue from '../../../model-catalogue';
 import { logger } from '../../../logger';
@@ -26,31 +27,29 @@ import { logger } from '../../../logger';
  * Used by ClaudeOpenAIProvider when the requested model supports Converse.
  */
 export class ConverseOpenAIProvider {
-  private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
+  private client: SapClient;
 
   constructor(authManager: AuthManager, deploymentManager: DeploymentManager) {
-    this.authManager = authManager;
     this.deploymentManager = deploymentManager;
+    this.client = new SapClient(authManager);
   }
 
   async handle(req: OpenAIChatCompletionRequest, res: Response): Promise<void> {
     const { model, messages, stream = false } = req;
     try {
       const deploymentId = await this.deploymentManager.getDeploymentId(model);
-      const baseUrl = this.authManager.getBaseUrl();
-      const headers = await this.authManager.buildHeaders();
       const payload = this.buildConversePayload(req, messages);
-      const url = stream
-        ? `${baseUrl}/v2/inference/deployments/${deploymentId}/converse-stream`
-        : `${baseUrl}/v2/inference/deployments/${deploymentId}/converse`;
+      const path = stream
+        ? `/v2/inference/deployments/${deploymentId}/converse-stream`
+        : `/v2/inference/deployments/${deploymentId}/converse`;
 
       logger.debug(`Converse request: model=${model}, stream=${stream}, messages=${messages.length}`);
 
       if (stream) {
-        await this.handleStreamingResponse(url, headers, payload, res, model);
+        await this.handleStreamingResponse(path, payload, res, model);
       } else {
-        await this.handleNonStreamingResponse(url, headers, payload, res, model);
+        await this.handleNonStreamingResponse(path, payload, res, model);
       }
     } catch (error: unknown) {
       handleOpenAIError(error, res);
@@ -79,32 +78,21 @@ export class ConverseOpenAIProvider {
       }
     }
 
-    const payload: Record<string, unknown> = {
-      inferenceConfig: {
-        maxTokens,
-        temperature: req.temperature ?? 0.0,
-      },
-      messages: applyPromptCaching(converseMessages),
-    };
-
-    if (systemPrompt) {
-      payload.system = [
-        { text: systemPrompt },
-        { cachePoint: { type: 'default' } },
-      ];
-    }
-
-    return payload;
+    return assembleConversePayload({
+      maxTokens,
+      temperature: req.temperature ?? 0.0,
+      messages: converseMessages,
+      system: systemPrompt || undefined,
+    });
   }
 
   private async handleNonStreamingResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     model: string
   ): Promise<void> {
-    const response = await axios.post(url, payload, { headers });
+    const response = await this.client.post(path, payload);
     const content = response.data.output?.message?.content?.[0]?.text || '';
 
     const openaiResponse: OpenAIChatCompletionResponse = {
@@ -115,7 +103,7 @@ export class ConverseOpenAIProvider {
       choices: [{
         index: 0,
         message: { role: 'assistant', content },
-        finish_reason: this.mapStopReason(response.data.stopReason),
+        finish_reason: mapConverseStopReasonToOpenAI(response.data.stopReason),
       }],
       usage: response.data.usage ? {
         prompt_tokens: response.data.usage.inputTokens || 0,
@@ -128,8 +116,7 @@ export class ConverseOpenAIProvider {
   }
 
   private async handleStreamingResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     model: string
@@ -138,11 +125,7 @@ export class ConverseOpenAIProvider {
     const created = Math.floor(Date.now() / 1000);
 
     try {
-      const response = await axios.post(url, payload, {
-        headers,
-        responseType: 'stream',
-        validateStatus: (status) => status < 500,
-      });
+      const response = await this.client.postStream(path, payload);
 
       if (response.status >= 400) {
         const body = await drainErrorBody(response.data);
@@ -231,14 +214,4 @@ export class ConverseOpenAIProvider {
     }
   }
 
-  private mapStopReason(stopReason: string | undefined): 'stop' | 'length' | 'function_call' | 'tool_calls' | 'content_filter' | null {
-    if (!stopReason) return null;
-    switch (stopReason) {
-      case 'end_turn':
-      case 'stop_sequence': return 'stop';
-      case 'max_tokens':    return 'length';
-      case 'tool_use':      return 'tool_calls';
-      default:              return 'stop';
-    }
-  }
 }

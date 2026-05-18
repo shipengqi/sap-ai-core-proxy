@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { DeploymentManager } from '../sap-ai-core/deployments';
-import { ClaudeOpenAIProvider, GeminiProvider, EmbeddingsProvider, ResponsesProvider, AudioProvider, MulterRequest } from '../providers';
+import { ConverseOpenAIProvider, InvokeOpenAIProvider, GeminiProvider, EmbeddingsProvider, ResponsesProvider, AudioProvider, MulterRequest } from '../providers';
 import { OpenAIChatCompletionRequest } from '../types/openai';
 import { OpenAIModel, OpenAIModelsResponse } from '../types/openai';
 import { ModelProvider } from '../types/models';
@@ -13,11 +13,17 @@ const upload = multer({ storage: multer.memoryStorage() });
 export type ChatCompletionHandler = (req: OpenAIChatCompletionRequest, res: Response) => Promise<void>;
 
 export function buildProviderRegistry(
-  anthropicOpenAIProvider: ClaudeOpenAIProvider,
+  converseClaudeProvider: ConverseOpenAIProvider,
+  invokeClaudeProvider: InvokeOpenAIProvider,
   geminiProvider: GeminiProvider,
 ): Map<ModelProvider, ChatCompletionHandler> {
+  const claudeHandler: ChatCompletionHandler = (req, res) =>
+    catalogue.usesConverseApi(req.model)
+      ? converseClaudeProvider.handle(req, res)
+      : invokeClaudeProvider.handle(req, res);
+
   return new Map([
-    ['anthropic', anthropicOpenAIProvider.handleChatCompletion.bind(anthropicOpenAIProvider)],
+    ['anthropic', claudeHandler],
     ['gemini', geminiProvider.handleChatCompletion.bind(geminiProvider)],
   ]);
 }

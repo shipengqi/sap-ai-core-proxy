@@ -1,8 +1,8 @@
 import { Response } from 'express';
-import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthManager } from '../../../sap-ai-core/auth';
 import { DeploymentManager } from '../../../sap-ai-core/deployments';
+import { SapClient } from '../../../sap-ai-core/client';
 import {
   AnthropicMessagesRequest,
   AnthropicMessagesResponse,
@@ -22,49 +22,39 @@ import {
   drainErrorBody,
   parseErrorMessage,
   applyPromptCaching,
+  extractSystemPrompt,
+  contentBlockToText,
+  assembleConversePayload,
 } from '../../../utils';
 import { logger } from '../../../logger';
-
-function extractSystemPrompt(system: string | Array<{ type: string; text: string }> | undefined): string {
-  if (!system) return '';
-  if (typeof system === 'string') return system;
-  return system.filter(s => s.type === 'text').map(s => s.text).join('\n');
-}
-
-function contentBlockToText(content: string | AnthropicContentBlock[]): string {
-  if (typeof content === 'string') return content;
-  return content.filter(b => b.type === 'text').map(b => (b as AnthropicTextContent).text).join('');
-}
 
 /**
  * Handles Claude 3.5+ models via SAP AI Core Converse API.
  * Used by ClaudeAnthropicProvider when the requested model supports Converse.
  */
 export class ConverseAnthropicProvider {
-  private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
+  private client: SapClient;
 
   constructor(authManager: AuthManager, deploymentManager: DeploymentManager) {
-    this.authManager = authManager;
     this.deploymentManager = deploymentManager;
+    this.client = new SapClient(authManager);
   }
 
   async handle(req: AnthropicMessagesRequest, sapModelName: string, res: Response): Promise<void> {
     try {
       const deploymentId = await this.deploymentManager.getDeploymentId(sapModelName);
-      const baseUrl = this.authManager.getBaseUrl();
-      const headers = await this.authManager.buildHeaders();
       const payload = this.buildConversePayload(req);
 
       if (req.stream) {
         await this.handleStreamResponse(
-          `${baseUrl}/v2/inference/deployments/${deploymentId}/converse-stream`,
-          headers, payload, res, req.model,
+          `/v2/inference/deployments/${deploymentId}/converse-stream`,
+          payload, res, req.model,
         );
       } else {
         await this.handleNonStreamResponse(
-          `${baseUrl}/v2/inference/deployments/${deploymentId}/converse`,
-          headers, payload, res, req.model,
+          `/v2/inference/deployments/${deploymentId}/converse`,
+          payload, res, req.model,
         );
       }
     } catch (error: unknown) {
@@ -152,29 +142,15 @@ export class ConverseAnthropicProvider {
   private buildConversePayload(req: AnthropicMessagesRequest): Record<string, unknown> {
     const systemPrompt = extractSystemPrompt(req.system);
     const messages = this.convertMessagesToConverse(req.messages);
-
-    const payload: Record<string, unknown> = {
-      inferenceConfig: {
-        maxTokens: req.max_tokens,
-        temperature: req.temperature ?? 0.0,
-        ...(req.top_p !== undefined && { topP: req.top_p }),
-        ...(req.stop_sequences?.length && { stopSequences: req.stop_sequences }),
-      },
-      messages: applyPromptCaching(messages),
-    };
-
-    if (systemPrompt) {
-      payload.system = [
-        { text: systemPrompt },
-        { cachePoint: { type: 'default' } },
-      ];
-    }
-
-    if (req.tools?.length) {
-      payload.toolConfig = this.convertTools(req.tools, req.tool_choice);
-    }
-
-    return payload;
+    return assembleConversePayload({
+      maxTokens: req.max_tokens,
+      temperature: req.temperature ?? 0.0,
+      messages,
+      system: systemPrompt || undefined,
+      topP: req.top_p,
+      stopSequences: req.stop_sequences,
+      toolConfig: req.tools?.length ? this.convertTools(req.tools, req.tool_choice) : undefined,
+    });
   }
 
   private mapStopReason(
@@ -216,13 +192,12 @@ export class ConverseAnthropicProvider {
   }
 
   private async handleNonStreamResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     originalModel: string
   ): Promise<void> {
-    const response = await axios.post(url, payload, { headers });
+    const response = await this.client.post(path, payload);
     const data = response.data;
 
     const output = data.output?.message;
@@ -249,8 +224,7 @@ export class ConverseAnthropicProvider {
   }
 
   private async handleStreamResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     originalModel: string
@@ -258,11 +232,7 @@ export class ConverseAnthropicProvider {
     const messageId = `msg_${uuidv4().replace(/-/g, '').slice(0, 24)}`;
 
     try {
-      const response = await axios.post(url, payload, {
-        headers,
-        responseType: 'stream',
-        validateStatus: (status) => status < 500,
-      });
+      const response = await this.client.postStream(path, payload);
 
       if (response.status >= 400) {
         const body = await drainErrorBody(response.data);
@@ -371,4 +341,4 @@ export class ConverseAnthropicProvider {
   }
 }
 
-export { extractSystemPrompt, contentBlockToText };
+export { extractSystemPrompt, contentBlockToText } from '../../../utils';

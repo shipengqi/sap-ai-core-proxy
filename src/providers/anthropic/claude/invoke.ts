@@ -1,61 +1,53 @@
 import { Response } from 'express';
-import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthManager } from '../../../sap-ai-core/auth';
 import { DeploymentManager } from '../../../sap-ai-core/deployments';
+import { SapClient } from '../../../sap-ai-core/client';
 import {
   AnthropicMessagesRequest,
   AnthropicMessagesResponse,
-  AnthropicContentBlock,
-  AnthropicTextContent,
 } from '../../../types/anthropic';
 import {
   setSSEHeaders,
   sendSSEEvent,
   handleAnthropicError,
+  extractSystemPrompt,
+  contentBlockToText,
+  endStreamOnError,
+  parseInvokeStream,
+  drainErrorBody,
+  parseErrorMessage,
+  sendAnthropicError,
 } from '../../../utils';
 import { logger } from '../../../logger';
-
-function extractSystemPrompt(system: string | Array<{ type: string; text: string }> | undefined): string {
-  if (!system) return '';
-  if (typeof system === 'string') return system;
-  return system.filter(s => s.type === 'text').map(s => s.text).join('\n');
-}
-
-function contentBlockToText(content: string | AnthropicContentBlock[]): string {
-  if (typeof content === 'string') return content;
-  return content.filter(b => b.type === 'text').map(b => (b as AnthropicTextContent).text).join('');
-}
 
 /**
  * Handles Claude 3 models via SAP AI Core Invoke API.
  * Used by ClaudeAnthropicProvider when the requested model does not support Converse.
  */
 export class InvokeAnthropicProvider {
-  private authManager: AuthManager;
   private deploymentManager: DeploymentManager;
+  private client: SapClient;
 
   constructor(authManager: AuthManager, deploymentManager: DeploymentManager) {
-    this.authManager = authManager;
     this.deploymentManager = deploymentManager;
+    this.client = new SapClient(authManager);
   }
 
   async handle(req: AnthropicMessagesRequest, sapModelName: string, res: Response): Promise<void> {
     try {
       const deploymentId = await this.deploymentManager.getDeploymentId(sapModelName);
-      const baseUrl = this.authManager.getBaseUrl();
-      const headers = await this.authManager.buildHeaders();
       const payload = this.buildInvokePayload(req);
 
       if (req.stream) {
         await this.handleStreamResponse(
-          `${baseUrl}/v2/inference/deployments/${deploymentId}/invoke-with-response-stream`,
-          headers, payload, res, req.model,
+          `/v2/inference/deployments/${deploymentId}/invoke-with-response-stream`,
+          payload, res, req.model,
         );
       } else {
         await this.handleNonStreamResponse(
-          `${baseUrl}/v2/inference/deployments/${deploymentId}/invoke`,
-          headers, payload, res, req.model,
+          `/v2/inference/deployments/${deploymentId}/invoke`,
+          payload, res, req.model,
         );
       }
     } catch (error: unknown) {
@@ -93,13 +85,12 @@ export class InvokeAnthropicProvider {
   }
 
   private async handleNonStreamResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     originalModel: string
   ): Promise<void> {
-    const response = await axios.post(url, payload, { headers });
+    const response = await this.client.post(path, payload);
     const data = response.data;
 
     // Invoke API returns native Anthropic format — pass through with model name fix
@@ -125,8 +116,7 @@ export class InvokeAnthropicProvider {
   }
 
   private async handleStreamResponse(
-    url: string,
-    headers: Record<string, string>,
+    path: string,
     payload: Record<string, unknown>,
     res: Response,
     originalModel: string
@@ -134,148 +124,108 @@ export class InvokeAnthropicProvider {
     const messageId = `msg_${uuidv4().replace(/-/g, '').slice(0, 24)}`;
 
     try {
-      const response = await axios.post(url, payload, {
-        headers,
-        responseType: 'stream',
-        validateStatus: (status) => status < 500,
-      });
+      const response = await this.client.postStream(path, payload);
 
       if (response.status >= 400) {
-        let errorBody = '';
-        for await (const chunk of response.data) {
-          errorBody += chunk.toString('utf-8');
-        }
-        res.status(response.status).json({
-          type: 'error',
-          error: { type: 'api_error', message: errorBody || 'Request failed' },
-        });
+        const body = await drainErrorBody(response.data);
+        sendAnthropicError(res, response.status, parseErrorMessage(body));
         return;
       }
 
       setSSEHeaders(res);
 
-      let buffer = '';
       let inputTokens = 0;
       let outputTokens = 0;
-      let blockIndex = 0;
       let blockStarted = false;
 
-      response.data.on('data', (chunk: Buffer) => {
-        buffer += chunk.toString('utf-8');
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.trim() === '' || !line.startsWith('data: ')) continue;
-
-          try {
-            const data = JSON.parse(line.slice(6)) as Record<string, unknown>;
-
-            switch (data.type) {
-              case 'message_start': {
-                const msg = data.message as Record<string, unknown>;
-                const usage = msg?.usage as Record<string, number> | undefined;
-                inputTokens = usage?.input_tokens || 0;
-
-                this.sendAnthropicEvent(res, 'message_start', {
-                  type: 'message_start',
-                  message: {
-                    id: (msg?.id as string) || messageId,
-                    type: 'message',
-                    role: 'assistant',
-                    content: [],
-                    model: originalModel,
-                    stop_reason: null,
-                    stop_sequence: null,
-                    usage: { input_tokens: inputTokens, output_tokens: 1 },
-                  },
-                });
-                this.sendAnthropicEvent(res, 'ping', { type: 'ping' });
-                break;
-              }
-
-              case 'content_block_start': {
-                const cb = data.content_block as Record<string, unknown>;
-                blockIndex = (data.index as number) || 0;
-                blockStarted = true;
-                this.sendAnthropicEvent(res, 'content_block_start', {
-                  type: 'content_block_start',
-                  index: blockIndex,
-                  content_block: cb,
-                });
-                break;
-              }
-
-              case 'content_block_delta':
-                res.write(`event: content_block_delta\ndata: ${JSON.stringify({ ...data, model: undefined })}\n\n`);
-                break;
-
-              case 'content_block_stop':
-                this.sendAnthropicEvent(res, 'content_block_stop', {
-                  type: 'content_block_stop',
-                  index: (data.index as number) || blockIndex,
-                });
-                break;
-
-              case 'message_delta': {
-                const delta = data.delta as Record<string, unknown>;
-                const deltaUsage = data.usage as Record<string, number> | undefined;
-                outputTokens = deltaUsage?.output_tokens || 0;
-
-                this.sendAnthropicEvent(res, 'message_delta', {
-                  type: 'message_delta',
-                  delta: { stop_reason: delta?.stop_reason || 'end_turn', stop_sequence: delta?.stop_sequence || null },
-                  usage: { output_tokens: outputTokens },
-                });
-                break;
-              }
-
-              case 'message_stop':
-                this.sendAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
-                break;
-            }
-          } catch {
-            // Skip unparseable lines
+      for await (const event of parseInvokeStream(response.data)) {
+        switch (event.type) {
+          case 'messageStart': {
+            inputTokens = event.inputTokens;
+            this.sendAnthropicEvent(res, 'message_start', {
+              type: 'message_start',
+              message: {
+                id: event.messageId || messageId,
+                type: 'message',
+                role: 'assistant',
+                content: [],
+                model: originalModel,
+                stop_reason: null,
+                stop_sequence: null,
+                usage: { input_tokens: inputTokens, output_tokens: 1 },
+              },
+            });
+            this.sendAnthropicEvent(res, 'ping', { type: 'ping' });
+            break;
+          }
+          case 'blockStart': {
+            blockStarted = true;
+            this.sendAnthropicEvent(res, 'content_block_start', {
+              type: 'content_block_start',
+              index: event.index,
+              content_block: event.contentBlock,
+            });
+            break;
+          }
+          case 'blockDelta': {
+            this.sendAnthropicEvent(res, 'content_block_delta', {
+              type: 'content_block_delta',
+              index: event.index,
+              delta: event.delta,
+            });
+            break;
+          }
+          case 'blockStop': {
+            this.sendAnthropicEvent(res, 'content_block_stop', {
+              type: 'content_block_stop',
+              index: event.index,
+            });
+            break;
+          }
+          case 'messageDelta': {
+            outputTokens = event.outputTokens;
+            this.sendAnthropicEvent(res, 'message_delta', {
+              type: 'message_delta',
+              delta: { stop_reason: event.stopReason, stop_sequence: event.stopSequence },
+              usage: { output_tokens: outputTokens },
+            });
+            break;
+          }
+          case 'messageStop': {
+            this.sendAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
+            break;
           }
         }
-      });
+      }
 
-      response.data.on('end', () => {
-        if (!blockStarted) {
-          // Ensure we always send at least a minimal valid stream
-          this.sendAnthropicEvent(res, 'message_start', {
-            type: 'message_start',
-            message: {
-              id: messageId,
-              type: 'message',
-              role: 'assistant',
-              content: [],
-              model: originalModel,
-              stop_reason: null,
-              stop_sequence: null,
-              usage: { input_tokens: inputTokens, output_tokens: 1 },
-            },
-          });
-          this.sendAnthropicEvent(res, 'content_block_start', {
-            type: 'content_block_start',
-            index: 0,
-            content_block: { type: 'text', text: '' },
-          });
-          this.sendAnthropicEvent(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
-          this.sendAnthropicEvent(res, 'message_delta', {
-            type: 'message_delta',
-            delta: { stop_reason: 'end_turn', stop_sequence: null },
-            usage: { output_tokens: outputTokens },
-          });
-          this.sendAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
-        }
-        res.end();
-      });
-
-      response.data.on('error', (error: Error) => {
-        logger.error('Invoke stream error (Anthropic Messages):', error.message);
-        res.end();
-      });
+      if (!blockStarted) {
+        this.sendAnthropicEvent(res, 'message_start', {
+          type: 'message_start',
+          message: {
+            id: messageId,
+            type: 'message',
+            role: 'assistant',
+            content: [],
+            model: originalModel,
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: inputTokens, output_tokens: 1 },
+          },
+        });
+        this.sendAnthropicEvent(res, 'content_block_start', {
+          type: 'content_block_start',
+          index: 0,
+          content_block: { type: 'text', text: '' },
+        });
+        this.sendAnthropicEvent(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
+        this.sendAnthropicEvent(res, 'message_delta', {
+          type: 'message_delta',
+          delta: { stop_reason: 'end_turn', stop_sequence: null },
+          usage: { output_tokens: outputTokens },
+        });
+        this.sendAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
+      }
+      res.end();
 
     } catch (error: unknown) {
       const axiosError = error as { response?: { status?: number }; message?: string };

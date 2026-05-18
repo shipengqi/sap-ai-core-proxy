@@ -9,6 +9,7 @@ import { logger } from '../logger';
 export class AuthManager {
   private credentials: SapAiCoreCredentials;
   private token?: Token;
+  private refreshPromise: Promise<string> | null = null;
 
   constructor(credentials: SapAiCoreCredentials) {
     this.credentials = credentials;
@@ -67,18 +68,25 @@ export class AuthManager {
     }
   }
 
-  /**
-   * Gets a valid access token, refreshing if necessary
-   */
   async getToken(): Promise<string> {
-    // Check if token exists and is not expired (with 60 second buffer)
     if (this.token && this.token.expires_at > Date.now() + 60000) {
       return this.token.access_token;
     }
 
-    logger.debug('Token expired or not present, refreshing...');
-    this.token = await this.authenticate();
-    return this.token.access_token;
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.authenticate()
+        .then(token => {
+          this.token = token;
+          this.refreshPromise = null;
+          return token.access_token;
+        })
+        .catch(err => {
+          this.refreshPromise = null;
+          throw err;
+        });
+    }
+
+    return this.refreshPromise;
   }
 
   /**

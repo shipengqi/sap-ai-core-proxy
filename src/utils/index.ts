@@ -1,6 +1,11 @@
 export { convertPythonJsonToStandardJson } from './json-parser';
 export { extractTextContent } from './content-extractor';
-export { setSSEHeaders, sendSSEEvent } from './sse';
+export { setSSEHeaders, sendSSEEvent, endStreamOnError } from './sse';
 export { extractErrorDetails, sendOpenAIError, sendAnthropicError, handleAnthropicError, handleOpenAIError } from './error-handler';
 export { parseConverseStream, drainErrorBody, parseErrorMessage, applyPromptCaching } from './converse-stream';
 export type { ConverseEvent } from './converse-stream';
+export { parseInvokeStream } from './invoke-stream';
+export type { InvokeEvent } from './invoke-stream';
+export { parseGeminiStream } from './gemini-stream';
+export type { GeminiEvent } from './gemini-stream';
+export { extractSystemPrompt, contentBlockToText, mapConverseStopReasonToOpenAI, assembleConversePayload } from './message-transforms';
