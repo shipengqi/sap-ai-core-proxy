@@ -1,8 +1,19 @@
 import axios, { AxiosResponse } from 'axios';
 import { AuthManager } from './auth';
+import { drainErrorBody, parseErrorMessage } from '../utils';
 
 const INFERENCE_TIMEOUT_MS = 30_000;
 const API_TIMEOUT_MS = 10_000;
+
+export class SapApiError extends Error {
+  constructor(
+    public readonly statusCode: number,
+    message: string
+  ) {
+    super(message);
+    this.name = 'SapApiError';
+  }
+}
 
 export class SapClient {
   constructor(private authManager: AuthManager) {}
@@ -14,12 +25,17 @@ export class SapClient {
 
   async postStream(path: string, body: unknown): Promise<AxiosResponse> {
     const { headers, url } = await this.prepare(path);
-    return axios.post(url, body, {
+    const response = await axios.post(url, body, {
       headers,
       responseType: 'stream',
       validateStatus: (s) => s < 500,
       timeout: INFERENCE_TIMEOUT_MS,
     });
+    if (response.status >= 400) {
+      const body = await drainErrorBody(response.data as NodeJS.ReadableStream);
+      throw new SapApiError(response.status, parseErrorMessage(body));
+    }
+    return response;
   }
 
   async get<T = unknown>(path: string): Promise<AxiosResponse<T>> {

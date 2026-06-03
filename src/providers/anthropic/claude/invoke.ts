@@ -8,18 +8,12 @@ import {
   AnthropicMessagesResponse,
 } from '../../../types/anthropic';
 import {
-  setSSEHeaders,
-  sendSSEEvent,
   handleAnthropicError,
   extractSystemPrompt,
   contentBlockToText,
   endStreamOnError,
-  parseInvokeStream,
-  drainErrorBody,
-  parseErrorMessage,
-  sendAnthropicError,
+  orchestrateStream,
 } from '../../../utils';
-import { logger } from '../../../logger';
 
 /**
  * Handles Claude 3 models via SAP AI Core Invoke API.
@@ -111,10 +105,6 @@ export class InvokeAnthropicProvider {
     res.json(anthropicResponse);
   }
 
-  private sendAnthropicEvent(res: Response, eventType: string, data: unknown): void {
-    sendSSEEvent(res, eventType, data);
-  }
-
   private async handleStreamResponse(
     path: string,
     payload: Record<string, unknown>,
@@ -122,123 +112,12 @@ export class InvokeAnthropicProvider {
     originalModel: string
   ): Promise<void> {
     const messageId = `msg_${uuidv4().replace(/-/g, '').slice(0, 24)}`;
-
-    try {
-      const response = await this.client.postStream(path, payload);
-
-      if (response.status >= 400) {
-        const body = await drainErrorBody(response.data);
-        sendAnthropicError(res, response.status, parseErrorMessage(body));
-        return;
-      }
-
-      setSSEHeaders(res);
-
-      let inputTokens = 0;
-      let outputTokens = 0;
-      let blockStarted = false;
-
-      for await (const event of parseInvokeStream(response.data)) {
-        switch (event.type) {
-          case 'messageStart': {
-            inputTokens = event.inputTokens;
-            this.sendAnthropicEvent(res, 'message_start', {
-              type: 'message_start',
-              message: {
-                id: event.messageId || messageId,
-                type: 'message',
-                role: 'assistant',
-                content: [],
-                model: originalModel,
-                stop_reason: null,
-                stop_sequence: null,
-                usage: { input_tokens: inputTokens, output_tokens: 1 },
-              },
-            });
-            this.sendAnthropicEvent(res, 'ping', { type: 'ping' });
-            break;
-          }
-          case 'blockStart': {
-            blockStarted = true;
-            this.sendAnthropicEvent(res, 'content_block_start', {
-              type: 'content_block_start',
-              index: event.index,
-              content_block: event.contentBlock,
-            });
-            break;
-          }
-          case 'blockDelta': {
-            this.sendAnthropicEvent(res, 'content_block_delta', {
-              type: 'content_block_delta',
-              index: event.index,
-              delta: event.delta,
-            });
-            break;
-          }
-          case 'blockStop': {
-            this.sendAnthropicEvent(res, 'content_block_stop', {
-              type: 'content_block_stop',
-              index: event.index,
-            });
-            break;
-          }
-          case 'messageDelta': {
-            outputTokens = event.outputTokens;
-            this.sendAnthropicEvent(res, 'message_delta', {
-              type: 'message_delta',
-              delta: { stop_reason: event.stopReason, stop_sequence: event.stopSequence },
-              usage: { output_tokens: outputTokens },
-            });
-            break;
-          }
-          case 'messageStop': {
-            this.sendAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
-            break;
-          }
-        }
-      }
-
-      if (!blockStarted) {
-        this.sendAnthropicEvent(res, 'message_start', {
-          type: 'message_start',
-          message: {
-            id: messageId,
-            type: 'message',
-            role: 'assistant',
-            content: [],
-            model: originalModel,
-            stop_reason: null,
-            stop_sequence: null,
-            usage: { input_tokens: inputTokens, output_tokens: 1 },
-          },
-        });
-        this.sendAnthropicEvent(res, 'content_block_start', {
-          type: 'content_block_start',
-          index: 0,
-          content_block: { type: 'text', text: '' },
-        });
-        this.sendAnthropicEvent(res, 'content_block_stop', { type: 'content_block_stop', index: 0 });
-        this.sendAnthropicEvent(res, 'message_delta', {
-          type: 'message_delta',
-          delta: { stop_reason: 'end_turn', stop_sequence: null },
-          usage: { output_tokens: outputTokens },
-        });
-        this.sendAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
-      }
-      res.end();
-
-    } catch (error: unknown) {
-      const axiosError = error as { response?: { status?: number }; message?: string };
-      logger.error('Invoke stream request failed:', axiosError.message);
-
-      if (!res.headersSent) {
-        res.status(axiosError.response?.status || 500).json({
-          type: 'error',
-          error: { type: 'api_error', message: axiosError.message || 'Request failed' },
-        });
-      } else {
-        res.end();
-      }
-    }
+    const response = await this.client.postStream(path, payload);
+    await orchestrateStream(response, {
+      apiFormat: 'invoke',
+      responseFormat: 'anthropic',
+      model: originalModel,
+      completionId: messageId,
+    }, res);
   }
 }

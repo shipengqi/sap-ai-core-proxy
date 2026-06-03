@@ -13,6 +13,7 @@ export class DeploymentManager {
   private deployments: Deployment[] = [];
   private lastFetchTime: number = 0;
   private cacheDuration: number = 60000; // 1 minute cache
+  private fetchPromise: Promise<Deployment[]> | null = null;
 
   constructor(authManager: AuthManager) {
     this.authManager = authManager;
@@ -61,9 +62,21 @@ export class DeploymentManager {
       return this.deployments;
     }
 
-    this.deployments = await this.fetchDeployments();
-    this.lastFetchTime = now;
-    return this.deployments;
+    if (!this.fetchPromise) {
+      this.fetchPromise = this.fetchDeployments()
+        .then(deps => {
+          this.deployments = deps;
+          this.lastFetchTime = Date.now();
+          this.fetchPromise = null;
+          return deps;
+        })
+        .catch(err => {
+          this.fetchPromise = null;
+          throw err;
+        });
+    }
+
+    return this.fetchPromise;
   }
 
   /**

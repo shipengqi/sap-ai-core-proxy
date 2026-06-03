@@ -9,3 +9,5 @@ export type { InvokeEvent } from './invoke-stream';
 export { parseGeminiStream } from './gemini-stream';
 export type { GeminiEvent } from './gemini-stream';
 export { extractSystemPrompt, contentBlockToText, mapConverseStopReasonToOpenAI, assembleConversePayload } from './message-transforms';
+export { orchestrateStream } from './stream-orchestrator';
+export type { StreamContext } from './stream-orchestrator';

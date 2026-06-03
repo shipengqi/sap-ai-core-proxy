@@ -6,18 +6,14 @@ import { SapClient } from '../../../sap-ai-core/client';
 import {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
-  OpenAIChatCompletionChunk,
   OpenAIMessage,
 } from '../../../types/openai';
 import {
   extractTextContent,
-  setSSEHeaders,
   handleOpenAIError,
-  parseConverseStream,
-  drainErrorBody,
-  parseErrorMessage,
   mapConverseStopReasonToOpenAI,
   assembleConversePayload,
+  orchestrateStream,
 } from '../../../utils';
 import * as catalogue from '../../../model-catalogue';
 import { logger } from '../../../logger';
@@ -122,96 +118,13 @@ export class ConverseOpenAIProvider {
     model: string
   ): Promise<void> {
     const completionId = `chatcmpl-${uuidv4()}`;
-    const created = Math.floor(Date.now() / 1000);
-
-    try {
-      const response = await this.client.postStream(path, payload);
-
-      if (response.status >= 400) {
-        const body = await drainErrorBody(response.data);
-        const errorMessage = parseErrorMessage(body);
-        logger.error(`Converse streaming error: ${response.status} ${errorMessage}`);
-        res.status(response.status).json({
-          error: { message: errorMessage, type: 'api_error', param: null, code: response.status.toString() },
-        });
-        return;
-      }
-
-      setSSEHeaders(res);
-
-      let inputTokens = 0;
-      let outputTokens = 0;
-
-      for await (const event of parseConverseStream(response.data)) {
-        switch (event.type) {
-          case 'metadata':
-            inputTokens = event.inputTokens || inputTokens;
-            outputTokens = event.outputTokens || outputTokens;
-            break;
-          case 'textDelta':
-          case 'reasoningDelta': {
-            const chunk: OpenAIChatCompletionChunk = {
-              id: completionId,
-              object: 'chat.completion.chunk',
-              created,
-              model,
-              choices: [{ index: 0, delta: { content: event.text }, finish_reason: null }],
-            };
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            break;
-          }
-        }
-      }
-
-      if (inputTokens > 0 || outputTokens > 0) {
-        const usageChunk: OpenAIChatCompletionChunk = {
-          id: completionId,
-          object: 'chat.completion.chunk',
-          created,
-          model,
-          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-          usage: {
-            prompt_tokens: inputTokens,
-            completion_tokens: outputTokens,
-            total_tokens: inputTokens + outputTokens,
-          },
-        };
-        res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-      }
-      res.write('data: [DONE]\n\n');
-      res.end();
-
-    } catch (error: unknown) {
-      const axiosError = error as {
-        response?: { status?: number; data?: unknown };
-        message?: string;
-        config?: { url?: string };
-      };
-      logger.error('Converse streaming request failed:');
-      logger.error('  Message: ' + (axiosError.message || 'Unknown'));
-      logger.error('  Status: ' + (axiosError.response?.status || 'N/A'));
-      logger.error('  URL: ' + (axiosError.config?.url || 'N/A'));
-
-      const errorMessage = axiosError.message || 'Unknown error';
-
-      if (!res.headersSent) {
-        res.status(axiosError.response?.status || 500).json({
-          error: { message: errorMessage, type: 'api_error', param: null, code: (axiosError.response?.status || 500).toString() },
-        });
-        return;
-      }
-
-      const errorChunk: OpenAIChatCompletionChunk = {
-        id: completionId,
-        object: 'chat.completion.chunk',
-        created,
-        model,
-        choices: [{ index: 0, delta: { content: `Error: ${errorMessage}` }, finish_reason: 'stop' }],
-      };
-      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-    }
+    const response = await this.client.postStream(path, payload);
+    await orchestrateStream(response, {
+      apiFormat: 'converse',
+      responseFormat: 'openai',
+      model,
+      completionId,
+    }, res);
   }
 
 }

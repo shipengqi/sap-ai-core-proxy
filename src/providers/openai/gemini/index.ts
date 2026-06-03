@@ -6,10 +6,10 @@ import { SapClient } from '../../../sap-ai-core/client';
 import {
   OpenAIChatCompletionRequest,
   OpenAIChatCompletionResponse,
-  OpenAIChatCompletionChunk,
   OpenAIMessage
 } from '../../../types/openai';
-import { extractTextContent, setSSEHeaders, extractErrorDetails, sendOpenAIError, endStreamOnError, parseGeminiStream, drainErrorBody, parseErrorMessage } from '../../../utils';
+import { extractTextContent, extractErrorDetails, sendOpenAIError, orchestrateStream } from '../../../utils';
+import { SapApiError } from '../../../sap-ai-core/client';
 import * as catalogue from '../../../model-catalogue';
 import { logger } from '../../../logger';
 
@@ -42,7 +42,11 @@ export class GeminiProvider {
         await this.handleNonStreamingResponse(`${basePath}:generateContent`, payload, res, model);
       }
     } catch (error: unknown) {
-      this.handleError(error, res);
+      if (error instanceof SapApiError) {
+        sendOpenAIError(res, error.statusCode, error.message);
+      } else {
+        this.handleError(error, res);
+      }
     }
   }
 
@@ -153,98 +157,13 @@ export class GeminiProvider {
     model: string
   ): Promise<void> {
     const completionId = `chatcmpl-${uuidv4()}`;
-    const created = Math.floor(Date.now() / 1000);
-
-    try {
-      const response = await this.client.postStream(path, payload);
-
-      if (response.status >= 400) {
-        const body = await drainErrorBody(response.data);
-        sendOpenAIError(res, response.status, parseErrorMessage(body));
-        return;
-      }
-
-      setSSEHeaders(res);
-
-      let promptTokens = 0;
-      let outputTokens = 0;
-
-      const initialChunk: OpenAIChatCompletionChunk = {
-        id: completionId,
-        object: 'chat.completion.chunk',
-        created,
-        model,
-        choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
-      };
-      res.write(`data: ${JSON.stringify(initialChunk)}\n\n`);
-
-      for await (const event of parseGeminiStream(response.data)) {
-        switch (event.type) {
-          case 'textDelta': {
-            const chunk: OpenAIChatCompletionChunk = {
-              id: completionId,
-              object: 'chat.completion.chunk',
-              created,
-              model,
-              choices: [{ index: 0, delta: { content: event.text }, finish_reason: null }],
-            };
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            break;
-          }
-          case 'metadata':
-            promptTokens = event.promptTokens;
-            outputTokens = event.outputTokens;
-            break;
-        }
-      }
-
-      const finishChunk: OpenAIChatCompletionChunk = {
-        id: completionId,
-        object: 'chat.completion.chunk',
-        created,
-        model,
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-      };
-      res.write(`data: ${JSON.stringify(finishChunk)}\n\n`);
-
-      if (promptTokens > 0 || outputTokens > 0) {
-        const usageChunk: OpenAIChatCompletionChunk = {
-          id: completionId,
-          object: 'chat.completion.chunk',
-          created,
-          model,
-          choices: [],
-          usage: {
-            prompt_tokens: promptTokens,
-            completion_tokens: outputTokens,
-            total_tokens: promptTokens + outputTokens,
-          },
-        };
-        res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-      }
-      res.write('data: [DONE]\n\n');
-      res.end();
-
-    } catch (error: unknown) {
-      const axiosError = error as { response?: { status?: number }; message?: string };
-      logger.error('Gemini streaming request failed:', axiosError.message);
-
-      if (!res.headersSent) {
-        sendOpenAIError(res, axiosError.response?.status || 500, axiosError.message || 'Request failed');
-        return;
-      }
-
-      const errorChunk: OpenAIChatCompletionChunk = {
-        id: completionId,
-        object: 'chat.completion.chunk',
-        created,
-        model,
-        choices: [{ index: 0, delta: { content: `Error: ${axiosError.message}` }, finish_reason: 'stop' }],
-      };
-      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-    }
+    const response = await this.client.postStream(path, payload);
+    await orchestrateStream(response, {
+      apiFormat: 'gemini',
+      responseFormat: 'openai',
+      model,
+      completionId,
+    }, res);
   }
 
   /**

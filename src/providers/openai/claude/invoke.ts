@@ -9,7 +9,7 @@ import {
   OpenAIChatCompletionChunk,
   OpenAIMessage,
 } from '../../../types/openai';
-import { setSSEHeaders, handleOpenAIError, mapConverseStopReasonToOpenAI, contentBlockToText, endStreamOnError, parseInvokeStream, drainErrorBody, parseErrorMessage, sendOpenAIError } from '../../../utils';
+import { handleOpenAIError, mapConverseStopReasonToOpenAI, contentBlockToText, orchestrateStream } from '../../../utils';
 import * as catalogue from '../../../model-catalogue';
 import { logger } from '../../../logger';
 
@@ -128,102 +128,13 @@ export class InvokeOpenAIProvider {
     model: string
   ): Promise<void> {
     const completionId = `chatcmpl-${uuidv4()}`;
-    const created = Math.floor(Date.now() / 1000);
-
-    try {
-      const response = await this.client.postStream(path, payload);
-
-      if (response.status >= 400) {
-        const body = await drainErrorBody(response.data);
-        sendOpenAIError(res, response.status, parseErrorMessage(body));
-        return;
-      }
-
-      setSSEHeaders(res);
-
-      let inputTokens = 0;
-      let outputTokens = 0;
-
-      for await (const event of parseInvokeStream(response.data)) {
-        switch (event.type) {
-          case 'messageStart': {
-            inputTokens = event.inputTokens;
-            const chunk: OpenAIChatCompletionChunk = {
-              id: completionId,
-              object: 'chat.completion.chunk',
-              created,
-              model,
-              choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
-            };
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            break;
-          }
-          case 'blockDelta': {
-            if (event.delta.type === 'text_delta' && event.delta.text) {
-              const chunk: OpenAIChatCompletionChunk = {
-                id: completionId,
-                object: 'chat.completion.chunk',
-                created,
-                model,
-                choices: [{ index: 0, delta: { content: event.delta.text as string }, finish_reason: null }],
-              };
-              res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            }
-            break;
-          }
-          case 'messageDelta': {
-            outputTokens = event.outputTokens;
-            const chunk: OpenAIChatCompletionChunk = {
-              id: completionId,
-              object: 'chat.completion.chunk',
-              created,
-              model,
-              choices: [{ index: 0, delta: {}, finish_reason: mapConverseStopReasonToOpenAI(event.stopReason) }],
-            };
-            res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-            break;
-          }
-        }
-      }
-
-      if (inputTokens > 0 || outputTokens > 0) {
-        const usageChunk: OpenAIChatCompletionChunk = {
-          id: completionId,
-          object: 'chat.completion.chunk',
-          created,
-          model,
-          choices: [],
-          usage: {
-            prompt_tokens: inputTokens,
-            completion_tokens: outputTokens,
-            total_tokens: inputTokens + outputTokens,
-          },
-        };
-        res.write(`data: ${JSON.stringify(usageChunk)}\n\n`);
-      }
-      res.write('data: [DONE]\n\n');
-      res.end();
-
-    } catch (error: unknown) {
-      const axiosError = error as { response?: { status?: number }; message?: string };
-      logger.error('Anthropic streaming request failed:', axiosError.message);
-
-      if (!res.headersSent) {
-        sendOpenAIError(res, axiosError.response?.status || 500, axiosError.message || 'Request failed');
-        return;
-      }
-
-      const errorChunk: OpenAIChatCompletionChunk = {
-        id: completionId,
-        object: 'chat.completion.chunk',
-        created,
-        model,
-        choices: [{ index: 0, delta: { content: `Error: ${axiosError.message}` }, finish_reason: 'stop' }],
-      };
-      res.write(`data: ${JSON.stringify(errorChunk)}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-    }
+    const response = await this.client.postStream(path, payload);
+    await orchestrateStream(response, {
+      apiFormat: 'invoke',
+      responseFormat: 'openai',
+      model,
+      completionId,
+    }, res);
   }
 
 }

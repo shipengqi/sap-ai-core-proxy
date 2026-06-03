@@ -15,18 +15,12 @@ import {
   AnthropicToolChoice,
 } from '../../../types/anthropic';
 import {
-  setSSEHeaders,
-  sendSSEEvent,
   handleAnthropicError,
-  parseConverseStream,
-  drainErrorBody,
-  parseErrorMessage,
-  applyPromptCaching,
   extractSystemPrompt,
   contentBlockToText,
   assembleConversePayload,
+  orchestrateStream,
 } from '../../../utils';
-import { logger } from '../../../logger';
 
 /**
  * Handles Claude 3.5+ models via SAP AI Core Converse API.
@@ -187,10 +181,6 @@ export class ConverseAnthropicProvider {
     return blocks;
   }
 
-  private sendAnthropicEvent(res: Response, eventType: string, data: unknown): void {
-    sendSSEEvent(res, eventType, data);
-  }
-
   private async handleNonStreamResponse(
     path: string,
     payload: Record<string, unknown>,
@@ -230,114 +220,13 @@ export class ConverseAnthropicProvider {
     originalModel: string
   ): Promise<void> {
     const messageId = `msg_${uuidv4().replace(/-/g, '').slice(0, 24)}`;
-
-    try {
-      const response = await this.client.postStream(path, payload);
-
-      if (response.status >= 400) {
-        const body = await drainErrorBody(response.data);
-        const errorMessage = parseErrorMessage(body);
-        res.status(response.status).json({
-          type: 'error',
-          error: { type: 'api_error', message: errorMessage },
-        });
-        return;
-      }
-
-      setSSEHeaders(res);
-
-      let inputTokens = 0;
-      let outputTokens = 0;
-      let stopReason = 'end_turn';
-
-      this.sendAnthropicEvent(res, 'message_start', {
-        type: 'message_start',
-        message: {
-          id: messageId,
-          type: 'message',
-          role: 'assistant',
-          content: [],
-          model: originalModel,
-          stop_reason: null,
-          stop_sequence: null,
-          usage: { input_tokens: 0, output_tokens: 0 },
-        },
-      });
-      this.sendAnthropicEvent(res, 'ping', { type: 'ping' });
-
-      for await (const event of parseConverseStream(response.data)) {
-        switch (event.type) {
-          case 'metadata':
-            inputTokens = event.inputTokens || inputTokens;
-            outputTokens = event.outputTokens || outputTokens;
-            break;
-          case 'textBlockStart':
-            this.sendAnthropicEvent(res, 'content_block_start', {
-              type: 'content_block_start',
-              index: event.index,
-              content_block: { type: 'text', text: '' },
-            });
-            break;
-          case 'textDelta':
-            this.sendAnthropicEvent(res, 'content_block_delta', {
-              type: 'content_block_delta',
-              index: event.index,
-              delta: { type: 'text_delta', text: event.text },
-            });
-            break;
-          case 'textBlockStop':
-            this.sendAnthropicEvent(res, 'content_block_stop', {
-              type: 'content_block_stop',
-              index: event.index,
-            });
-            break;
-          case 'toolBlockStart':
-            this.sendAnthropicEvent(res, 'content_block_start', {
-              type: 'content_block_start',
-              index: event.index,
-              content_block: { type: 'tool_use', id: event.id, name: event.name, input: {} },
-            });
-            break;
-          case 'toolInputDelta':
-            this.sendAnthropicEvent(res, 'content_block_delta', {
-              type: 'content_block_delta',
-              index: event.index,
-              delta: { type: 'input_json_delta', partial_json: event.partial_json },
-            });
-            break;
-          case 'toolBlockStop':
-            this.sendAnthropicEvent(res, 'content_block_stop', {
-              type: 'content_block_stop',
-              index: event.index,
-            });
-            break;
-          case 'messageStop':
-            stopReason = event.stopReason;
-            break;
-        }
-      }
-
-      this.sendAnthropicEvent(res, 'message_delta', {
-        type: 'message_delta',
-        delta: { stop_reason: stopReason, stop_sequence: null },
-        usage: { output_tokens: outputTokens },
-      });
-      this.sendAnthropicEvent(res, 'message_stop', { type: 'message_stop' });
-      res.end();
-
-    } catch (error: unknown) {
-      const axiosError = error as { response?: { status?: number }; message?: string };
-      logger.error('Converse stream request failed:', axiosError.message);
-
-      if (!res.headersSent) {
-        res.status(axiosError.response?.status || 500).json({
-          type: 'error',
-          error: { type: 'api_error', message: axiosError.message || 'Request failed' },
-        });
-      } else {
-        res.end();
-      }
-    }
+    const response = await this.client.postStream(path, payload);
+    await orchestrateStream(response, {
+      apiFormat: 'converse',
+      responseFormat: 'anthropic',
+      model: originalModel,
+      completionId: messageId,
+    }, res);
   }
 }
 

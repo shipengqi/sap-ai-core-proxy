@@ -6,6 +6,7 @@ import { OpenAIChatCompletionRequest } from '../types/openai';
 import { OpenAIModel, OpenAIModelsResponse } from '../types/openai';
 import { ModelProvider } from '../types/models';
 import * as catalogue from '../model-catalogue';
+import { ClaudeDispatcher } from '../providers/claude-dispatcher';
 import { logger } from '../logger';
 
 const upload = multer({ storage: multer.memoryStorage() });
@@ -17,10 +18,12 @@ export function buildProviderRegistry(
   invokeClaudeProvider: InvokeOpenAIProvider,
   geminiProvider: GeminiProvider,
 ): Map<ModelProvider, ChatCompletionHandler> {
+  const claudeDispatcher = new ClaudeDispatcher(
+    (req, res) => converseClaudeProvider.handle(req as OpenAIChatCompletionRequest, res),
+    (req, res) => invokeClaudeProvider.handle(req as OpenAIChatCompletionRequest, res),
+  );
   const claudeHandler: ChatCompletionHandler = (req, res) =>
-    catalogue.usesConverseApi(req.model)
-      ? converseClaudeProvider.handle(req, res)
-      : invokeClaudeProvider.handle(req, res);
+    claudeDispatcher.dispatch(req.model, req, res);
 
   return new Map([
     ['anthropic', claudeHandler],

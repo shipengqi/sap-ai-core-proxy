@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import axios from 'axios';
+import { Readable } from 'stream';
 import type { Request, Response } from 'express';
-import { SapClient } from '../src/sap-ai-core/client';
+import { SapClient, SapApiError } from '../src/sap-ai-core/client';
 import { DeploymentManager } from '../src/sap-ai-core/deployments';
 import type { AuthManager } from '../src/sap-ai-core/auth';
 import { ResponsesProvider } from '../src/providers/openai/native/responses';
@@ -68,10 +69,12 @@ describe('SapClient', () => {
     expect(config?.validateStatus?.(500)).toBe(false);
   });
 
-  it('postStream() resolves instead of throwing on 4xx', async () => {
-    vi.spyOn(axios, 'post').mockResolvedValue({ status: 429, data: 'rate limited' });
-    const result = await client.postStream('/test', {});
-    expect(result.status).toBe(429);
+  it('postStream() throws SapApiError (not resolves) on 4xx', async () => {
+    vi.spyOn(axios, 'post').mockResolvedValue({
+      status: 429,
+      data: Readable.from([Buffer.from('rate limited')]),
+    });
+    await expect(client.postStream('/test', {})).rejects.toBeInstanceOf(SapApiError);
   });
 
   it('postForm() strips Content-Type so axios sets the multipart boundary', async () => {
@@ -124,6 +127,22 @@ describe('DeploymentManager', () => {
     expect(getSpy).toHaveBeenCalledTimes(1);
   });
 
+  it('concurrent getDeploymentId() calls during cache miss trigger only one HTTP request', async () => {
+    const getSpy = vi.spyOn(SapClient.prototype, 'get').mockResolvedValue({
+      status: 200,
+      data: DEPLOYMENTS_RESPONSE,
+    } as any);
+    // Fire 5 concurrent calls — all see a cold cache simultaneously
+    await Promise.all([
+      manager.getDeploymentId('gpt-4o'),
+      manager.getDeploymentId('gpt-4o'),
+      manager.getDeploymentId('gemini-2.5-flash'),
+      manager.getDeploymentId('gpt-4o'),
+      manager.getDeploymentId('gpt-4o'),
+    ]);
+    expect(getSpy).toHaveBeenCalledTimes(1);
+  });
+
   it('throws for an unknown model', async () => {
     vi.spyOn(SapClient.prototype, 'get').mockResolvedValue({
       status: 200,
@@ -132,6 +151,40 @@ describe('DeploymentManager', () => {
     await expect(manager.getDeploymentId('unknown-model')).rejects.toThrow(
       'No running deployment found for model: unknown-model',
     );
+  });
+});
+
+describe('SapClient.postStream() — SapApiError on 4xx', () => {
+  let auth: AuthManager;
+  let client: SapClient;
+
+  beforeEach(() => {
+    auth = fakeAuth();
+    client = new SapClient(auth);
+    vi.restoreAllMocks();
+  });
+
+  it('throws SapApiError with correct statusCode for 4xx response', async () => {
+    vi.spyOn(axios, 'post').mockResolvedValue({
+      status: 429,
+      data: Readable.from([Buffer.from(JSON.stringify({ errors: { message: 'quota exceeded' } }))]),
+    });
+    await expect(client.postStream('/test', {})).rejects.toThrow(SapApiError);
+    await expect(client.postStream('/test', {})).rejects.toMatchObject({ statusCode: 429 });
+  });
+
+  it('SapApiError.message contains the upstream error message', async () => {
+    vi.spyOn(axios, 'post').mockResolvedValue({
+      status: 400,
+      data: Readable.from([Buffer.from(JSON.stringify({ errors: { message: 'bad input' } }))]),
+    });
+    await expect(client.postStream('/test', {})).rejects.toMatchObject({ message: 'bad input' });
+  });
+
+  it('resolves normally for 2xx responses', async () => {
+    vi.spyOn(axios, 'post').mockResolvedValue({ status: 200, data: Readable.from([]) });
+    const result = await client.postStream('/test', {});
+    expect(result.status).toBe(200);
   });
 });
 
