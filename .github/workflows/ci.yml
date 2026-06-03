@@ -9,24 +9,24 @@ on:
 jobs:
   ci:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - uses: actions/setup-go@v5
         with:
-          node-version: '24'
-          cache: 'npm'
+          go-version-file: go.mod
+          cache: true
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Build
+        run: go build ./...
 
-      - name: Lint
-        run: npm run lint
-
-      - name: Type check
-        run: npm run typecheck
+      - name: Vet
+        run: go vet ./...
 
       - name: Test
-        run: npm test
+        run: go test ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: latest

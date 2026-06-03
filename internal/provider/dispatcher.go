@@ -2,6 +2,7 @@ package provider
 
 import (
 	"github.com/gin-gonic/gin"
+
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
 )
 

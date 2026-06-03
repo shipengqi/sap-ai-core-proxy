@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
 	providerPkg "github.com/shipengqi/sap-ai-core-proxy/internal/provider"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/provider/anthropic"
@@ -128,12 +129,22 @@ func handleChatDispatch(
 			return
 		}
 
-		provider := catalogue.GetProvider(peek.Model)
-		slog.Info("chat completion", "model", peek.Model, "provider", provider)
+		// Resolve alias or SAP name → canonical SAP name
+		sapName, err := catalogue.MapFromAnthropic(peek.Model)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": gin.H{"message": err.Error(), "type": "invalid_request_error", "param": "model", "code": "invalid_value"},
+			})
+			return
+		}
+		c.Set("sapModel", sapName)
+
+		provider := catalogue.GetProvider(sapName)
+		slog.Info("chat completion", "model", peek.Model, "sapModel", sapName, "provider", provider)
 
 		switch provider {
 		case "anthropic":
-			claudeDispatcher.Dispatch(peek.Model, c)
+			claudeDispatcher.Dispatch(sapName, c)
 		case "gemini":
 			geminiProvider.HandleChatCompletion(c)
 		default:
@@ -243,19 +254,19 @@ func registerAnthropic(r *gin.Engine, deps *Deps) {
 
 func registerCompat(r *gin.Engine) {
 	fakeUser := gin.H{
-		"id":                "user_proxy_sap_ai_core",
-		"email":             "proxy@sap-ai-core.local",
-		"name":              "SAP AI Core Proxy User",
-		"display_name":      "SAP AI Core Proxy",
-		"has_claude_pro":    true,
+		"id":                   "user_proxy_sap_ai_core",
+		"email":                "proxy@sap-ai-core.local",
+		"name":                 "SAP AI Core Proxy User",
+		"display_name":         "SAP AI Core Proxy",
+		"has_claude_pro":       true,
 		"has_pro_subscription": true,
-		"has_api_access":    true,
+		"has_api_access":       true,
 	}
 	fakeOrg := gin.H{
-		"id":                "org_proxy_sap_ai_core",
-		"name":              "SAP AI Core",
-		"billing_type":      "api_error_counts",
-		"rate_limit_tier":   "production",
+		"id":              "org_proxy_sap_ai_core",
+		"name":            "SAP AI Core",
+		"billing_type":    "api_error_counts",
+		"rate_limit_tier": "production",
 	}
 
 	g := r.Group("/anthropic")
@@ -289,17 +300,17 @@ func registerCompat(r *gin.Engine) {
 	g.GET("/api/user_flags", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"flags": gin.H{
-				"has_pro_subscription":       true,
-				"claude_ai_mcp_enabled":      true,
+				"has_pro_subscription":         true,
+				"claude_ai_mcp_enabled":        true,
 				"interleaved_thinking_enabled": true,
 			},
 		})
 	})
 	g.GET("/api/billing/subscription", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"plan":                "max_tier",
-			"status":              "active",
-			"current_period_end":  time.Now().Add(365 * 24 * time.Hour).UTC().Format(time.RFC3339),
+			"plan":               "max_tier",
+			"status":             "active",
+			"current_period_end": time.Now().Add(365 * 24 * time.Hour).UTC().Format(time.RFC3339),
 		})
 	})
 	g.GET("/api/auth/claude_ai_oauth", func(c *gin.Context) {

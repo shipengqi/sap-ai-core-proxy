@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
@@ -97,22 +98,22 @@ func extractTextContent(content any) string {
 // ---- OpenAI chat request type ----
 
 type ChatRequest struct {
-	Model            string           `json:"model"`
-	Messages         []ChatMessage    `json:"messages"`
-	Temperature      *float64         `json:"temperature,omitempty"`
-	TopP             *float64         `json:"top_p,omitempty"`
-	N                *int             `json:"n,omitempty"`
-	Stream           bool             `json:"stream,omitempty"`
-	Stop             json.RawMessage  `json:"stop,omitempty"`
-	MaxTokens        *int             `json:"max_tokens,omitempty"`
-	PresencePenalty  *float64         `json:"presence_penalty,omitempty"`
-	FrequencyPenalty *float64         `json:"frequency_penalty,omitempty"`
-	LogitBias        map[string]int   `json:"logit_bias,omitempty"`
-	User             string           `json:"user,omitempty"`
-	Tools            []any            `json:"tools,omitempty"`
-	ToolChoice       any              `json:"tool_choice,omitempty"`
-	Functions        []any            `json:"functions,omitempty"`
-	FunctionCall     any              `json:"function_call,omitempty"`
+	Model            string          `json:"model"`
+	Messages         []ChatMessage   `json:"messages"`
+	Temperature      *float64        `json:"temperature,omitempty"`
+	TopP             *float64        `json:"top_p,omitempty"`
+	N                *int            `json:"n,omitempty"`
+	Stream           bool            `json:"stream,omitempty"`
+	Stop             json.RawMessage `json:"stop,omitempty"`
+	MaxTokens        *int            `json:"max_tokens,omitempty"`
+	PresencePenalty  *float64        `json:"presence_penalty,omitempty"`
+	FrequencyPenalty *float64        `json:"frequency_penalty,omitempty"`
+	LogitBias        map[string]int  `json:"logit_bias,omitempty"`
+	User             string          `json:"user,omitempty"`
+	Tools            []any           `json:"tools,omitempty"`
+	ToolChoice       any             `json:"tool_choice,omitempty"`
+	Functions        []any           `json:"functions,omitempty"`
+	FunctionCall     any             `json:"function_call,omitempty"`
 }
 
 type ChatMessage struct {
@@ -138,7 +139,11 @@ func (p *ConverseOpenAIProvider) Handle(c *gin.Context) {
 	}
 
 	ctx := bg()
-	deploymentID, err := p.dm.GetDeploymentID(ctx, req.Model)
+	sapModel := c.GetString("sapModel")
+	if sapModel == "" {
+		sapModel = req.Model
+	}
+	deploymentID, err := p.dm.GetDeploymentID(ctx, sapModel)
 	if err != nil {
 		handleUpstreamError(c, err)
 		return
@@ -274,7 +279,11 @@ func (p *InvokeOpenAIProvider) Handle(c *gin.Context) {
 	}
 
 	ctx := bg()
-	deploymentID, err := p.dm.GetDeploymentID(ctx, req.Model)
+	sapModel := c.GetString("sapModel")
+	if sapModel == "" {
+		sapModel = req.Model
+	}
+	deploymentID, err := p.dm.GetDeploymentID(ctx, sapModel)
 	if err != nil {
 		handleUpstreamError(c, err)
 		return
