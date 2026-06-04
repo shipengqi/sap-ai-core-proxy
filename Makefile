@@ -4,7 +4,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_.]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build the binary
-	go build -o sap-ai-core-proxy ./...
+	go build -o sap-ai-core-proxy .
 
 run: ## Run the server
 	go run ./...
