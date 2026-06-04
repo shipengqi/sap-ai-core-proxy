@@ -33,27 +33,55 @@ archives:
 
 dockers:
   - image_templates:
-      - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-amd64
+      # - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-amd64
+      - registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:{{ .Tag }}-amd64
     use: buildx
     build_flag_templates:
       - --platform=linux/amd64
     goarch: amd64
   - image_templates:
-      - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-arm64
+      # - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-arm64
+      - registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:{{ .Tag }}-arm64
     use: buildx
     build_flag_templates:
       - --platform=linux/arm64
     goarch: arm64
 
 docker_manifests:
-  - name_template: ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}
+  # - name_template: ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}
+  #   image_templates:
+  #     - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-amd64
+  #     - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-arm64
+  # - name_template: ghcr.io/shipengqi/sap-ai-core-proxy:latest
+  #   image_templates:
+  #     - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-amd64
+  #     - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-arm64
+  - name_template: registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:{{ .Tag }}
     image_templates:
-      - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-amd64
-      - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-arm64
-  - name_template: ghcr.io/shipengqi/sap-ai-core-proxy:latest
+      - registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:{{ .Tag }}-amd64
+      - registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:{{ .Tag }}-arm64
+  - name_template: registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:latest
     image_templates:
-      - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-amd64
-      - ghcr.io/shipengqi/sap-ai-core-proxy:{{ .Tag }}-arm64
+      - registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:{{ .Tag }}-amd64
+      - registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:{{ .Tag }}-arm64
 
 changelog:
-  disable: true
+  use: github
+  filters:
+    exclude:
+      - "^chore: bump version"
+  groups:
+    - title: Features
+      regexp: '^feat(\([^)]+\))?!?:'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^fix(\([^)]+\))?!?:'
+      order: 1
+    - title: Refactors
+      regexp: '^refactor(\([^)]+\))?!?:'
+      order: 2
+    - title: Performance
+      regexp: '^perf(\([^)]+\))?!?:'
+      order: 3
+    - title: Other Changes
+      order: 999

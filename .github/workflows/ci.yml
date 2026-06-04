@@ -30,3 +30,8 @@ jobs:
         uses: golangci/golangci-lint-action@v6
         with:
           version: latest
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Docker build
+        run: make docker.build
