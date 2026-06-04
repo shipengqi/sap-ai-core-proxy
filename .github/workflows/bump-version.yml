@@ -20,10 +20,6 @@ jobs:
         with:
           token: ${{ secrets.RELEASE_TOKEN }}
 
-      - uses: actions/setup-node@v6
-        with:
-          node-version: '24'
-
       - name: Validate version
         run: |
           VERSION="${{ github.event.inputs.version }}"
@@ -38,7 +34,10 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Bump version
-        run: npm version "${{ github.event.inputs.version }}" --no-git-tag-version
+        run: |
+          VERSION="${{ github.event.inputs.version }}"
+          echo "${VERSION}" > VERSION
+          git add VERSION
 
       - name: Create branch and PR
         env:
@@ -47,7 +46,6 @@ jobs:
           VERSION="${{ github.event.inputs.version }}"
           BRANCH="chore/bump-version-to-${VERSION}"
           git checkout -b "$BRANCH"
-          git add package.json package-lock.json
           git commit -m "chore: bump version to ${VERSION}"
           git push origin "$BRANCH"
           gh pr create \
@@ -86,11 +84,3 @@ jobs:
         run: |
           git tag "${{ steps.version.outputs.tag }}"
           git push origin "${{ steps.version.outputs.tag }}"
-
-      - name: Create release
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
-        run: |
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --title "${{ steps.version.outputs.tag }}" \
-            --notes ""

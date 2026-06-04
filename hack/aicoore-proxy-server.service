@@ -6,9 +6,8 @@ After=network.target
 User=pooky
 Group=pooky
 WorkingDirectory=/home/pooky/code/sap-ai-core-proxy
-ExecStart=/home/pooky/.nvm/versions/node/v25.9.0/bin/node /home/pooky/code/sap-ai-core-proxy/dist/index.js
-Environment=NODE_ENV=production
-Environment=PATH=/home/pooky/.nvm/versions/node/v25.9.0/bin:/usr/bin:/bin
+ExecStart=/home/pooky/code/sap-ai-core-proxy/sap-ai-core-proxy
+EnvironmentFile=/home/pooky/code/sap-ai-core-proxy/.env
 Restart=always
 RestartSec=10
 StandardOutput=journal

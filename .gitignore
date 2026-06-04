@@ -1,8 +1,11 @@
-# Dependencies
-node_modules/
+# Go build binary
+sap-ai-core-proxy
+/sap-ai-core-proxy
 
-# Build output
-dist/
+# Go test cache and coverage
+*.test
+*.out
+coverage.html
 
 # Environment files
 .env
@@ -21,18 +24,11 @@ Thumbs.db
 
 # Logs
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
 
 # Test coverage
 coverage/
 
-# Reference files (downloaded for development)
+# Reference files
 reference_*.ts
-
-# Token files (used for testing)
 token.txt
-
-# Requests directory (debug logging)
 requests/

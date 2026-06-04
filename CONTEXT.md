@@ -21,7 +21,7 @@ The model-family name used in provider naming to refer to Anthropic's Claude mod
 
 | Provider file | Model family | Surface |
 |---|---|---|
-| `openai.ts` | openai | openai |
-| `claude-openai.ts` | claude | openai |
-| `gemini-openai.ts` | gemini | openai |
-| `claude-anthropic.ts` | claude | anthropic |
+| `internal/provider/openai/providers.go` (OpenAIChatProvider) | openai | openai |
+| `internal/provider/openai/providers.go` (ConverseOpenAIProvider, InvokeOpenAIProvider) | claude | openai |
+| `internal/provider/openai/providers.go` (GeminiProvider) | gemini | openai |
+| `internal/provider/anthropic/converse.go` + `invoke.go` | claude | anthropic |

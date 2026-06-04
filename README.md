@@ -1,38 +1,42 @@
 # SAP AI Core LLM Proxy
 
-A TypeScript proxy server that provides **OpenAI-compatible** and **Anthropic-native** API endpoints for SAP AI Core's LLM deployments. Use any OpenAI SDK, Anthropic SDK, or Claude Code to interact with models deployed on SAP AI Core.
+A Go proxy server that provides **OpenAI-compatible** and **Anthropic-native** API endpoints for SAP AI Core's LLM deployments. Use any OpenAI SDK, Anthropic SDK, or Claude Code to interact with models deployed on SAP AI Core.
 
 ## Features
 
 - **Dual API surfaces**: OpenAI (`/openai`) and Anthropic (`/anthropic`)
-- **Multi-model support**: OpenAI GPT, Anthropic Claude, Google Gemini, Meta Llama, Mistral, and Perplexity models
+- **Multi-model support**: OpenAI GPT, Anthropic Claude, Google Gemini, Meta Llama, Mistral, Perplexity, Cohere, and Amazon models
 - **Streaming support**: Full Server-Sent Events (SSE) streaming for real-time responses
 - **Automatic authentication**: OAuth token management with automatic refresh
 - **Deployment discovery**: Automatically discovers running model deployments from SAP AI Core
 - **Claude Code support**: Native Anthropic Messages API for Claude Code CLI and VSCode extension
-- **Extensible architecture**: Router-per-proxy-type design makes adding new API formats straightforward
 
 ## Supported Models
 
 ### OpenAI Models
-- gpt-4o, gpt-4o-mini, gpt-4
+- gpt-4o, gpt-4o-mini, gpt-4, gpt-4-32k
 - gpt-4.1, gpt-4.1-nano
 - gpt-5, gpt-5-nano, gpt-5-mini
+- gpt-35-turbo, gpt-35-turbo-16k, gpt-35-turbo-0125
 - o1, o3-mini, o3, o4-mini
 
 ### Anthropic Models (Claude)
+- anthropic--claude-4.8-opus *(catalogue entry; deployment pending)*
+- anthropic--claude-4.7-opus
 - anthropic--claude-4.6-sonnet, anthropic--claude-4.6-opus, anthropic--claude-4.6-haiku
 - anthropic--claude-4.5-sonnet, anthropic--claude-4.5-opus, anthropic--claude-4.5-haiku
 - anthropic--claude-4-sonnet, anthropic--claude-4-opus
-- anthropic--claude-3.7-sonnet, anthropic--claude-3.5-sonnet
+- anthropic--claude-3.7-sonnet, anthropic--claude-3.5-sonnet, anthropic--claude-3.5-haiku
 - anthropic--claude-3-opus, anthropic--claude-3-sonnet, anthropic--claude-3-haiku
 
 ### Google Gemini Models
-- gemini-2.5-pro, gemini-2.5-flash
+- gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-flash-image
+- gemini-2.0-flash, gemini-2.0-flash-lite
 - gemini-1.5-pro, gemini-1.5-flash
+- gemini-1.0-pro
 
 ### Perplexity Models
-- sonar-pro, sonar
+- sonar-pro, sonar, sonar-deep-research
 
 ### Meta Models (Llama)
 - meta--llama3-70b-instruct
@@ -40,16 +44,23 @@ A TypeScript proxy server that provides **OpenAI-compatible** and **Anthropic-na
 
 ### Mistral Models
 - mistralai--mixtral-8x7b-instruct-v01
-- mistralai--mistral-large-instruct-2407
+- mistralai--mistral-large-instruct
+- mistralai--mistral-medium-instruct
+
+### Cohere Models
+- cohere--command-a-reasoning
+
+### Amazon Models
+- amazon--nova-lite
 
 ## Quick Start
 
-### 1. Clone and Install
+### 1. Clone and Build
 
 ```bash
 git clone https://github.com/shipengqi/sap-ai-core-proxy.git
 cd sap-ai-core-proxy
-npm install
+go build -o sap-ai-core-proxy ./...
 ```
 
 ### 2. Configure Environment
@@ -69,20 +80,14 @@ SAP_AI_CORE_TOKEN_URL=https://your-tenant.authentication.region.hana.ondemand.co
 SAP_AI_CORE_BASE_URL=https://api.ai.your-region.aws.ml.hana.ondemand.com
 SAP_AI_CORE_RESOURCE_GROUP=default
 PORT=3001
-LOG_LEVEL=info
 ```
 
 ### 3. Run the Proxy
 
-Development mode:
 ```bash
-npm run dev
-```
-
-Production mode:
-```bash
-npm run build
-npm start
+./sap-ai-core-proxy
+# or:
+make run
 ```
 
 ## API Endpoints
@@ -111,7 +116,7 @@ npm start
 | `/anthropic/oauth/token` | POST | Claude Code auth stub |
 | `/anthropic/api/auth/me` | GET | Claude Code user info stub |
 | `/anthropic/api/organizations` | GET | Claude Code org stub |
-| `/anthropic/api/*` | GET | Claude Code compat catch-all |
+| `/anthropic/api/*` | ANY | Claude Code compat catch-all |
 
 ### General
 
@@ -146,7 +151,7 @@ print(response.choices[0].message.content)
 
 ### Using with OpenAI Node.js SDK
 
-```typescript
+```javascript
 import OpenAI from 'openai';
 
 const client = new OpenAI({
@@ -221,6 +226,7 @@ Configure Claude Code to use the proxy:
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:3001/anthropic
 export ANTHROPIC_API_KEY=any-value   # The proxy handles SAP AI Core auth automatically
+export ANTHROPIC_AUTH_TOKEN=any-value
 ```
 
 Then run Claude Code normally:
@@ -233,11 +239,15 @@ For the VSCode extension, set the API Base URL to `http://localhost:3001/anthrop
 
 ### Model Name Mapping
 
-Claude Code sends standard Anthropic model names. The proxy automatically maps them to SAP AI Core model names:
-
+Claude Code sends standard Anthropic model names. The proxy automatically maps them to SAP AI Core model names. `-latest` aliases dynamically resolve to the newest deployed version in their family:
 
 | Claude Code model name | SAP AI Core model name |
 |------------------------|------------------------|
+| `claude-opus-latest` | newest deployed opus (e.g. `anthropic--claude-4.7-opus`) |
+| `claude-sonnet-latest` | newest deployed sonnet (e.g. `anthropic--claude-4.6-sonnet`) |
+| `claude-haiku-latest` | newest deployed haiku (e.g. `anthropic--claude-4.5-haiku`) |
+| `claude-opus-4-8` | `anthropic--claude-4.8-opus` |
+| `claude-opus-4-7` | `anthropic--claude-4.7-opus` |
 | `claude-sonnet-4-6` | `anthropic--claude-4.6-sonnet` |
 | `claude-opus-4-6` | `anthropic--claude-4.6-opus` |
 | `claude-haiku-4-6` | `anthropic--claude-4.6-haiku` |
@@ -253,84 +263,68 @@ Claude Code sends standard Anthropic model names. The proxy automatically maps t
 | `claude-3-sonnet-20240229` | `anthropic--claude-3-sonnet` |
 | `claude-3-haiku-20240307` | `anthropic--claude-3-haiku` |
 
-You can also use SAP AI Core model names directly (e.g. `--model anthropic--claude-4.5-sonnet`).
+You can also use SAP AI Core model names directly (e.g. `--model anthropic--claude-4.6-sonnet`).
 
 ## Project Structure
 
 ```
-src/
-├── index.ts                        # Entry point
-├── app.ts                          # Express app setup, mounts routers
-├── config.ts                       # Environment configuration
-├── logger.ts                       # Logging utility
-├── model-catalogue.ts              # Authoritative model registry with alias maps
-├── routers/                        # Express Router per API surface
-│   ├── index.ts                    # Router exports
-│   ├── openai.ts                   # /openai/* routes
-│   ├── anthropic.ts                # /anthropic/v1/* routes
-│   ├── claude-code-compat.ts       # /anthropic/oauth/* and /anthropic/api/* stubs
-│   ├── admin.ts                    # /admin/* routes
-│   └── health.ts                   # / and /health routes
-├── providers/                      # LLM provider implementations
-│   ├── index.ts                    # Barrel export (all providers)
-│   ├── openai/                     # OpenAI-compatible surface
-│   │   ├── native/                 # Native OpenAI models
-│   │   │   ├── chat.ts             # GPT chat completions
-│   │   │   ├── embeddings.ts       # Text embeddings
-│   │   │   ├── responses.ts        # Responses API
-│   │   │   └── audio.ts            # Audio transcription (Whisper)
-│   │   ├── claude/                 # Claude via OpenAI surface
-│   │   │   ├── index.ts            # Dispatcher (Converse vs Invoke)
-│   │   │   ├── converse.ts         # Converse API (Claude 3.5+)
-│   │   │   └── invoke.ts           # Invoke API (Claude 3)
-│   │   └── gemini/                 # Gemini via OpenAI surface
-│   │       └── index.ts            # Gemini generateContent adapter
-│   └── anthropic/                  # Anthropic-native surface
-│       └── claude/                 # Claude via Anthropic surface
-│           ├── index.ts            # Dispatcher (Converse vs Invoke)
-│           ├── converse.ts         # Converse API (Claude 3.5+)
-│           └── invoke.ts           # Invoke API (Claude 3)
-├── utils/                          # Shared utilities
-│   ├── json-parser.ts              # Python-style JSON conversion
-│   ├── content-extractor.ts        # Message content extraction
-│   ├── sse.ts                      # SSE header/event helpers
-│   └── error-handler.ts            # Error extraction and formatting
-├── sap-ai-core/                    # SAP AI Core integration
-│   ├── auth.ts                     # OAuth token management
-│   ├── deployments.ts              # Model deployment discovery
-│   └── types.ts                    # SAP AI Core type definitions
-└── types/                          # Shared TypeScript interfaces
-    ├── openai.ts                   # OpenAI API types
-    ├── anthropic.ts                # Anthropic API types
-    └── models.ts                   # Model/provider types
+main.go                       # Entry point: config, clients, server startup
+internal/
+├── config/
+│   └── config.go             # Environment variable loading and validation
+├── sapclient/                # SAP AI Core clients
+│   ├── auth.go               # OAuth token management (singleflight caching)
+│   ├── client.go             # HTTP client (Post, PostStream, Get, Delete, PostForm)
+│   ├── deployments.go        # Deployment discovery and 60s caching
+│   └── errors.go             # SapAPIError type
+├── catalogue/
+│   └── catalogue.go          # Model registry: metadata, alias maps, provider lookup
+├── stream/                   # SSE streaming infrastructure
+│   ├── types.go              # ConverseEvent, InvokeEvent, GeminiEvent discriminated types
+│   ├── converse.go           # SAP Converse API stream parser
+│   ├── invoke.go             # SAP Invoke API stream parser
+│   ├── gemini.go             # Gemini API stream parser
+│   └── orchestrator.go       # OrchestrateStream — drives full SSE lifecycle
+├── provider/                 # LLM provider implementations
+│   ├── dispatcher.go         # ClaudeDispatcher (Converse vs Invoke routing)
+│   ├── anthropic/            # Anthropic-native surface
+│   │   ├── claude.go         # Entry point: validates, maps model, dispatches
+│   │   ├── converse.go       # Claude 3.5+ via SAP Converse API
+│   │   └── invoke.go         # Claude 3 via SAP Invoke API
+│   └── openai/               # OpenAI-compatible surface
+│       └── providers.go      # GPT, Claude, Gemini, embeddings, responses, audio
+├── router/
+│   └── router.go             # RegisterAll() — mounts all Gin route groups
+└── middleware/
+    ├── cors.go               # Permissive CORS + OPTIONS 204
+    └── logger.go             # Structured request logging (log/slog)
 ```
 
 ## How It Works
 
-1. **Authentication**: The proxy authenticates with SAP AI Core using OAuth 2.0 client credentials flow
-2. **Deployment Discovery**: On startup (and periodically), it fetches available model deployments
-3. **Request Routing**: Incoming requests are routed by URL prefix to the appropriate proxy mode
-4. **Request Translation**: Requests are translated to the appropriate format for each model provider
-5. **Response Translation**: Responses from SAP AI Core are converted back to the client's expected format
-6. **Streaming**: For streaming requests, SSE streams are properly forwarded and formatted
-
-## Adding a New API Surface
-
-The router-per-surface architecture makes it easy to add new API formats:
-
-1. Create a new router in `src/routers/` (e.g. `google.ts`)
-2. Mount it in `src/app.ts` with `app.use('/google', createGoogleRouter(...))`
-3. Optionally add a new provider in `src/providers/` if the backend format differs
+1. **Authentication**: The proxy authenticates with SAP AI Core using OAuth 2.0 client credentials flow. Tokens are cached with automatic refresh 60 seconds before expiry. Concurrent requests share one in-flight token fetch.
+2. **Deployment Discovery**: On startup (and on demand via `/admin/refresh-deployments`), it fetches running model deployments from SAP AI Core and caches them for 60 seconds.
+3. **Request Routing**: Incoming requests are routed by URL prefix (`/openai` or `/anthropic`) to the appropriate surface handler.
+4. **Request Translation**: Requests are translated to the appropriate SAP AI Core format — Converse API for Claude 3.5+, Invoke API for Claude 3, native Gemini format for Gemini models.
+5. **Response Translation**: Responses from SAP AI Core are converted back to the client's expected format (OpenAI or Anthropic).
+6. **Streaming**: For streaming requests, SSE events from SAP AI Core are parsed by format-specific parsers and re-emitted in the client's protocol format.
 
 ## Model Routing (OpenAI Surface)
 
-In the OpenAI surface, the proxy automatically routes requests to the appropriate provider based on the model name:
+In the OpenAI surface, the proxy automatically routes requests to the appropriate backend based on the model name:
 
-- **OpenAI models** (gpt-\*, o1, o3-\*): Standard OpenAI chat completions API
-- **Anthropic models** (anthropic--claude-\*):
-  - Newer models (claude-4.x, claude-3.7, claude-3.5): Converse Stream API with prompt caching
-  - Older models (claude-3-\*): Invoke API
-- **Gemini models** (gemini-\*): Gemini native generateContent API
+- **OpenAI models** (`gpt-*`, `o1`, `o3-*`, `o4-*`): Native OpenAI chat completions API
+- **Anthropic models** (`anthropic--claude-*`):
+  - Newer models (claude-4.x, claude-3.7, claude-3.5): SAP Converse API with prompt caching
+  - Older models (claude-3-*): SAP Invoke API
+- **Gemini models** (`gemini-*`): Gemini native generateContent API
+- **Other models** (Mistral, Meta, Perplexity, Cohere, Amazon): Routed via OpenAI-compatible chat completions
+
+## Adding a New API Surface
+
+1. Add route registration in `internal/router/router.go` — add a new `register*` function and call it from `RegisterAll()`
+2. Add a new provider package under `internal/provider/` if the backend format differs
+3. Register any new model entries in `internal/catalogue/catalogue.go`
 
 ## Environment Variables
 
@@ -342,7 +336,6 @@ In the OpenAI surface, the proxy automatically routes requests to the appropriat
 | `SAP_AI_CORE_BASE_URL` | Yes | - | SAP AI Core API base URL |
 | `SAP_AI_CORE_RESOURCE_GROUP` | No | `default` | Resource group |
 | `PORT` | No | `3001` | Server port |
-| `LOG_LEVEL` | No | `info` | Log level (debug, info, warn, error) |
 
 ## License
 
