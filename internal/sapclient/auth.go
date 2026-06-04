@@ -33,7 +33,6 @@ type AuthManager struct {
 type sfGroup struct {
 	mu       sync.Mutex
 	inflight chan struct{}
-	result   string
 	err      error
 }
 
@@ -118,7 +117,7 @@ func (a *AuthManager) fetchToken(ctx context.Context) (string, int, error) {
 	if err != nil {
 		return "", 0, fmt.Errorf("token request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {

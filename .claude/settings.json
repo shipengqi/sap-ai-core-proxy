@@ -6,7 +6,9 @@
       "Bash(SAP_AI_CORE_CLIENT_ID=x SAP_AI_CORE_CLIENT_SECRET=x SAP_AI_CORE_TOKEN_URL=http://x SAP_AI_CORE_BASE_URL=http://x ./sap-ai-core-proxy)",
       "Bash(curl -s http://localhost:3001/health)",
       "Bash(kill %1)",
-      "Bash(xxd /Users/C5406922/code/sap-ai-core-proxy/.env)"
+      "Bash(xxd /Users/C5406922/code/sap-ai-core-proxy/.env)",
+      "mcp__codegraph__codegraph_explore",
+      "Bash(rtk golangci-lint *)"
     ]
   }
 }

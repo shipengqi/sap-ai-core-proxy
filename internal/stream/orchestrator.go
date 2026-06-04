@@ -31,9 +31,9 @@ func OrchestrateStream(resp *http.Response, ctx StreamContext, w http.ResponseWr
 
 	writeSSE := func(eventType, jsonData string) {
 		if ctx.ResponseFormat == "anthropic" {
-			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)
+			_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", eventType, jsonData)
 		} else {
-			fmt.Fprintf(w, "data: %s\n\n", jsonData)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", jsonData)
 		}
 		flusher.Flush()
 		headersSent = true
@@ -85,7 +85,7 @@ func OrchestrateStream(resp *http.Response, ctx StreamContext, w http.ResponseWr
 		// Mid-stream error — signal end to client
 		slog.Error("stream error", "error", orchErr)
 		if headersSent {
-			fmt.Fprintf(w, "data: [DONE]\n\n")
+			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 			flusher.Flush()
 		}
 		return orchErr
@@ -104,7 +104,7 @@ func runConverseStream(
 	created int,
 	headersSent *bool,
 ) error {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var inputTokens, outputTokens int
 	stopReason := "end_turn"
@@ -221,7 +221,7 @@ func runInvokeStream(
 	created int,
 	headersSent *bool,
 ) error {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var inputTokens, outputTokens int
 	var blockStarted bool

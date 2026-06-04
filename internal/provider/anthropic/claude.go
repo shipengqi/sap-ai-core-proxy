@@ -198,7 +198,7 @@ func doOrchestrateStream(c *gin.Context, resp *http.Response, ctx stream.StreamC
 
 func genMsgID() string {
 	b := make([]byte, 12)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return "msg_" + hex.EncodeToString(b)
 }
 

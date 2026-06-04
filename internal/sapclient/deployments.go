@@ -126,7 +126,7 @@ func (d *DeploymentManager) fetchDeployments(ctx context.Context) ([]Deployment,
 	if err != nil {
 		return nil, fmt.Errorf("fetch deployments: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {

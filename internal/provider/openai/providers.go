@@ -24,7 +24,7 @@ import (
 
 func genChatCmplID() string {
 	b := make([]byte, 12)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return "chatcmpl-" + hex.EncodeToString(b)
 }
 
@@ -176,7 +176,10 @@ func (p *ConverseOpenAIProvider) Handle(c *gin.Context) {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
 		var data map[string]any
-		json.Unmarshal(body, &data)
+		if err := json.Unmarshal(body, &data); err != nil {
+			handleUpstreamError(c, err)
+			return
+		}
 
 		content := ""
 		if output, ok := data["output"].(map[string]any); ok {
@@ -317,7 +320,10 @@ func (p *InvokeOpenAIProvider) Handle(c *gin.Context) {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
 		var data map[string]any
-		json.Unmarshal(body, &data)
+		if err := json.Unmarshal(body, &data); err != nil {
+			handleUpstreamError(c, err)
+			return
+		}
 
 		// Invoke returns native Anthropic format — convert to OpenAI
 		content := ""
@@ -397,7 +403,7 @@ func (p *InvokeOpenAIProvider) buildPayload(req *ChatRequest) map[string]any {
 	}
 	if req.Stop != nil {
 		var stop any
-		json.Unmarshal(req.Stop, &stop)
+		_ = json.Unmarshal(req.Stop, &stop)
 		switch v := stop.(type) {
 		case string:
 			payload["stop_sequences"] = []string{v}
@@ -630,7 +636,7 @@ func (p *OpenAIChatProvider) HandleChatCompletion(c *gin.Context) {
 		for {
 			n, err := resp.Body.Read(buf)
 			if n > 0 {
-				c.Writer.Write(buf[:n])
+				_, _ = c.Writer.Write(buf[:n])
 				if flusher != nil {
 					flusher.Flush()
 				}
@@ -804,7 +810,7 @@ func (p *ResponsesProvider) HandleCreate(c *gin.Context) {
 		for {
 			n, readErr := resp.Body.Read(buf)
 			if n > 0 {
-				c.Writer.Write(buf[:n])
+				_, _ = c.Writer.Write(buf[:n])
 				if flusher != nil {
 					flusher.Flush()
 				}
@@ -915,7 +921,7 @@ func (p *AudioProvider) HandleTranscription(c *gin.Context) {
 		sendOpenAIError(c, http.StatusBadRequest, "Missing required file upload", "invalid_request_error")
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	model := c.Request.FormValue("model")
 	if model == "" {
@@ -939,20 +945,20 @@ func (p *AudioProvider) HandleTranscription(c *gin.Context) {
 		sendOpenAIError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	io.Copy(fw, file)
+	_, _ = io.Copy(fw, file)
 
 	// Copy other form fields
-	c.Request.ParseMultipartForm(32 << 20)
+	_ = c.Request.ParseMultipartForm(32 << 20)
 	if c.Request.MultipartForm != nil {
 		for key, vals := range c.Request.MultipartForm.Value {
 			if key != "file" {
 				for _, v := range vals {
-					mw.WriteField(key, v)
+					_ = mw.WriteField(key, v)
 				}
 			}
 		}
 	}
-	mw.Close()
+	_ = mw.Close()
 
 	resp, err := p.client.PostForm(ctx, path, &buf, mw.FormDataContentType())
 	if err != nil {

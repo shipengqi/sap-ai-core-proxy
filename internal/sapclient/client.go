@@ -50,7 +50,7 @@ func (c *SapClient) PostStream(ctx context.Context, path string, body any) (*htt
 		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		raw, _ := io.ReadAll(resp.Body)
 		msg := parseErrorMessage(raw)
 		return nil, NewSapAPIError(resp.StatusCode, msg)
