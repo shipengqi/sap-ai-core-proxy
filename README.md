@@ -110,22 +110,29 @@ docker run -d \
   -e SAP_AI_CORE_BASE_URL=https://api.ai.your-region.aws.ml.hana.ondemand.com \
   -e SAP_AI_CORE_RESOURCE_GROUP=default \
   -e PORT=3001 \
-  <image>
+  registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:latest
 ```
 
 ### Run with an env file
 
+Mount your `.env` file into the container so the proxy can parse it correctly (handles quoted values):
+
 ```bash
-docker run -d -p 3001:3001 --env-file .env \
-  <image>
+docker run -d -p 3001:3001 \
+  -v $(pwd)/.env:/.env \
+  registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:latest
 ```
 
 To use a custom port:
 
 ```bash
-docker run -d -p 8080:8080 --env-file .env -e PORT=8080 \
-  <image>
+docker run -d -p 8080:8080 \
+  -v $(pwd)/.env:/.env \
+  -e PORT=8080 \
+  registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:latest
 ```
+
+> **Note**: Use volume mount (`-v`) instead of `--env-file`. Docker's `--env-file` keeps quotes as part of the value, which breaks credential parsing. The volume mount lets the proxy's built-in `.env` parser handle quoted values correctly.
 
 
 ## API Endpoints
