@@ -21,9 +21,9 @@ func NewConverseAnthropicProvider(client *sapclient.SapClient, dm *sapclient.Dep
 	return &ConverseAnthropicProvider{client: client, dm: dm}
 }
 
-func (p *ConverseAnthropicProvider) handle(c *gin.Context, req *MessagesRequest, sapName string) {
+func (p *ConverseAnthropicProvider) handle(c *gin.Context, req *MessagesRequest, chain []string) {
 	ctx := bg()
-	deploymentID, err := p.dm.GetDeploymentID(ctx, sapName)
+	deploymentID, _, err := p.dm.GetDeploymentIDFromChain(ctx, chain)
 	if err != nil {
 		handleUpstreamError(c, err)
 		return

@@ -168,6 +168,27 @@ func (d *DeploymentManager) GetDeploymentID(ctx context.Context, modelName strin
 	return "", fmt.Errorf("no running deployment found for model: %s", modelName)
 }
 
+// GetDeploymentIDFromChain tries each SAP name in order and returns the first with
+// a running deployment. Returns the deployment ID and the resolved SAP name.
+// This is used for -latest alias requests so they fall back gracefully when the
+// newest model version has not been deployed yet.
+func (d *DeploymentManager) GetDeploymentIDFromChain(ctx context.Context, chain []string) (string, string, error) {
+	deps, err := d.GetDeployments(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	depMap := make(map[string]string, len(deps))
+	for _, dep := range deps {
+		depMap[dep.ModelName()] = dep.ID
+	}
+	for _, name := range chain {
+		if id, ok := depMap[name]; ok {
+			return id, name, nil
+		}
+	}
+	return "", "", fmt.Errorf("no running deployment found for any of: %v", chain)
+}
+
 // Refresh forces a cache invalidation and returns a summary of all deployments.
 func (d *DeploymentManager) Refresh(ctx context.Context) ([]DeploymentSummary, error) {
 	d.mu.Lock()

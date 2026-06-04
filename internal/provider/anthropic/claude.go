@@ -94,7 +94,7 @@ func (p *ClaudeAnthropicProvider) HandleMessages(c *gin.Context) {
 		return
 	}
 
-	sapName, err := catalogue.MapFromAnthropic(req.Model)
+	chain, err := catalogue.ResolveChain(req.Model)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"type":  "error",
@@ -103,12 +103,13 @@ func (p *ClaudeAnthropicProvider) HandleMessages(c *gin.Context) {
 		return
 	}
 
+	sapName := chain[0]
 	slog.Info("Anthropic Messages API", "model", req.Model, "sapModel", sapName, "stream", req.Stream)
 
 	if catalogue.UsesConverseAPI(sapName) {
-		p.converse.handle(c, &req, sapName)
+		p.converse.handle(c, &req, chain)
 	} else {
-		p.invoke.handle(c, &req, sapName)
+		p.invoke.handle(c, &req, chain)
 	}
 }
 

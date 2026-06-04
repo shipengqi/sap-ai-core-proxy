@@ -5,7 +5,7 @@ A Go proxy server that provides **OpenAI-compatible** and **Anthropic-native** A
 ## Features
 
 - **Dual API surfaces**: OpenAI (`/openai`) and Anthropic (`/anthropic`)
-- **Multi-model support**: OpenAI GPT, Anthropic Claude, Google Gemini, Meta Llama, Mistral, and Perplexity models
+- **Multi-model support**: OpenAI GPT, Anthropic Claude, Google Gemini, Meta Llama, Mistral, Perplexity, Cohere, and Amazon models
 - **Streaming support**: Full Server-Sent Events (SSE) streaming for real-time responses
 - **Automatic authentication**: OAuth token management with automatic refresh
 - **Deployment discovery**: Automatically discovers running model deployments from SAP AI Core
@@ -14,12 +14,14 @@ A Go proxy server that provides **OpenAI-compatible** and **Anthropic-native** A
 ## Supported Models
 
 ### OpenAI Models
-- gpt-4o, gpt-4o-mini, gpt-4
+- gpt-4o, gpt-4o-mini, gpt-4, gpt-4-32k
 - gpt-4.1, gpt-4.1-nano
 - gpt-5, gpt-5-nano, gpt-5-mini
+- gpt-35-turbo, gpt-35-turbo-16k, gpt-35-turbo-0125
 - o1, o3-mini, o3, o4-mini
 
 ### Anthropic Models (Claude)
+- anthropic--claude-4.8-opus *(catalogue entry; deployment pending)*
 - anthropic--claude-4.7-opus
 - anthropic--claude-4.6-sonnet, anthropic--claude-4.6-opus, anthropic--claude-4.6-haiku
 - anthropic--claude-4.5-sonnet, anthropic--claude-4.5-opus, anthropic--claude-4.5-haiku
@@ -28,11 +30,13 @@ A Go proxy server that provides **OpenAI-compatible** and **Anthropic-native** A
 - anthropic--claude-3-opus, anthropic--claude-3-sonnet, anthropic--claude-3-haiku
 
 ### Google Gemini Models
-- gemini-2.5-pro, gemini-2.5-flash
+- gemini-2.5-pro, gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-flash-image
+- gemini-2.0-flash, gemini-2.0-flash-lite
 - gemini-1.5-pro, gemini-1.5-flash
+- gemini-1.0-pro
 
 ### Perplexity Models
-- sonar-pro, sonar
+- sonar-pro, sonar, sonar-deep-research
 
 ### Meta Models (Llama)
 - meta--llama3-70b-instruct
@@ -40,7 +44,14 @@ A Go proxy server that provides **OpenAI-compatible** and **Anthropic-native** A
 
 ### Mistral Models
 - mistralai--mixtral-8x7b-instruct-v01
-- mistralai--mistral-large-instruct-2407
+- mistralai--mistral-large-instruct
+- mistralai--mistral-medium-instruct
+
+### Cohere Models
+- cohere--command-a-reasoning
+
+### Amazon Models
+- amazon--nova-lite
 
 ## Quick Start
 
@@ -215,6 +226,7 @@ Configure Claude Code to use the proxy:
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:3001/anthropic
 export ANTHROPIC_API_KEY=any-value   # The proxy handles SAP AI Core auth automatically
+export ANTHROPIC_AUTH_TOKEN=any-value
 ```
 
 Then run Claude Code normally:
@@ -227,10 +239,14 @@ For the VSCode extension, set the API Base URL to `http://localhost:3001/anthrop
 
 ### Model Name Mapping
 
-Claude Code sends standard Anthropic model names. The proxy automatically maps them to SAP AI Core model names:
+Claude Code sends standard Anthropic model names. The proxy automatically maps them to SAP AI Core model names. `-latest` aliases dynamically resolve to the newest deployed version in their family:
 
 | Claude Code model name | SAP AI Core model name |
 |------------------------|------------------------|
+| `claude-opus-latest` | newest deployed opus (e.g. `anthropic--claude-4.7-opus`) |
+| `claude-sonnet-latest` | newest deployed sonnet (e.g. `anthropic--claude-4.6-sonnet`) |
+| `claude-haiku-latest` | newest deployed haiku (e.g. `anthropic--claude-4.5-haiku`) |
+| `claude-opus-4-8` | `anthropic--claude-4.8-opus` |
 | `claude-opus-4-7` | `anthropic--claude-4.7-opus` |
 | `claude-sonnet-4-6` | `anthropic--claude-4.6-sonnet` |
 | `claude-opus-4-6` | `anthropic--claude-4.6-opus` |
@@ -247,7 +263,7 @@ Claude Code sends standard Anthropic model names. The proxy automatically maps t
 | `claude-3-sonnet-20240229` | `anthropic--claude-3-sonnet` |
 | `claude-3-haiku-20240307` | `anthropic--claude-3-haiku` |
 
-You can also use SAP AI Core model names directly (e.g. `--model anthropic--claude-4.5-sonnet`).
+You can also use SAP AI Core model names directly (e.g. `--model anthropic--claude-4.6-sonnet`).
 
 ## Project Structure
 
@@ -297,11 +313,12 @@ internal/
 
 In the OpenAI surface, the proxy automatically routes requests to the appropriate backend based on the model name:
 
-- **OpenAI models** (`gpt-*`, `o1`, `o3-*`): Native OpenAI chat completions API
+- **OpenAI models** (`gpt-*`, `o1`, `o3-*`, `o4-*`): Native OpenAI chat completions API
 - **Anthropic models** (`anthropic--claude-*`):
   - Newer models (claude-4.x, claude-3.7, claude-3.5): SAP Converse API with prompt caching
   - Older models (claude-3-*): SAP Invoke API
 - **Gemini models** (`gemini-*`): Gemini native generateContent API
+- **Other models** (Mistral, Meta, Perplexity, Cohere, Amazon): Routed via OpenAI-compatible chat completions
 
 ## Adding a New API Surface
 

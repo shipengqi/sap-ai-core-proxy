@@ -129,15 +129,16 @@ func handleChatDispatch(
 			return
 		}
 
-		// Resolve alias or SAP name → canonical SAP name
-		sapName, err := catalogue.MapFromAnthropic(peek.Model)
+		// Resolve alias or SAP name → deployment chain (newest-first for -latest aliases)
+		chain, err := catalogue.ResolveChain(peek.Model)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": gin.H{"message": err.Error(), "type": "invalid_request_error", "param": "model", "code": "invalid_value"},
 			})
 			return
 		}
-		c.Set("sapModel", sapName)
+		sapName := chain[0]
+		c.Set("sapModelChain", chain)
 
 		provider := catalogue.GetProvider(sapName)
 		slog.Info("chat completion", "model", peek.Model, "sapModel", sapName, "provider", provider)

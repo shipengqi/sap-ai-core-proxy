@@ -139,11 +139,12 @@ func (p *ConverseOpenAIProvider) Handle(c *gin.Context) {
 	}
 
 	ctx := bg()
-	sapModel := c.GetString("sapModel")
-	if sapModel == "" {
-		sapModel = req.Model
+	chain, _ := c.Get("sapModelChain")
+	sapChain, ok := chain.([]string)
+	if !ok || len(sapChain) == 0 {
+		sapChain = []string{req.Model}
 	}
-	deploymentID, err := p.dm.GetDeploymentID(ctx, sapModel)
+	deploymentID, _, err := p.dm.GetDeploymentIDFromChain(ctx, sapChain)
 	if err != nil {
 		handleUpstreamError(c, err)
 		return
@@ -279,11 +280,12 @@ func (p *InvokeOpenAIProvider) Handle(c *gin.Context) {
 	}
 
 	ctx := bg()
-	sapModel := c.GetString("sapModel")
-	if sapModel == "" {
-		sapModel = req.Model
+	chain, _ := c.Get("sapModelChain")
+	sapChain, ok := chain.([]string)
+	if !ok || len(sapChain) == 0 {
+		sapChain = []string{req.Model}
 	}
-	deploymentID, err := p.dm.GetDeploymentID(ctx, sapModel)
+	deploymentID, _, err := p.dm.GetDeploymentIDFromChain(ctx, sapChain)
 	if err != nil {
 		handleUpstreamError(c, err)
 		return

@@ -21,9 +21,9 @@ func NewInvokeAnthropicProvider(client *sapclient.SapClient, dm *sapclient.Deplo
 	return &InvokeAnthropicProvider{client: client, dm: dm}
 }
 
-func (p *InvokeAnthropicProvider) handle(c *gin.Context, req *MessagesRequest, sapName string) {
+func (p *InvokeAnthropicProvider) handle(c *gin.Context, req *MessagesRequest, chain []string) {
 	ctx := bg()
-	deploymentID, err := p.dm.GetDeploymentID(ctx, sapName)
+	deploymentID, _, err := p.dm.GetDeploymentIDFromChain(ctx, chain)
 	if err != nil {
 		handleUpstreamError(c, err)
 		return
