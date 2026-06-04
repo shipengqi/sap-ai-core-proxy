@@ -90,6 +90,44 @@ PORT=3001
 make run
 ```
 
+## Docker
+
+### Build locally
+
+```bash
+make docker.build          # builds with tag :dev
+make docker.build TAG=v1.2.3
+```
+
+### Run with environment variables
+
+```bash
+docker run -d \
+  -p 3001:3001 \
+  -e SAP_AI_CORE_CLIENT_ID=your-client-id \
+  -e SAP_AI_CORE_CLIENT_SECRET=your-client-secret \
+  -e SAP_AI_CORE_TOKEN_URL=https://your-tenant.authentication.region.hana.ondemand.com \
+  -e SAP_AI_CORE_BASE_URL=https://api.ai.your-region.aws.ml.hana.ondemand.com \
+  -e SAP_AI_CORE_RESOURCE_GROUP=default \
+  -e PORT=3001 \
+  <image>
+```
+
+### Run with an env file
+
+```bash
+docker run -d -p 3001:3001 --env-file .env \
+  <image>
+```
+
+To use a custom port:
+
+```bash
+docker run -d -p 8080:8080 --env-file .env -e PORT=8080 \
+  <image>
+```
+
+
 ## API Endpoints
 
 ### OpenAI Surface (`/openai`)
