@@ -151,15 +151,16 @@ func normalizePythonJSON(s string) string {
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
 		if !inStr {
-			if ch == '\'' {
+			switch ch {
+			case '\'':
 				inStr = true
 				quoteChar = '\''
 				sb.WriteByte('"')
-			} else if ch == '"' {
+			case '"':
 				inStr = true
 				quoteChar = '"'
 				sb.WriteByte('"')
-			} else {
+			default:
 				sb.WriteByte(ch)
 			}
 		} else {

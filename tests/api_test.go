@@ -117,7 +117,7 @@ func TestHealth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -136,7 +136,7 @@ func TestAnthropicMessages_UnknownModel(t *testing.T) {
 
 	body := `{"model":"unknown-model-xyz","messages":[{"role":"user","content":"hi"}],"max_tokens":10}`
 	resp := post(t, proxy.URL+"/anthropic/v1/messages", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusBadRequest {
 		b := mustReadBody(t, resp.Body)
@@ -149,7 +149,7 @@ func TestAnthropicMessages_NonStream(t *testing.T) {
 
 	body := `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hello"}],"max_tokens":10}`
 	resp := post(t, proxy.URL+"/anthropic/v1/messages", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	b := mustReadBody(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -174,7 +174,7 @@ func TestAnthropicMessages_Stream(t *testing.T) {
 
 	body := `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hello"}],"max_tokens":10,"stream":true}`
 	resp := post(t, proxy.URL+"/anthropic/v1/messages", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		b := mustReadBody(t, resp.Body)
@@ -212,7 +212,7 @@ func TestOpenAIChatCompletions_NonStream(t *testing.T) {
 
 			body := `{"model":"` + tc.model + `","messages":[{"role":"user","content":"hello"}]}`
 			resp := post(t, proxy.URL+"/openai/v1/chat/completions", body)
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 
 			b := mustReadBody(t, resp.Body)
 			if resp.StatusCode != http.StatusOK {
@@ -245,7 +245,7 @@ func TestOpenAIChatCompletions_Stream(t *testing.T) {
 
 	body := `{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"hello"}],"stream":true}`
 	resp := post(t, proxy.URL+"/openai/v1/chat/completions", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		b := mustReadBody(t, resp.Body)
@@ -291,7 +291,7 @@ func TestOpenAIChatCompletions_Claude47OpusAlias(t *testing.T) {
 
 	body := `{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hello"}]}`
 	resp := post(t, proxy.URL+"/openai/v1/chat/completions", body)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	b := mustReadBody(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
@@ -315,7 +315,7 @@ func TestModelsList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	b := mustReadBody(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {

@@ -51,7 +51,7 @@ func (p *InvokeAnthropicProvider) handle(c *gin.Context, req *MessagesRequest, c
 			handleUpstreamError(c, err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		data, err := readJSONResponse(resp)
 		if err != nil {
 			sendAnthropicError(c, http.StatusInternalServerError, err.Error())

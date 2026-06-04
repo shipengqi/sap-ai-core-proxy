@@ -173,7 +173,7 @@ func (p *ConverseOpenAIProvider) Handle(c *gin.Context) {
 			handleUpstreamError(c, err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(resp.Body)
 		var data map[string]any
 		if err := json.Unmarshal(body, &data); err != nil {
@@ -317,7 +317,7 @@ func (p *InvokeOpenAIProvider) Handle(c *gin.Context) {
 			handleUpstreamError(c, err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(resp.Body)
 		var data map[string]any
 		if err := json.Unmarshal(body, &data); err != nil {
@@ -472,10 +472,13 @@ func (p *GeminiProvider) HandleChatCompletion(c *gin.Context) {
 			handleUpstreamError(c, err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(resp.Body)
 		var data map[string]any
-		json.Unmarshal(body, &data)
+		if err := json.Unmarshal(body, &data); err != nil {
+			handleUpstreamError(c, err)
+			return
+		}
 
 		content := p.extractContent(data)
 		usage := p.extractUsage(data)
@@ -541,7 +544,7 @@ func (p *GeminiProvider) buildPayload(req *ChatRequest) map[string]any {
 	}
 	if req.Stop != nil {
 		var stop any
-		json.Unmarshal(req.Stop, &stop)
+		_ = json.Unmarshal(req.Stop, &stop)
 		switch v := stop.(type) {
 		case string:
 			generationConfig["stopSequences"] = []string{v}
@@ -625,7 +628,7 @@ func (p *OpenAIChatProvider) HandleChatCompletion(c *gin.Context) {
 			handleUpstreamError(c, err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		// Set SSE headers and proxy the stream directly
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
@@ -651,7 +654,7 @@ func (p *OpenAIChatProvider) HandleChatCompletion(c *gin.Context) {
 			handleUpstreamError(c, err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		body, _ := io.ReadAll(resp.Body)
 		c.Data(resp.StatusCode, "application/json", body)
 	}
@@ -742,7 +745,7 @@ func (p *EmbeddingsProvider) HandleEmbeddings(c *gin.Context) {
 		handleUpstreamError(c, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 	c.Data(resp.StatusCode, "application/json", respBody)
 }
@@ -755,7 +758,6 @@ type ResponsesProvider struct {
 }
 
 type responseCache struct {
-	mu    http.RoundTripper
 	data  map[string]string // responseId → deploymentId
 	order []string
 }
@@ -801,7 +803,7 @@ func (p *ResponsesProvider) HandleCreate(c *gin.Context) {
 			handleUpstreamError(c, err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		c.Writer.Header().Set("Content-Type", "text/event-stream")
 		c.Writer.Header().Set("Cache-Control", "no-cache")
 		c.Writer.Header().Set("Connection", "keep-alive")
@@ -825,13 +827,14 @@ func (p *ResponsesProvider) HandleCreate(c *gin.Context) {
 			handleUpstreamError(c, err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		respBody, _ := io.ReadAll(resp.Body)
 
 		var data map[string]any
-		json.Unmarshal(respBody, &data)
-		if id, ok := data["id"].(string); ok && id != "" {
-			p.cacheStore(id, deploymentID)
+		if err := json.Unmarshal(respBody, &data); err == nil {
+			if id, ok := data["id"].(string); ok && id != "" {
+				p.cacheStore(id, deploymentID)
+			}
 		}
 		c.Data(resp.StatusCode, "application/json", respBody)
 	}
@@ -852,7 +855,7 @@ func (p *ResponsesProvider) HandleGet(c *gin.Context) {
 		handleUpstreamError(c, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	c.Data(resp.StatusCode, "application/json", body)
 }
@@ -872,7 +875,7 @@ func (p *ResponsesProvider) HandleDelete(c *gin.Context) {
 		handleUpstreamError(c, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	p.cacheDelete(responseID)
 	c.Status(resp.StatusCode)
 }
@@ -965,7 +968,7 @@ func (p *AudioProvider) HandleTranscription(c *gin.Context) {
 		handleUpstreamError(c, err)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(resp.Body)
 	c.Data(resp.StatusCode, "application/json", body)
 }

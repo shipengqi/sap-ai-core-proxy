@@ -51,7 +51,7 @@ func (p *ConverseAnthropicProvider) handle(c *gin.Context, req *MessagesRequest,
 			handleUpstreamError(c, err)
 			return
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		data, err := readJSONResponse(resp)
 		if err != nil {
 			sendAnthropicError(c, http.StatusInternalServerError, err.Error())
@@ -127,7 +127,7 @@ func (p *ConverseAnthropicProvider) convertContent(raw json.RawMessage) []any {
 			result = append(result, map[string]any{"text": block.Text})
 		case "tool_use":
 			var input any
-			json.Unmarshal(block.Input, &input)
+			_ = json.Unmarshal(block.Input, &input)
 			result = append(result, map[string]any{
 				"toolUse": map[string]any{
 					"toolUseId": block.ID,

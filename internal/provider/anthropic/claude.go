@@ -178,7 +178,7 @@ func handleUpstreamError(c *gin.Context, err error) {
 }
 
 func readJSONResponse(resp *http.Response) (map[string]any, error) {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err

@@ -66,12 +66,12 @@ func OrchestrateStream(resp *http.Response, ctx StreamContext, w http.ResponseWr
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(sapErr.StatusCode)
 			if ctx.ResponseFormat == "anthropic" {
-				json.NewEncoder(w).Encode(map[string]any{
+				_ = json.NewEncoder(w).Encode(map[string]any{
 					"type":  "error",
 					"error": map[string]any{"type": "api_error", "message": sapErr.Message},
 				})
 			} else {
-				json.NewEncoder(w).Encode(map[string]any{
+				_ = json.NewEncoder(w).Encode(map[string]any{
 					"error": map[string]any{
 						"message": sapErr.Message,
 						"type":    "api_error",
@@ -356,7 +356,7 @@ func runGeminiStream(
 	created int,
 	headersSent *bool,
 ) error {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var promptTokens, outputTokens int
 
@@ -430,6 +430,6 @@ func strPtr(s string) *string { return &s }
 
 func randomID(n int) string {
 	b := make([]byte, n/2+1)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)[:n]
 }
