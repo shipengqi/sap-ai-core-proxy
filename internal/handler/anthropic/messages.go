@@ -25,7 +25,7 @@ var allowedFields = map[string]bool{
 	"tools":             true,
 	"tool_choice":       true,
 	"metadata":          true,
-	"thinking":          true,
+	// "thinking" is intentionally excluded — SAP AI Core Bedrock does not support it
 }
 
 // Messages proxies POST /anthropic/v1/messages to SAP AI Core.
