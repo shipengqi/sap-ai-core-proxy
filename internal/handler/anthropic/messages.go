@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -74,6 +75,7 @@ func (h *Handler) Messages(c *gin.Context) {
 
 	filtered = promoteSystemMessages(filtered)
 	filtered = stripCacheControl(filtered)
+	filtered = flattenSystem(filtered)
 
 	filteredBody, err := json.Marshal(filtered)
 	if err != nil {
@@ -238,4 +240,39 @@ func removeFieldFromBlocks(raw json.RawMessage) (json.RawMessage, bool) {
 	}
 	b, _ := json.Marshal(blocks)
 	return b, true
+}
+
+// flattenSystem converts a top-level system array-of-content-blocks into a plain string.
+// The Anthropic SDK sends system as an array when using prompt caching; SAP AI Core
+// Bedrock format requires it to be a string.
+func flattenSystem(m map[string]json.RawMessage) map[string]json.RawMessage {
+	sys, ok := m["system"]
+	if !ok {
+		return m
+	}
+	// Already a string — nothing to do.
+	var s string
+	if json.Unmarshal(sys, &s) == nil {
+		return m
+	}
+	// Array of content blocks — extract text parts and join.
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(sys, &blocks); err != nil {
+		return m
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	if len(parts) == 0 {
+		return m
+	}
+	joined, _ := json.Marshal(strings.Join(parts, "\n"))
+	m["system"] = joined
+	return m
 }

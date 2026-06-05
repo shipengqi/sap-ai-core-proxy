@@ -320,7 +320,7 @@ func (d *DeploymentManager) fetch(ctx context.Context) ([]Deployment, error) {
 	for _, dep := range dr.Resources {
 		if dep.Status == "RUNNING" && dep.DeployedURL != "" {
 			running = append(running, dep)
-			slog.Info("deployment loaded", "id", dep.ID, "model", dep.EffectiveModelName(), "url", dep.DeployedURL)
+			slog.Debug("deployment loaded", "id", dep.ID, "model", dep.EffectiveModelName(), "url", dep.DeployedURL)
 		}
 	}
 	slog.Info("deployments refreshed", "count", len(running))

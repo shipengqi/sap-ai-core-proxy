@@ -18,7 +18,11 @@
       "Bash(awk '/sap-ai-core/{print $1, $2, $11, $12}')",
       "Bash(ps -p 84200 -o pid,args)",
       "Bash(curl -s -v http://localhost:3001/debug/deployment)",
-      "Bash(python3 -c \"import json; c=json.load\\(open\\('/Users/C5406922/.aicoreproxy/config.json'\\)\\); print\\('log_level:', c['server'].get\\('log_level','not set'\\)\\)\")"
+      "Bash(python3 -c \"import json; c=json.load\\(open\\('/Users/C5406922/.aicoreproxy/config.json'\\)\\); print\\('log_level:', c['server'].get\\('log_level','not set'\\)\\)\")",
+      "Bash(pkill -f \"^./sap-ai-core-proxy\")",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" -X HEAD http://localhost:3001/anthropic)",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" -X HEAD http://localhost:3001/anthropic/v1/models)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('OK:', d.get\\('content',[{}]\\)[0].get\\('text','ERR: '+str\\(d.get\\('error',''\\)\\)\\)[:60]\\)\")"
     ]
   }
 }

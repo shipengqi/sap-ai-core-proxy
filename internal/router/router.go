@@ -42,8 +42,11 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 	av1 := r.Group("/anthropic/v1")
 	{
 		av1.GET("/models", an.ListModels)
+		av1.HEAD("/models", func(c *gin.Context) { c.Status(200) })
 		av1.POST("/messages", an.Messages)
 	}
+	// Claude Code connectivity probe: HEAD {ANTHROPIC_BASE_URL}
+	r.HEAD("/anthropic", func(c *gin.Context) { c.Status(200) })
 
 	// Gemini surface
 	r.GET("/gemini/v1/models", ge.ListModels)
