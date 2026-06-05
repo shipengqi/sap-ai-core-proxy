@@ -12,6 +12,9 @@ run: ## Run the server
 test: ## Run all tests
 	go test ./...
 
+test.integration: ## Run integration tests (mock mode if SAP_AI_CORE_* env vars not set)
+	go test -v -timeout 120s ./test/...
+
 vet: ## Run go vet
 	go vet ./...
 

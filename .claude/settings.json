@@ -8,7 +8,17 @@
       "Bash(kill %1)",
       "Bash(xxd /Users/C5406922/code/sap-ai-core-proxy/.env)",
       "mcp__codegraph__codegraph_explore",
-      "Bash(rtk golangci-lint *)"
+      "Bash(rtk golangci-lint *)",
+      "Bash(pkill -f sap-ai-core-proxy)",
+      "Bash(./sap-ai-core-proxy)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:3001/debug/deployment)",
+      "Bash(python3 -c \"import json,sys; print\\(json.load\\(sys.stdin\\)\\)\")",
+      "Bash(pkill -9 -f sap-ai-core-proxy)",
+      "Bash(curl -s -w \"\\\\nHTTP_CODE:%{http_code}\" http://localhost:3001/debug/deployment)",
+      "Bash(awk '/sap-ai-core/{print $1, $2, $11, $12}')",
+      "Bash(ps -p 84200 -o pid,args)",
+      "Bash(curl -s -v http://localhost:3001/debug/deployment)",
+      "Bash(python3 -c \"import json; c=json.load\\(open\\('/Users/C5406922/.aicoreproxy/config.json'\\)\\); print\\('log_level:', c['server'].get\\('log_level','not set'\\)\\)\")"
     ]
   }
 }

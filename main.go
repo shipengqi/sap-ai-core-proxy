@@ -1,71 +1,55 @@
 package main
 
 import (
-	"context"
+	"fmt"
 	"log/slog"
 	"os"
 
 	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/config"
-	"github.com/shipengqi/sap-ai-core-proxy/internal/middleware"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/router"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 )
 
 func main() {
-	// Load .env file if present (ignore error — env vars from shell are fine too)
-	_ = godotenv.Load()
-
-	// Configure structured JSON logging
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	})))
-
-	// Load and validate configuration
 	cfg, err := config.Load()
 	if err != nil {
-		slog.Error("configuration error", "error", err)
+		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Create SAP AI Core clients
-	auth := sapclient.NewAuthManager(
-		cfg.ClientID,
-		cfg.ClientSecret,
-		cfg.TokenURL,
-		cfg.BaseURL,
-		cfg.ResourceGroup,
-	)
-	client := sapclient.NewSapClient(auth)
-	dm := sapclient.NewDeploymentManager(auth)
+	setupLogger(cfg.Server.LogLevel)
 
-	// Eagerly pre-fetch deployments (non-blocking — warns on failure)
-	go dm.WarmUp(context.Background())
+	if cfg.Server.LogLevel != "debug" {
+		gin.SetMode(gin.ReleaseMode)
+	}
 
-	// Build Gin engine
-	gin.SetMode(gin.ReleaseMode)
-	r := gin.New()
-	r.Use(middleware.CORS())
-	r.Use(middleware.Logger())
-	r.Use(gin.Recovery())
+	auth := sapclient.NewAuthManager(cfg.SAPAICore.TokenURL, cfg.SAPAICore.ClientID, cfg.SAPAICore.ClientSecret)
+	client := sapclient.NewClient(cfg.SAPAICore.BaseURL, cfg.SAPAICore.ResourceGroup, auth)
+	deployments := sapclient.NewDeploymentManager(client)
 
-	// Register all routes
-	router.RegisterAll(r, &router.Deps{
-		SapClient:         client,
-		DeploymentManager: dm,
-	})
+	r := router.New(client, deployments, cfg.Server.LogLevel == "debug")
 
-	addr := ":" + cfg.Port
-	slog.Info("sap-ai-core-proxy starting",
-		"port", cfg.Port,
-		"baseURL", cfg.BaseURL,
-		"resourceGroup", cfg.ResourceGroup,
-	)
-
+	addr := fmt.Sprintf(":%d", cfg.Server.Port)
+	slog.Info("server starting", "addr", addr)
 	if err := r.Run(addr); err != nil {
-		slog.Error("server failed", "error", err)
+		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+func setupLogger(level string) {
+	var l slog.Level
+	switch level {
+	case "debug":
+		l = slog.LevelDebug
+	case "warn":
+		l = slog.LevelWarn
+	case "error":
+		l = slog.LevelError
+	default:
+		l = slog.LevelInfo
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l})))
 }

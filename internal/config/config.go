@@ -1,58 +1,97 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
+	"path/filepath"
+	"strconv"
 )
 
-// Config holds all runtime configuration loaded from environment variables.
-type Config struct {
-	ClientID      string
-	ClientSecret  string
-	TokenURL      string
-	BaseURL       string
-	ResourceGroup string
-	Port          string
+type SAPAICore struct {
+	BaseURL       string `json:"base_url"`
+	TokenURL      string `json:"token_url"`
+	ClientID      string `json:"client_id"`
+	ClientSecret  string `json:"client_secret"`
+	ResourceGroup string `json:"resource_group"`
 }
 
-// Load reads environment variables, validates required ones, and returns Config.
-// Returns an error listing all missing required variables.
+type Server struct {
+	Port     int    `json:"port"`
+	LogLevel string `json:"log_level"`
+}
+
+type Config struct {
+	SAPAICore SAPAICore `json:"sap_ai_core"`
+	Server    Server    `json:"server"`
+}
+
 func Load() (*Config, error) {
 	cfg := &Config{
-		ClientID:      os.Getenv("SAP_AI_CORE_CLIENT_ID"),
-		ClientSecret:  os.Getenv("SAP_AI_CORE_CLIENT_SECRET"),
-		TokenURL:      os.Getenv("SAP_AI_CORE_TOKEN_URL"),
-		BaseURL:       os.Getenv("SAP_AI_CORE_BASE_URL"),
-		ResourceGroup: os.Getenv("SAP_AI_CORE_RESOURCE_GROUP"),
-		Port:          os.Getenv("PORT"),
+		SAPAICore: SAPAICore{ResourceGroup: "default"},
+		Server:    Server{Port: 3001, LogLevel: "info"},
 	}
 
-	if cfg.ResourceGroup == "" {
-		cfg.ResourceGroup = "default"
-	}
-	if cfg.Port == "" {
-		cfg.Port = "3001"
-	}
-
-	var missing []string
-	if cfg.ClientID == "" {
-		missing = append(missing, "SAP_AI_CORE_CLIENT_ID")
-	}
-	if cfg.ClientSecret == "" {
-		missing = append(missing, "SAP_AI_CORE_CLIENT_SECRET")
-	}
-	if cfg.TokenURL == "" {
-		missing = append(missing, "SAP_AI_CORE_TOKEN_URL")
-	}
-	if cfg.BaseURL == "" {
-		missing = append(missing, "SAP_AI_CORE_BASE_URL")
+	path := filepath.Join(homeDir(), ".aicoreproxy", "config.json")
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("parse %s: %w", path, err)
+		}
 	}
 
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("missing required environment variables: %s\n\nPlease set:\n  SAP_AI_CORE_CLIENT_ID     - OAuth client ID\n  SAP_AI_CORE_CLIENT_SECRET - OAuth client secret\n  SAP_AI_CORE_TOKEN_URL     - OAuth token URL\n  SAP_AI_CORE_BASE_URL      - SAP AI Core API base URL\n  SAP_AI_CORE_RESOURCE_GROUP - Resource group (optional, default: \"default\")",
-			strings.Join(missing, ", "))
-	}
+	overrideFromEnv(cfg)
 
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
+}
+
+func overrideFromEnv(cfg *Config) {
+	if v := os.Getenv("SAP_AI_CORE_BASE_URL"); v != "" {
+		cfg.SAPAICore.BaseURL = v
+	}
+	if v := os.Getenv("SAP_AI_CORE_TOKEN_URL"); v != "" {
+		cfg.SAPAICore.TokenURL = v
+	}
+	if v := os.Getenv("SAP_AI_CORE_CLIENT_ID"); v != "" {
+		cfg.SAPAICore.ClientID = v
+	}
+	if v := os.Getenv("SAP_AI_CORE_CLIENT_SECRET"); v != "" {
+		cfg.SAPAICore.ClientSecret = v
+	}
+	if v := os.Getenv("SAP_AI_CORE_RESOURCE_GROUP"); v != "" {
+		cfg.SAPAICore.ResourceGroup = v
+	}
+	if v := os.Getenv("PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil {
+			cfg.Server.Port = p
+		}
+	}
+	if v := os.Getenv("LOG_LEVEL"); v != "" {
+		cfg.Server.LogLevel = v
+	}
+}
+
+func (c *Config) validate() error {
+	if c.SAPAICore.BaseURL == "" {
+		return fmt.Errorf("sap_ai_core.base_url is required")
+	}
+	if c.SAPAICore.TokenURL == "" {
+		return fmt.Errorf("sap_ai_core.token_url is required")
+	}
+	if c.SAPAICore.ClientID == "" {
+		return fmt.Errorf("sap_ai_core.client_id is required")
+	}
+	if c.SAPAICore.ClientSecret == "" {
+		return fmt.Errorf("sap_ai_core.client_secret is required")
+	}
+	return nil
+}
+
+func homeDir() string {
+	if h, err := os.UserHomeDir(); err == nil {
+		return h
+	}
+	return "."
 }
