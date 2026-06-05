@@ -219,7 +219,8 @@ Add to `~/.claude/settings.json`:
 ```json
 {
   "env": {
-    "ANTHROPIC_BASE_URL": "http://localhost:3001/anthropic"
+    "ANTHROPIC_BASE_URL": "http://localhost:3001/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "any-value"
   }
 }
 ```
