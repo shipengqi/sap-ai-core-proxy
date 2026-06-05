@@ -22,7 +22,14 @@
       "Bash(pkill -f \"^./sap-ai-core-proxy\")",
       "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" -X HEAD http://localhost:3001/anthropic)",
       "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\" -X HEAD http://localhost:3001/anthropic/v1/models)",
-      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('OK:', d.get\\('content',[{}]\\)[0].get\\('text','ERR: '+str\\(d.get\\('error',''\\)\\)\\)[:60]\\)\")"
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('OK:', d.get\\('content',[{}]\\)[0].get\\('text','ERR: '+str\\(d.get\\('error',''\\)\\)\\)[:60]\\)\")",
+      "Bash(curl -s -o /dev/null -w \"HEAD /anthropic: HTTP %{http_code}\\\\n\" -X HEAD http://localhost:3001/anthropic)",
+      "Bash(curl -s -o /dev/null -w \"HEAD /anthropic/v1/models: HTTP %{http_code}\\\\n\" -X HEAD http://localhost:3001/anthropic/v1/models)",
+      "Bash(go test *)",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' -X HEAD http://localhost:3001/anthropic)",
+      "Bash(echo \"HEAD /anthropic:          $\\(curl -s -o /dev/null -w '%{http_code}' -X HEAD http://localhost:3001/anthropic\\)\")",
+      "Bash(curl -s -o /dev/null -w '%{http_code}' -X HEAD http://localhost:3001/anthropic/v1/models)",
+      "Bash(echo \"HEAD /anthropic/v1/models: $\\(curl -s -o /dev/null -w '%{http_code}' -X HEAD http://localhost:3001/anthropic/v1/models\\)\")"
     ]
   }
 }

@@ -50,10 +50,6 @@ func (h *Handler) Messages(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, errorBody("missing required field: model"))
 		return
 	}
-	if _, ok := raw["max_tokens"]; !ok {
-		c.JSON(http.StatusBadRequest, errorBody("missing required field: max_tokens"))
-		return
-	}
 	modelName := modelStr
 
 	var streaming bool
@@ -71,6 +67,13 @@ func (h *Handler) Messages(c *gin.Context) {
 	if _, ok := filtered["anthropic_version"]; !ok {
 		v, _ := json.Marshal("bedrock-2023-05-31")
 		filtered["anthropic_version"] = v
+	}
+
+	// Inject default max_tokens if the client didn't send one.
+	// The Anthropic SDK omits max_tokens and relies on server-side defaults.
+	if _, ok := filtered["max_tokens"]; !ok {
+		v, _ := json.Marshal(8192)
+		filtered["max_tokens"] = v
 	}
 
 	filtered = promoteSystemMessages(filtered)
