@@ -36,7 +36,7 @@ Edit `~/.aicoreproxy/config.json`:
 ```json
 {
   "sap_ai_core": {
-    "base_url": "https://api.ai.prod.eu-central-1.aws.ml.hana.ondemand.com",
+    "base_url": "https://your-tenant.hana.ondemand.com",
     "token_url": "https://your-tenant.authentication.eu10.hana.ondemand.com",
     "client_id": "your-client-id",
     "client_secret": "your-client-secret",
@@ -145,11 +145,11 @@ The proxy automatically translates standard Anthropic model names to SAP AI Core
 | User-Facing Name | SAP AI Core Deployment Name |
 |---|---|
 | `claude-opus-latest` | `anthropic--claude-4.7-opus` |
-| `claude-opus-4.8` / `claude-opus-4-8` | `anthropic--claude-opus-4-8` |
-| `claude-opus-4.5` / `claude-opus-4-5` | `anthropic--claude-opus-4-5` |
-| `claude-sonnet-latest` | `anthropic--claude-sonnet-4-5` |
-| `claude-sonnet-4.5` / `claude-sonnet-4-5` | `anthropic--claude-sonnet-4-5` |
-| `claude-haiku-latest` | `anthropic--claude-haiku-4-5` |
+| `claude-opus-4.8` / `claude-opus-4-8` | `anthropic--claude-4.8-opus` |
+| `claude-opus-4.5` / `claude-opus-4-5` | `anthropic--claude-4.5-opus` |
+| `claude-sonnet-latest` | `anthropic--claude-4.5-sonnet` |
+| `claude-sonnet-4.5` / `claude-sonnet-4-5` | `anthropic--claude-4.5-sonnet` |
+| `claude-haiku-latest` | `anthropic--claude-4.5-haiku` |
 | `claude-3-7-sonnet-latest` | `anthropic--claude-3.7-sonnet` |
 | `claude-3-5-sonnet-latest` | `anthropic--claude-3.5-sonnet` |
 | `claude-3-5-haiku-latest` | `anthropic--claude-3.5-haiku` |

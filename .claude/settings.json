@@ -29,7 +29,9 @@
       "Bash(curl -s -o /dev/null -w '%{http_code}' -X HEAD http://localhost:3001/anthropic)",
       "Bash(echo \"HEAD /anthropic:          $\\(curl -s -o /dev/null -w '%{http_code}' -X HEAD http://localhost:3001/anthropic\\)\")",
       "Bash(curl -s -o /dev/null -w '%{http_code}' -X HEAD http://localhost:3001/anthropic/v1/models)",
-      "Bash(echo \"HEAD /anthropic/v1/models: $\\(curl -s -o /dev/null -w '%{http_code}' -X HEAD http://localhost:3001/anthropic/v1/models\\)\")"
+      "Bash(echo \"HEAD /anthropic/v1/models: $\\(curl -s -o /dev/null -w '%{http_code}' -X HEAD http://localhost:3001/anthropic/v1/models\\)\")",
+      "Bash(go run *)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); haiku=[x for x in d['data'] if 'haiku' in x['id'].lower\\(\\)]; print\\('haiku deployments:', haiku\\)\")"
     ]
   }
 }

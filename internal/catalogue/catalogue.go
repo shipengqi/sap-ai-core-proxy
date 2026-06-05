@@ -9,18 +9,18 @@ import "strings"
 // Source: sap_ai_core_helper.py _MODEL_ALIASES.
 var aliases = map[string]string{
 	// Claude 4 family — map to both versioned and latest SAP names
-	"claude-opus-4-5":            "anthropic--claude-opus-4-5",
-	"claude-opus-4.5":            "anthropic--claude-opus-4-5",
-	"claude-opus-4-8":            "anthropic--claude-opus-4-8",
-	"claude-opus-4.8":            "anthropic--claude-opus-4-8",
+	"claude-opus-4-5":            "anthropic--claude-4.5-opus",
+	"claude-opus-4.5":            "anthropic--claude-4.5-opus",
+	"claude-opus-4-8":            "anthropic--claude-4.8-opus",
+	"claude-opus-4.8":            "anthropic--claude-4.8-opus",
 	"claude-opus-latest":         "anthropic--claude-4.7-opus",
 	"claude-sonnet-4-5":          "anthropic--claude-4.5-sonnet",
 	"claude-sonnet-4.5":          "anthropic--claude-4.5-sonnet",
 	"claude-sonnet-4-5-20251022": "anthropic--claude-4.5-sonnet",
 	"claude-sonnet-latest":       "anthropic--claude-4.5-sonnet",
-	"claude-haiku-4-5":           "anthropic--claude-haiku-4-5",
-	"claude-haiku-4.5":           "anthropic--claude-haiku-4-5",
-	"claude-haiku-latest":        "anthropic--claude-haiku-4-5",
+	"claude-haiku-4-5":           "anthropic--claude-4.5-haiku",
+	"claude-haiku-4.5":           "anthropic--claude-4.5-haiku",
+	"claude-haiku-latest":        "anthropic--claude-4.5-haiku",
 
 	// Claude 3.7 family
 	"claude-3-7-sonnet-latest":            "anthropic--claude-3.7-sonnet",
