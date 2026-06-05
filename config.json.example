@@ -1,6 +1,6 @@
 {
   "sap_ai_core": {
-    "base_url": "https://your-tenant.authentication.eu10.hana.ondemand.com",
+    "base_url": "https://your-tenant.hana.ondemand.com",
     "token_url": "https://your-tenant.authentication.eu10.hana.ondemand.com",
     "client_id": "your-client-id",
     "client_secret": "your-client-secret",

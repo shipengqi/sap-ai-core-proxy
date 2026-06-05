@@ -22,8 +22,9 @@ lint: ## Run golangci-lint
 	golangci-lint run ./...
 
 docker.build: build ## Build Docker images for ghcr.io and Alibaba Cloud ACR (usage: make docker.build TAG=v1.0.0 ACR_REGISTRY=<your-registry>)
-	docker build -t ghcr.io/shipengqi/sap-ai-core-proxy:$(or $(TAG),dev) .
-	docker build -t registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:$(or $(TAG),dev) .; \
+	$(eval ARCH := $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'))
+	docker build -t ghcr.io/shipengqi/sap-ai-core-proxy:$(or $(TAG),dev)-$(ARCH) .
+	docker build -t registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:$(or $(TAG),dev)-$(ARCH) .
 
 
 clean: ## Remove build artifacts
