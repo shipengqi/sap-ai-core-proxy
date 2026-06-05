@@ -39,7 +39,7 @@ func TestLiteLLM_ListModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /litellm/v1/models: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -64,7 +64,7 @@ func TestLiteLLM_ModelInfo(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /litellm/v1/model/info: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Any non-5xx response is acceptable — the orchestration model info endpoint
 	// may return various formats depending on SAP AI Core version.
@@ -83,7 +83,7 @@ func TestLiteLLM_ChatCompletions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /litellm/v1/chat/completions: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -114,7 +114,7 @@ func TestLiteLLM_Completions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /litellm/v1/completions: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -131,7 +131,7 @@ func TestLiteLLM_Embeddings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /litellm/v1/embeddings: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

@@ -39,7 +39,7 @@ func TestAnthropic_ListModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /anthropic/v1/models: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -70,7 +70,7 @@ func TestAnthropic_Messages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /anthropic/v1/messages: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -104,7 +104,7 @@ func TestAnthropic_Messages_Stream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /anthropic/v1/messages stream: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -143,7 +143,7 @@ func TestAnthropic_SystemPromotion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /anthropic/v1/messages system: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

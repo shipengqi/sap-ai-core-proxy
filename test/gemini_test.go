@@ -39,7 +39,7 @@ func TestGemini_ListModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /gemini/v1/models: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -69,7 +69,7 @@ func TestGemini_GenerateContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST generateContent: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -106,7 +106,7 @@ func TestGemini_StreamGenerateContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST streamGenerateContent: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)

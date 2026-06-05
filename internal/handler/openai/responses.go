@@ -46,7 +46,7 @@ func (h *Handler) CreateResponse(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 	respBody, _ := io.ReadAll(upstream.Body)
 
 	if upstream.StatusCode == http.StatusOK || upstream.StatusCode == http.StatusCreated {
@@ -79,7 +79,7 @@ func (h *Handler) GetResponse(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 	respBody, _ := io.ReadAll(upstream.Body)
 	c.Data(upstream.StatusCode, "application/json", respBody)
 }
@@ -99,7 +99,7 @@ func (h *Handler) DeleteResponse(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 	respBody, _ := io.ReadAll(upstream.Body)
 
 	responseStoreMu.Lock()

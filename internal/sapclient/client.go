@@ -84,7 +84,7 @@ func (c *Client) do(ctx context.Context, method, urlStr string, body io.Reader, 
 	elapsed := time.Since(start).Milliseconds()
 	if resp.StatusCode >= 400 {
 		bodyBytes, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		preview := string(bodyBytes)
 		if len(preview) > 500 {

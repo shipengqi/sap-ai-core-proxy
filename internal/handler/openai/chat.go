@@ -86,7 +86,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if err != nil {
 				return 0, nil, err
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			b, _ := io.ReadAll(resp.Body)
 			return resp.StatusCode, b, nil
 		},
@@ -122,7 +122,7 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 			if err != nil {
 				return 0, nil, err
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			b, _ := io.ReadAll(resp.Body)
 			return resp.StatusCode, b, nil
 		},
@@ -197,11 +197,14 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 		}
 	}
 
-	finishReason := "stop"
-	if bedrock.StopReason == "max_tokens" {
+	var finishReason string
+	switch bedrock.StopReason {
+	case "max_tokens":
 		finishReason = "length"
-	} else if bedrock.StopReason == "tool_use" {
+	case "tool_use":
 		finishReason = "tool_calls"
+	default:
+		finishReason = "stop"
 	}
 
 	openAI := map[string]interface{}{

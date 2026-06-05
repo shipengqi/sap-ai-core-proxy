@@ -39,7 +39,7 @@ func TestOpenAI_ListModels(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /openai/v1/models: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
@@ -70,7 +70,7 @@ func TestOpenAI_ChatCompletions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /openai/v1/chat/completions: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -101,7 +101,7 @@ func TestOpenAI_ChatCompletions_Stream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /openai/v1/chat/completions stream: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -131,7 +131,7 @@ func TestOpenAI_Embeddings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /openai/v1/embeddings: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
@@ -161,7 +161,7 @@ func TestOpenAI_Responses_CRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST /openai/v1/responses: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
@@ -183,7 +183,7 @@ func TestOpenAI_Responses_CRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /openai/v1/responses/%s: %v", created.ID, err)
 	}
-	getResp.Body.Close()
+	defer func() { _ = getResp.Body.Close() }()
 	if getResp.StatusCode != http.StatusOK {
 		t.Errorf("GET response: expected 200, got %d", getResp.StatusCode)
 	}
@@ -194,7 +194,7 @@ func TestOpenAI_Responses_CRUD(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DELETE /openai/v1/responses/%s: %v", created.ID, err)
 	}
-	delResp.Body.Close()
+	defer func() { _ = delResp.Body.Close() }()
 	if delResp.StatusCode != http.StatusOK && delResp.StatusCode != http.StatusNoContent {
 		t.Errorf("DELETE response: expected 200/204, got %d", delResp.StatusCode)
 	}

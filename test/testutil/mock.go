@@ -15,19 +15,19 @@ import (
 // DeploymentURLs are set to the mock server's own URL so the proxy can resolve them.
 type MockSAPServer struct {
 	*httptest.Server
-	// RequestLog records the method+path of every request received.
 	RequestLog []string
-	baseURL    *string
+	baseURL    string
 }
 
 // NewMockSAPServer starts a mock SAP AI Core server. Call Close() when done.
 func NewMockSAPServer(t *testing.T) *MockSAPServer {
 	t.Helper()
-	m := &MockSAPServer{baseURL: new(string)}
+	m := &MockSAPServer{}
+	// Create the server first so baseURL is available inside handlers.
 	mux := http.NewServeMux()
-	m.registerHandlers(t, mux)
 	m.Server = httptest.NewServer(mux)
-	*m.baseURL = m.Server.URL
+	m.baseURL = m.URL
+	m.registerHandlers(t, mux)
 	return m
 }
 
@@ -47,7 +47,7 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 	mux.HandleFunc("/v2/lm/deployments", func(w http.ResponseWriter, r *http.Request) {
 		m.log(r)
 		m.validateAuth(t, w, r)
-		base := *m.baseURL
+		base := m.baseURL
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
 			"resources": []map[string]interface{}{
@@ -96,9 +96,9 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		if streaming {
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
-			fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"index\":0}]}\n\n")
-			fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"!\"},\"index\":0}]}\n\n")
-			fmt.Fprintf(w, "data: [DONE]\n\n")
+			_, _ = fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"index\":0}]}\n\n")
+			_, _ = fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"!\"},\"index\":0}]}\n\n")
+			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 			return
 		}
 
@@ -195,10 +195,10 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		m.validateAuth(t, w, r)
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"anthropic--claude-3.5-sonnet\",\"usage\":{\"input_tokens\":10}}}\n\n")
-		fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
-		fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello!\"}}\n\n")
-		fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"anthropic--claude-3.5-sonnet\",\"usage\":{\"input_tokens\":10}}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello!\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	})
 
 	// Gemini generateContent / streamGenerateContent (wildcard via prefix)
@@ -210,7 +210,7 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		if isStream {
 			w.Header().Set("Transfer-Encoding", "chunked")
-			fmt.Fprintf(w, `[{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello from mock Gemini streaming!"}]},"finishReason":"STOP"}]}]`)
+			_, _ = fmt.Fprintf(w, `[{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello from mock Gemini streaming!"}]},"finishReason":"STOP"}]}]`)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{

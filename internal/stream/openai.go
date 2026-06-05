@@ -14,7 +14,7 @@ import (
 // PipeOpenAI forwards an OpenAI-format SSE response from upstream to the Gin
 // response writer. It reads `data: ...` lines and flushes after each one.
 func PipeOpenAI(c *gin.Context, upstream *http.Response) {
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")

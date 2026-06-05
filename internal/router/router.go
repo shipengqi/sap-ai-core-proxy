@@ -111,7 +111,7 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 				c.JSON(502, gin.H{"error": err.Error()})
 				return
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			rb, _ := io.ReadAll(resp.Body)
 			c.Data(resp.StatusCode, "application/json", rb)
 		})

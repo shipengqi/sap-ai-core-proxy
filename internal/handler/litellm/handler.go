@@ -51,7 +51,7 @@ func (h *Handler) ModelInfo(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 	respBody, _ := io.ReadAll(upstream.Body)
 	c.Data(upstream.StatusCode, "application/json", respBody)
 }
@@ -99,7 +99,7 @@ func (h *Handler) doOrchestration(c *gin.Context, dep *sapclient.Deployment, req
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 	respBody, _ := io.ReadAll(upstream.Body)
 
 	if upstream.StatusCode != http.StatusOK {
@@ -119,9 +119,3 @@ func errorBody(msg string) gin.H {
 	return gin.H{"error": gin.H{"message": msg, "type": "proxy_error"}}
 }
 
-func rgHeaders(rg string) map[string]string {
-	if rg == "" {
-		return nil
-	}
-	return map[string]string{"AI-Resource-Group": rg}
-}

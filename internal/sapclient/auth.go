@@ -80,7 +80,7 @@ func (a *AuthManager) fetchToken(ctx context.Context) (string, error) {
 		slog.Error("auth: token request failed", "err", err)
 		return "", fmt.Errorf("token request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {

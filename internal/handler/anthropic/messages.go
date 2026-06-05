@@ -109,7 +109,7 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 			if err != nil {
 				return 0, nil, err
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			b, _ := io.ReadAll(resp.Body)
 			return resp.StatusCode, b, nil
 		},
@@ -143,7 +143,7 @@ func (h *Handler) messagesOpenAI(c *gin.Context, modelName string, raw map[strin
 			if err != nil {
 				return 0, nil, err
 			}
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			b, _ := io.ReadAll(resp.Body)
 			return resp.StatusCode, b, nil
 		},

@@ -58,7 +58,7 @@ func (h *Handler) Generate(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 	respBody, _ := io.ReadAll(upstream.Body)
 	c.Data(upstream.StatusCode, "application/json", respBody)
 }

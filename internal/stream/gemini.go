@@ -10,7 +10,7 @@ import (
 // PipeGemini forwards a Gemini streaming response as raw chunked bytes.
 // Gemini does not use SSE — it returns chunked JSON arrays.
 func PipeGemini(c *gin.Context, upstream *http.Response) {
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 
 	c.Header("Content-Type", upstream.Header.Get("Content-Type"))
 	c.Header("Transfer-Encoding", "chunked")

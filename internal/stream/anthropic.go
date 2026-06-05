@@ -14,7 +14,7 @@ import (
 // It injects "event: {type}" lines if the upstream omits them (SAP AI Core
 // Bedrock-style responses sometimes drop the event: prefix).
 func PipeAnthropic(c *gin.Context, upstream *http.Response) {
-	defer upstream.Body.Close()
+	defer func() { _ = upstream.Body.Close() }()
 
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")

@@ -43,9 +43,3 @@ func errorBody(msg string) gin.H {
 	return gin.H{"error": gin.H{"message": msg, "type": "proxy_error"}}
 }
 
-func rgHeaders(rg string) map[string]string {
-	if rg == "" {
-		return nil
-	}
-	return map[string]string{"AI-Resource-Group": rg}
-}

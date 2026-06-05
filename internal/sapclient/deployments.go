@@ -304,7 +304,7 @@ func (d *DeploymentManager) fetch(ctx context.Context) ([]Deployment, error) {
 	if err != nil {
 		return nil, fmt.Errorf("fetch deployments: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
