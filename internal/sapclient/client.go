@@ -81,6 +81,20 @@ func (c *Client) do(ctx context.Context, method, urlStr string, body io.Reader, 
 		slog.Error("upstream request failed", "method", method, "url", urlStr, "err", err)
 		return nil, err
 	}
-	slog.Info("upstream response", "method", method, "url", urlStr, "status", resp.StatusCode, "latency_ms", time.Since(start).Milliseconds())
+	elapsed := time.Since(start).Milliseconds()
+	if resp.StatusCode >= 400 {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+		preview := string(bodyBytes)
+		if len(preview) > 500 {
+			preview = preview[:500]
+		}
+		slog.Warn("upstream error response", "method", method, "url", urlStr,
+			"status", resp.StatusCode, "latency_ms", elapsed, "body", preview)
+	} else {
+		slog.Info("upstream response", "method", method, "url", urlStr,
+			"status", resp.StatusCode, "latency_ms", elapsed)
+	}
 	return resp, nil
 }
