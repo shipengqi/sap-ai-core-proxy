@@ -3,6 +3,7 @@ package litellm
 import (
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -34,12 +35,16 @@ func (h *Handler) handleCompletion(c *gin.Context) {
 		_ = json.Unmarshal(m, &model)
 	}
 
+	// Set model in context for logging middleware
+	c.Set("model", model)
+
 	dep, err := h.deployments.GetOrchestrationDeployment(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusNotFound, errorBody(err.Error()))
 		return
 	}
 
+	slog.Info("calling litellm orchestration", "model", model, "deployment_id", dep.ID)
 	orchBody, err := buildOrchestrationBody(model, raw["messages"], raw["tools"], raw["response_format"])
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, errorBody(err.Error()))

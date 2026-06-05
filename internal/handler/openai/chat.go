@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -38,6 +39,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	// Set model in context for logging middleware
+	c.Set("model", modelStr)
+
 	if _, ok := raw["messages"]; !ok {
 		c.JSON(http.StatusBadRequest, errorBody("missing required field: messages"))
 		return
@@ -56,6 +60,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			c.JSON(http.StatusNotFound, errorBody(err.Error()))
 			return
 		}
+		slog.Info("calling openai model", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
 		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
 			dep.DeployedURL+"/chat/completions?api-version=2024-02-01", bytes.NewReader(sapBody), nil)
 		if err != nil {
@@ -67,9 +72,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	slog.Info("calling openai model", "model", modelStr, "streaming", false)
 	status, respBody, err := h.deployments.FindAndCall(
 		c.Request.Context(), modelStr, 5,
 		func(dep *sapclient.Deployment) (int, []byte, error) {
+			slog.Debug("trying deployment", "deployment_id", dep.ID, "model", modelStr)
 			resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
 				dep.DeployedURL+"/chat/completions?api-version=2024-02-01", bytes.NewReader(sapBody), nil)
 			if err != nil {

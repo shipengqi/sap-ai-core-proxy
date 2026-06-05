@@ -3,6 +3,7 @@ package gemini
 import (
 	"bytes"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -22,7 +23,9 @@ func (h *Handler) Generate(c *gin.Context) {
 	modelName := raw[:lastColon]
 	operation := raw[lastColon+1:]
 
-	
+	// Set model in context for logging middleware
+	c.Set("model", modelName)
+
 	dep, err := h.deployments.GetDeployment(c.Request.Context(), modelName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, errorBody(err.Error()))
@@ -38,6 +41,7 @@ func (h *Handler) Generate(c *gin.Context) {
 	upstreamURL := dep.DeployedURL + "/models/" + modelName + ":" + operation
 
 	if operation == "streamGenerateContent" {
+		slog.Info("calling gemini model", "model", modelName, "operation", operation, "streaming", true, "deployment_id", dep.ID)
 		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body), nil)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
@@ -48,6 +52,7 @@ func (h *Handler) Generate(c *gin.Context) {
 		return
 	}
 
+	slog.Info("calling gemini model", "model", modelName, "operation", operation, "streaming", false, "deployment_id", dep.ID)
 	upstream, err := h.client.Do(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body), nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))

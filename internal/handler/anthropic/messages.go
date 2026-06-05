@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -52,6 +53,9 @@ func (h *Handler) Messages(c *gin.Context) {
 	}
 	modelName := modelStr
 
+	// Set model in context for logging middleware
+	c.Set("model", modelName)
+
 	var streaming bool
 	if s, ok := raw["stream"]; ok {
 		_ = json.Unmarshal(s, &streaming)
@@ -93,6 +97,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			c.JSON(http.StatusNotFound, errorBody(err.Error()))
 			return
 		}
+		slog.Info("calling anthropic model", "model", modelName, "streaming", true, "deployment_id", dep.ID)
 		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
 			dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(filteredBody), nil)
 		if err != nil {
@@ -105,9 +110,11 @@ func (h *Handler) Messages(c *gin.Context) {
 	}
 
 	// Non-streaming: retry on 404 / Gone across all matching deployments.
+	slog.Info("calling anthropic model", "model", modelName, "streaming", false)
 	status, respBody, err := h.deployments.FindAndCall(
 		c.Request.Context(), modelName, 5,
 		func(dep *sapclient.Deployment) (int, []byte, error) {
+			slog.Debug("trying deployment", "deployment_id", dep.ID, "model", modelName)
 			resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
 				dep.DeployedURL+"/invoke", bytes.NewReader(filteredBody), nil)
 			if err != nil {
