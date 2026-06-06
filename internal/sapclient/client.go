@@ -3,11 +3,19 @@ package sapclient
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"time"
+)
+
+const (
+	maxTransientRetries = 2
+	retryBaseDelay      = 100 * time.Millisecond
 )
 
 // Client is a signed HTTP client for SAP AI Core. It injects the Bearer token
@@ -49,34 +57,54 @@ func (c *Client) do(ctx context.Context, method, urlStr string, body io.Reader, 
 	}
 
 	// Only buffer the body if non-nil; keep nil body truly nil for GET/DELETE.
-	var reqBody io.Reader
+	// The buffer is reused across retries.
+	var buf []byte
 	if body != nil {
-		buf, err := io.ReadAll(body)
+		buf, err = io.ReadAll(body)
 		if err != nil {
 			return nil, fmt.Errorf("read request body: %w", err)
 		}
-		reqBody = bytes.NewReader(buf)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, method, urlStr, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("AI-Resource-Group", c.resourceGroup)
-	// Only set Content-Type for requests that carry a body.
-	if reqBody != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	for k, v := range extraHeaders {
-		req.Header.Set(k, v)
 	}
 
 	slog.Info("upstream request", "method", method, "url", urlStr)
 	start := time.Now()
-	resp, err := httpClient.Do(req)
+
+	var resp *http.Response
+	for attempt := 0; attempt <= maxTransientRetries; attempt++ {
+		if attempt > 0 {
+			delay := retryBaseDelay * time.Duration(attempt)
+			slog.Warn("retrying transient network error", "method", method, "url", urlStr,
+				"attempt", attempt, "delay", delay, "err", err)
+			time.Sleep(delay)
+		}
+
+		var reqBody io.Reader
+		if buf != nil {
+			reqBody = bytes.NewReader(buf)
+		}
+
+		var req *http.Request
+		req, err = http.NewRequestWithContext(ctx, method, urlStr, reqBody)
+		if err != nil {
+			return nil, fmt.Errorf("build request: %w", err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("AI-Resource-Group", c.resourceGroup)
+		// Only set Content-Type for requests that carry a body.
+		if reqBody != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		for k, v := range extraHeaders {
+			req.Header.Set(k, v)
+		}
+
+		resp, err = httpClient.Do(req)
+		if err == nil || !isTransientNetworkErr(err) {
+			break
+		}
+	}
+
 	if err != nil {
 		slog.Error("upstream request failed", "method", method, "url", urlStr, "err", err)
 		return nil, err
@@ -97,4 +125,26 @@ func (c *Client) do(ctx context.Context, method, urlStr string, body io.Reader, 
 			"status", resp.StatusCode, "latency_ms", elapsed)
 	}
 	return resp, nil
+}
+
+// isTransientNetworkErr reports whether err is a transient network failure worth retrying.
+// Only matches DNS-layer errors to avoid false positives from connection-level permission errors.
+func isTransientNetworkErr(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		if dnsErr.IsTemporary || dnsErr.IsTimeout {
+			return true
+		}
+		// EACCES/EPERM on the DNS UDP socket (e.g. "write: permission denied").
+		// IsTemporary is unreliable for EACCES in Go 1.18+, so check the string
+		// but only within DNSError.Err — not the broader OpError — to avoid
+		// matching connection-level "permission denied" from a firewall.
+		e := dnsErr.Err
+		return strings.Contains(e, "permission denied") ||
+			strings.Contains(e, "operation not permitted")
+	}
+	return false
 }

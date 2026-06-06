@@ -33,6 +33,9 @@ func Load() (*Config, error) {
 	}
 
 	path := filepath.Join(homeDir(), ".aicoreproxy", "config.json")
+	if v := os.Getenv("AICOREPROXY_CONFIG_FILE"); v != "" {
+		path = v
+	}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
