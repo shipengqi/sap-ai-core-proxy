@@ -81,6 +81,7 @@ All config values can be overridden by environment variables (higher priority th
 
 | Env Var | Overrides |
 |---|---|
+| `AICOREPROXY_CONFIG_FILE` | Config file path (default: `~/.aicoreproxy/config.json`) |
 | `SAP_AI_CORE_BASE_URL` | `sap_ai_core.base_url` |
 | `SAP_AI_CORE_TOKEN_URL` | `sap_ai_core.token_url` |
 | `SAP_AI_CORE_CLIENT_ID` | `sap_ai_core.client_id` |
@@ -255,16 +256,67 @@ docker run -d \
   sap-ai-core-proxy:latest
 ```
 
+## Systemd Deployment
+
+For production deployments on Linux (including Kylin / 信创 systems), running as a
+systemd service avoids container network policy restrictions and provides automatic
+restart on failure.
+
+A ready-to-use unit file is provided at [`deploy/aicoreproxy.service`](deploy/aicoreproxy.service).
+
+### Install
+
+```bash
+sudo make deploy
+```
+
+This single command (idempotent — safe to re-run for updates):
+
+1. Builds the binary and installs it to `/usr/local/bin/aicoreproxy`
+2. Creates the `aicoreproxy` system user and group if they don't exist
+3. Creates `/etc/aicoreproxy/` with correct permissions
+4. Copies `config.json.example` → `/etc/aicoreproxy/config.json` **only if the file doesn't exist yet**
+5. Installs `deploy/aicoreproxy.service` and runs `systemctl enable`
+6. Restarts the service and prints its status
+
+On first install, the script will print a reminder to edit the config file before the
+service can start successfully:
+
+```
+*** Edit /etc/aicoreproxy/config.json with your SAP AI Core credentials ***
+```
+
+**Permission summary:**
+
+| Path | Owner | Mode | Reason |
+|---|---|---|---|
+| `/usr/local/bin/aicoreproxy` | `root:root` | `755` | Executable by all, writable only by root |
+| `/etc/aicoreproxy/` | `root:aicoreproxy` | `750` | Traversable by service user, hidden from others |
+| `/etc/aicoreproxy/config.json` | `root:aicoreproxy` | `640` | Readable by service user only; contains secrets |
+
+The service reads config from `/etc/aicoreproxy/config.json` by default (as set in the
+unit file). To use a different path, edit the `AICOREPROXY_CONFIG_FILE` line in
+[`deploy/aicoreproxy.service`](deploy/aicoreproxy.service) before installing.
+
+### Manage
+
+```bash
+sudo systemctl status aicoreproxy     # check status
+sudo systemctl restart aicoreproxy    # restart
+sudo journalctl -u aicoreproxy -f     # tail logs
+```
+
 ## Makefile Targets
 
 | Target | Description |
 |---|---|
-| `make build` | Build the binary (`./sap-ai-core-proxy`) |
+| `make build` | Build the binary (`./aicoreproxy`) |
 | `make run` | Run with `go run ./...` |
 | `make test` | Run unit tests |
 | `make test.integration` | Run integration tests (mock mode if no env vars set) |
 | `make vet` | Run `go vet` |
 | `make lint` | Run `golangci-lint` |
+| `make deploy` | Build + install/update as a systemd service (run as root) |
 | `make docker.build` | Build Docker image (set `TAG=` to override) |
 | `make clean` | Remove build artifacts |
 
@@ -291,6 +343,8 @@ sap-ai-core-proxy/
 │   │   └── litellm/                 # /litellm/v1/* handlers
 │   ├── router/router.go             # Route registration
 │   └── middleware/                  # CORS, structured JSON request logging
+├── deploy/
+│   └── aicoreproxy.service          # systemd unit file
 └── test/                            # Integration tests (mock + real SAP AI Core)
 ```
 

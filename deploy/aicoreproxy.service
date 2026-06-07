@@ -1,0 +1,39 @@
+[Unit]
+Description=SAP AI Core Proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=aicoreproxy
+Group=aicoreproxy
+ExecStart=/usr/local/bin/aicoreproxy
+Restart=on-failure
+RestartSec=5s
+
+# Config file is at ~/.aicoreproxy/config.json by default.
+# Uncomment the line below to use /etc/aicoreproxy/config.json instead.
+Environment=AICOREPROXY_CONFIG_FILE=/etc/aicoreproxy/config.json
+
+# Optional: override individual settings without a config file
+# Environment=SAP_AI_CORE_BASE_URL=https://...
+# Environment=SAP_AI_CORE_TOKEN_URL=https://...
+# Environment=SAP_AI_CORE_CLIENT_ID=...
+# Environment=SAP_AI_CORE_CLIENT_SECRET=...
+# Environment=SAP_AI_CORE_RESOURCE_GROUP=default
+# Environment=PORT=3001
+# Environment=LOG_LEVEL=info
+
+# Logging to journald (use: journalctl -u aicoreproxy -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=aicoreproxy
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/aicoreproxy
+
+[Install]
+WantedBy=multi-user.target
