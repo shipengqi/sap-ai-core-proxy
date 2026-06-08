@@ -61,12 +61,12 @@ func TestCrossRoute_ClaudeViaOpenAISurface(t *testing.T) {
 	}
 }
 
-// TestCrossRoute_ClaudeViaOpenAISurface_StreamingRejected tests that streaming
-// Claude via the OpenAI surface returns a clear 400.
-func TestCrossRoute_ClaudeViaOpenAISurface_StreamingRejected(t *testing.T) {
+// TestCrossRoute_ClaudeViaOpenAISurface_Streaming tests that streaming Claude
+// via the OpenAI surface returns a valid OpenAI-format SSE stream.
+func TestCrossRoute_ClaudeViaOpenAISurface_Streaming(t *testing.T) {
 	_, _, _, _, hasReal := testutil.RealCreds()
 	if hasReal {
-		t.Skip("skipping streaming-rejection test in real mode")
+		t.Skip("skipping mock streaming test in real mode")
 	}
 	mock := testutil.NewMockSAPServer(t)
 	proxy, err := testutil.NewTestProxy(mock.URL)
@@ -83,9 +83,26 @@ func TestCrossRoute_ClaudeViaOpenAISurface_StreamingRejected(t *testing.T) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusBadRequest {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		t.Fatalf("expected 400 for streaming Claude via OpenAI surface, got %d: %s", resp.StatusCode, body)
+		t.Fatalf("expected 200 for streaming Claude via OpenAI surface, got %d: %s", resp.StatusCode, body)
+	}
+
+	if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("expected Content-Type text/event-stream, got %q", ct)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	bodyStr := string(body)
+
+	if !strings.Contains(bodyStr, `"object":"chat.completion.chunk"`) {
+		t.Errorf("expected OpenAI chunk format in SSE stream, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "Hello!") {
+		t.Errorf("expected mock text 'Hello!' in SSE stream, got: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "[DONE]") {
+		t.Errorf("expected [DONE] sentinel in SSE stream, got: %s", bodyStr)
 	}
 }
 

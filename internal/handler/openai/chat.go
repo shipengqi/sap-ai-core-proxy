@@ -98,19 +98,29 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	c.Data(status, "application/json", respBody)
 }
 
-// chatCompletionsAnthropic handles Claude models via Bedrock /invoke.
-// Non-streaming only: converts OpenAI request → Bedrock, calls /invoke,
-// converts Bedrock response → OpenAI.
-// Streaming is not supported on this path; use /anthropic/v1/messages instead.
+// chatCompletionsAnthropic handles Claude models via Bedrock /invoke (non-streaming)
+// or /invoke-with-response-stream (streaming), converting between OpenAI and Bedrock
+// wire formats.
 func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw map[string]json.RawMessage, streaming bool) {
+	bedrockBody := openAIToBedrockBody(raw)
+
 	if streaming {
-		c.JSON(http.StatusBadRequest, errorBody(
-			"streaming Claude models via /openai/v1/chat/completions is not supported; use /anthropic/v1/messages with stream:true instead",
-		))
+		dep, err := h.deployments.GetDeployment(c.Request.Context(), modelStr)
+		if err != nil {
+			c.JSON(http.StatusNotFound, errorBody(err.Error()))
+			return
+		}
+		slog.Info("calling anthropic model via openai surface", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
+		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
+			dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(bedrockBody), nil)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+			return
+		}
+		c.Status(http.StatusOK)
+		stream.PipeAnthropicToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
 		return
 	}
-
-	bedrockBody := openAIToBedrockBody(raw)
 
 	slog.Info("calling anthropic model via openai surface", "model", modelStr, "streaming", false)
 	status, respBody, err := h.deployments.FindAndCall(
