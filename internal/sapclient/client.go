@@ -51,25 +51,47 @@ func (c *Client) DoStreaming(ctx context.Context, method, urlStr string, body io
 }
 
 func (c *Client) do(ctx context.Context, method, urlStr string, body io.Reader, extraHeaders map[string]string, httpClient *http.Client) (*http.Response, error) {
-	token, err := c.auth.GetToken(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get token: %w", err)
-	}
-
 	// Only buffer the body if non-nil; keep nil body truly nil for GET/DELETE.
-	// The buffer is reused across retries.
 	var buf []byte
 	if body != nil {
+		var err error
 		buf, err = io.ReadAll(body)
 		if err != nil {
 			return nil, fmt.Errorf("read request body: %w", err)
 		}
 	}
 
+	for authAttempt := 0; authAttempt < 2; authAttempt++ {
+		token, err := c.auth.GetToken(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("get token: %w", err)
+		}
+
+		resp, err := c.doOnce(ctx, method, urlStr, buf, extraHeaders, token, httpClient)
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode == http.StatusUnauthorized && authAttempt == 0 {
+			_ = resp.Body.Close()
+			slog.Warn("upstream 401, invalidating token and retrying", "method", method, "url", urlStr)
+			c.auth.InvalidateToken()
+			continue
+		}
+		return resp, nil
+	}
+	// unreachable
+	return nil, nil
+}
+
+// doOnce executes a single signed HTTP request with transient-network retries.
+func (c *Client) doOnce(ctx context.Context, method, urlStr string, buf []byte, extraHeaders map[string]string, token string, httpClient *http.Client) (*http.Response, error) {
 	slog.Info("upstream request", "method", method, "url", urlStr)
 	start := time.Now()
 
-	var resp *http.Response
+	var (
+		resp *http.Response
+		err  error
+	)
 	for attempt := 0; attempt <= maxTransientRetries; attempt++ {
 		if attempt > 0 {
 			delay := retryBaseDelay * time.Duration(attempt)
@@ -91,7 +113,6 @@ func (c *Client) do(ctx context.Context, method, urlStr string, body io.Reader, 
 
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("AI-Resource-Group", c.resourceGroup)
-		// Only set Content-Type for requests that carry a body.
 		if reqBody != nil {
 			req.Header.Set("Content-Type", "application/json")
 		}

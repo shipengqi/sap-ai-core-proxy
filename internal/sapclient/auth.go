@@ -40,6 +40,14 @@ func NewAuthManager(tokenURL, clientID, clientSecret string) *AuthManager {
 	}
 }
 
+// InvalidateToken clears the cached token, forcing the next GetToken call to fetch a fresh one.
+func (a *AuthManager) InvalidateToken() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.token = ""
+	a.expiresAt = time.Time{}
+}
+
 // GetToken returns a valid access token, refreshing if within 60s of expiry.
 func (a *AuthManager) GetToken(ctx context.Context) (string, error) {
 	a.mu.Lock()
