@@ -50,9 +50,13 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		_ = json.Unmarshal(s, &streaming)
 	}
 
-	// Route Claude models via Bedrock, all others via OpenAI-compatible endpoint.
+	// Route Claude models via Bedrock, Gemini models via Gemini API, all others via OpenAI endpoint.
 	if catalogue.IsAnthropic(modelStr) {
 		h.chatCompletionsAnthropic(c, modelStr, raw, streaming)
+		return
+	}
+	if catalogue.IsGemini(modelStr) {
+		h.chatCompletionsGemini(c, modelStr, raw, streaming)
 		return
 	}
 
@@ -147,6 +151,57 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 	}
 
 	openAIResp := bedrockToOpenAIResponse(respBody, modelStr)
+	c.Data(http.StatusOK, "application/json", openAIResp)
+}
+
+// chatCompletionsGemini handles Gemini models via the native Gemini generateContent API,
+// converting between OpenAI and Gemini wire formats.
+func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map[string]json.RawMessage, streaming bool) {
+	geminiBody := openAIToGeminiBody(raw)
+
+	if streaming {
+		dep, err := h.deployments.GetDeployment(c.Request.Context(), modelStr)
+		if err != nil {
+			c.JSON(http.StatusNotFound, errorBody(err.Error()))
+			return
+		}
+		slog.Info("calling gemini model via openai surface", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
+		upstreamURL := dep.DeployedURL + "/models/" + modelStr + ":streamGenerateContent"
+		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(geminiBody), nil)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+			return
+		}
+		c.Status(http.StatusOK)
+		stream.PipeGeminiToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
+		return
+	}
+
+	slog.Info("calling gemini model via openai surface", "model", modelStr, "streaming", false)
+	status, respBody, err := h.deployments.FindAndCall(
+		c.Request.Context(), modelStr, 5,
+		func(dep *sapclient.Deployment) (int, []byte, error) {
+			slog.Debug("trying deployment", "deployment_id", dep.ID, "model", modelStr)
+			upstreamURL := dep.DeployedURL + "/models/" + modelStr + ":generateContent"
+			resp, err := h.client.Do(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(geminiBody), nil)
+			if err != nil {
+				return 0, nil, err
+			}
+			defer func() { _ = resp.Body.Close() }()
+			b, _ := io.ReadAll(resp.Body)
+			return resp.StatusCode, b, nil
+		},
+	)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+		return
+	}
+	if status != http.StatusOK {
+		c.Data(status, "application/json", respBody)
+		return
+	}
+
+	openAIResp := geminiToOpenAIResponse(respBody, modelStr)
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
