@@ -13,7 +13,6 @@ var BedrockAllowedFields = map[string]bool{
 	"messages":          true,
 	"system":            true,
 	"max_tokens":        true,
-	"temperature":       true,
 	"top_p":             true,
 	"top_k":             true,
 	"stop_sequences":    true,

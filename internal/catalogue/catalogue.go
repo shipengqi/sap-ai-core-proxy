@@ -71,3 +71,9 @@ func IsOpenAI(model string) bool {
 		strings.HasPrefix(m, "o4-") ||
 		m == "o1" || m == "o3" || m == "o4"
 }
+
+// IsTitan returns true for Amazon Titan image model names.
+func IsTitan(model string) bool {
+	m := strings.ToLower(model)
+	return strings.HasPrefix(m, "amazon--titan") || strings.HasPrefix(m, "titan-image")
+}
