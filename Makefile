@@ -25,12 +25,14 @@ vet: ## Run go vet
 lint: ## Run golangci-lint
 	golangci-lint run ./...
 
-docker.build: build ## Build Docker images for ghcr.io and Alibaba Cloud ACR (usage: make docker.build TAG=v1.0.0)
+docker.build: ## Build Docker images for ghcr.io and Alibaba Cloud ACR (usage: make docker.build TAG=v1.0.0)
 	$(eval ARCH := $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'))
+	go build -o sap-ai-core-proxy .
 	docker build --platform linux/$(ARCH) \
 		-t ghcr.io/shipengqi/sap-ai-core-proxy:$(or $(TAG),dev)-$(ARCH) \
 		-t registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:$(or $(TAG),dev)-$(ARCH) \
 		.
+	rm -f sap-ai-core-proxy
 
 deploy: build ## Install or update aicoreproxy as a systemd service (run as root: sudo make deploy)
 	@echo "==> Installing binary"
