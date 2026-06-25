@@ -4,6 +4,7 @@ package transform
 
 import (
 	"encoding/json"
+	"log/slog"
 	"strings"
 )
 
@@ -143,6 +144,106 @@ func FlattenSystem(m map[string]json.RawMessage) map[string]json.RawMessage {
 	joined, _ := json.Marshal(strings.Join(parts, "\n"))
 	m["system"] = joined
 	return m
+}
+
+// ConvertImagePartsToAnthropic rewrites OpenAI image_url parts (base64 data URIs)
+// inside messages[] into Anthropic-native image blocks that Bedrock understands.
+// Remote URLs are not supported by SAP AI Core Bedrock and are dropped with a warning.
+func ConvertImagePartsToAnthropic(m map[string]json.RawMessage) map[string]json.RawMessage {
+	msgsRaw, ok := m["messages"]
+	if !ok {
+		return m
+	}
+
+	var msgs []json.RawMessage
+	if err := json.Unmarshal(msgsRaw, &msgs); err != nil {
+		return m
+	}
+
+	changed := false
+	for i, msg := range msgs {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(msg, &obj); err != nil {
+			continue
+		}
+		content, ok := obj["content"]
+		if !ok {
+			continue
+		}
+		// Only multipart content arrays need conversion; plain strings are text-only.
+		var parts []json.RawMessage
+		if err := json.Unmarshal(content, &parts); err != nil {
+			continue
+		}
+
+		newParts := make([]json.RawMessage, 0, len(parts))
+		partChanged := false
+		for _, part := range parts {
+			var p map[string]json.RawMessage
+			if err := json.Unmarshal(part, &p); err != nil {
+				newParts = append(newParts, part)
+				continue
+			}
+			var partType string
+			if t, ok := p["type"]; ok {
+				_ = json.Unmarshal(t, &partType)
+			}
+			if partType != "image_url" {
+				newParts = append(newParts, part)
+				continue
+			}
+
+			var imageURLObj map[string]string
+			if iu, ok := p["image_url"]; ok {
+				_ = json.Unmarshal(iu, &imageURLObj)
+			}
+			url := imageURLObj["url"]
+			if !strings.HasPrefix(url, "data:") {
+				slog.Warn("skipping non-base64 image_url: remote URLs are not supported by SAP AI Core Bedrock", "url_prefix", url[:min(len(url), 30)])
+				partChanged = true
+				continue
+			}
+
+			mimeType := "image/jpeg"
+			b64data := url
+			if idx := strings.Index(url, ";base64,"); idx >= 0 {
+				mimeType = url[5:idx]
+				b64data = url[idx+8:]
+			}
+
+			anthropicPart, _ := json.Marshal(map[string]interface{}{
+				"type": "image",
+				"source": map[string]string{
+					"type":       "base64",
+					"media_type": mimeType,
+					"data":       b64data,
+				},
+			})
+			newParts = append(newParts, anthropicPart)
+			partChanged = true
+		}
+
+		if partChanged {
+			newContent, _ := json.Marshal(newParts)
+			obj["content"] = newContent
+			newMsg, _ := json.Marshal(obj)
+			msgs[i] = newMsg
+			changed = true
+		}
+	}
+
+	if changed {
+		newMsgs, _ := json.Marshal(msgs)
+		m["messages"] = newMsgs
+	}
+	return m
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func removeFieldFromBlocks(raw json.RawMessage) (json.RawMessage, bool) {

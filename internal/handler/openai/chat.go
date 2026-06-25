@@ -229,6 +229,7 @@ func openAIToBedrockBody(raw map[string]json.RawMessage) []byte {
 
 	filtered = transform.PromoteSystemMessages(filtered)
 	filtered = transform.StripCacheControl(filtered)
+	filtered = transform.ConvertImagePartsToAnthropic(filtered)
 	filtered = transform.FlattenSystem(filtered)
 
 	out, _ := json.Marshal(filtered)

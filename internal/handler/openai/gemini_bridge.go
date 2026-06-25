@@ -1,11 +1,19 @@
 package openai
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"strings"
 )
 
+type geminiInlineData struct {
+	MimeType string `json:"mimeType"`
+	Data     string `json:"data"`
+}
+
 type geminiPart struct {
-	Text string `json:"text"`
+	Text       string            `json:"text,omitempty"`
+	InlineData *geminiInlineData `json:"inlineData,omitempty"`
 }
 
 type geminiContent struct {
@@ -42,23 +50,23 @@ func openAIToGeminiBody(raw map[string]json.RawMessage) []byte {
 		if r, ok := msg["role"]; ok {
 			_ = json.Unmarshal(r, &role)
 		}
-		textContent := extractMessageText(msg)
+		parts := extractMessageParts(msg)
 
 		switch role {
 		case "system":
 			sysInstruction = &geminiContent{
 				Role:  "user",
-				Parts: []geminiPart{{Text: textContent}},
+				Parts: parts,
 			}
 		case "assistant":
 			contents = append(contents, geminiContent{
 				Role:  "model",
-				Parts: []geminiPart{{Text: textContent}},
+				Parts: parts,
 			})
 		default:
 			contents = append(contents, geminiContent{
 				Role:  "user",
-				Parts: []geminiPart{{Text: textContent}},
+				Parts: parts,
 			})
 		}
 	}
@@ -111,28 +119,81 @@ func openAIToGeminiBody(raw map[string]json.RawMessage) []byte {
 	return out
 }
 
-func extractMessageText(msg map[string]json.RawMessage) string {
+// extractMessageParts converts an OpenAI message content (string or array of parts)
+// into Gemini parts, including image_url -> inlineData conversion.
+func extractMessageParts(msg map[string]json.RawMessage) []geminiPart {
 	c, ok := msg["content"]
 	if !ok {
-		return ""
+		return nil
 	}
+	// Simple string content
 	var s string
 	if json.Unmarshal(c, &s) == nil {
-		return s
+		return []geminiPart{{Text: s}}
 	}
-	var parts []map[string]json.RawMessage
-	if json.Unmarshal(c, &parts) == nil {
-		var result string
-		for _, p := range parts {
-			if t, ok := p["text"]; ok {
-				var ts string
-				_ = json.Unmarshal(t, &ts)
-				result += ts
-			}
+	// Array of content parts
+	var rawParts []map[string]json.RawMessage
+	if json.Unmarshal(c, &rawParts) != nil {
+		return nil
+	}
+	var parts []geminiPart
+	for _, p := range rawParts {
+		var partType string
+		if t, ok := p["type"]; ok {
+			_ = json.Unmarshal(t, &partType)
 		}
-		return result
+		switch partType {
+		case "text":
+			var text string
+			if t, ok := p["text"]; ok {
+				_ = json.Unmarshal(t, &text)
+			}
+			if text != "" {
+				parts = append(parts, geminiPart{Text: text})
+			}
+		case "image_url":
+			var imageURLObj map[string]string
+			if iu, ok := p["image_url"]; ok {
+				_ = json.Unmarshal(iu, &imageURLObj)
+			}
+			url := imageURLObj["url"]
+			if strings.HasPrefix(url, "data:") {
+				// data:image/jpeg;base64,<data>
+				mimeType := "image/jpeg"
+				b64data := url
+				if idx := strings.Index(url, ";base64,"); idx >= 0 {
+					mimeType = url[5:idx]
+					b64data = url[idx+8:]
+				}
+				// Validate it's proper base64
+				if _, err := base64.StdEncoding.DecodeString(b64data[:min(len(b64data), 8)]); err == nil {
+					parts = append(parts, geminiPart{InlineData: &geminiInlineData{
+						MimeType: mimeType,
+						Data:     b64data,
+					}})
+				}
+			}
+			// Remote URLs are not supported by SAP AI Core Gemini — skip
+		}
 	}
-	return ""
+	return parts
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// extractMessageText is kept for backward compatibility.
+func extractMessageText(msg map[string]json.RawMessage) string {
+	parts := extractMessageParts(msg)
+	var result string
+	for _, p := range parts {
+		result += p.Text
+	}
+	return result
 }
 
 // openAIToGeminiImageBody converts an OpenAI images/generations request to Gemini generateContent format.
