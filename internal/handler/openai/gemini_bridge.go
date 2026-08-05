@@ -187,14 +187,14 @@ func min(a, b int) int {
 }
 
 // extractMessageText is kept for backward compatibility.
-func extractMessageText(msg map[string]json.RawMessage) string {
-	parts := extractMessageParts(msg)
-	var result string
-	for _, p := range parts {
-		result += p.Text
-	}
-	return result
-}
+// func extractMessageText(msg map[string]json.RawMessage) string {
+// 	parts := extractMessageParts(msg)
+// 	var result string
+// 	for _, p := range parts {
+// 		result += p.Text
+// 	}
+// 	return result
+// }
 
 // openAIToGeminiImageBody converts an OpenAI images/generations request to Gemini generateContent format.
 func openAIToGeminiImageBody(prompt string, n int) []byte {
