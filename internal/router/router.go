@@ -34,6 +34,7 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 		ov1.POST("/chat/completions", oa.ChatCompletions)
 		ov1.POST("/embeddings", oa.Embeddings)
 		ov1.POST("/images/generations", oa.ImageGenerations)
+		ov1.POST("/audio/transcriptions", oa.Whisper)
 		ov1.POST("/responses", oa.CreateResponse)
 		ov1.GET("/responses/:id", oa.GetResponse)
 		ov1.DELETE("/responses/:id", oa.DeleteResponse)

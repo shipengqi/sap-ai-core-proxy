@@ -77,3 +77,18 @@ func IsTitan(model string) bool {
 	m := strings.ToLower(model)
 	return strings.HasPrefix(m, "amazon--titan") || strings.HasPrefix(m, "titan-image")
 }
+
+// IsQwen returns true for Alibaba Qwen model names.
+func IsQwen(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "qwen")
+}
+
+// IsPerplexity returns true for Perplexity Sonar model names.
+func IsPerplexity(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "sonar")
+}
+
+// IsGlm returns true for Z.ai GLM model names.
+func IsGlm(model string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "zai--")
+}

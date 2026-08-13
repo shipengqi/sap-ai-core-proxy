@@ -50,13 +50,26 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		_ = json.Unmarshal(s, &streaming)
 	}
 
-	// Route Claude models via Bedrock, Gemini models via Gemini API, all others via OpenAI endpoint.
+	// Route by provider: Claude→Bedrock, Gemini→Gemini API, Qwen→Alibaba,
+	// Perplexity→pass-through, GLM→Anthropic /messages, all others→OpenAI endpoint.
 	if catalogue.IsAnthropic(modelStr) {
 		h.chatCompletionsAnthropic(c, modelStr, raw, streaming)
 		return
 	}
 	if catalogue.IsGemini(modelStr) {
 		h.chatCompletionsGemini(c, modelStr, raw, streaming)
+		return
+	}
+	if catalogue.IsQwen(modelStr) {
+		h.chatCompletionsQwen(c, modelStr, raw, streaming)
+		return
+	}
+	if catalogue.IsPerplexity(modelStr) {
+		h.chatCompletionsPerplexity(c, modelStr, raw, streaming)
+		return
+	}
+	if catalogue.IsGlm(modelStr) {
+		h.chatCompletionsGlm(c, modelStr, raw, streaming)
 		return
 	}
 
@@ -205,6 +218,15 @@ func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
+// reasoningBudgets maps OpenAI reasoning_effort values to Anthropic thinking budget_tokens.
+var reasoningBudgets = map[string]int{
+	"minimal": 1024,
+	"low":     2048,
+	"medium":  5000,
+	"high":    10000,
+	"xhigh":   20000,
+}
+
 // openAIToBedrockBody converts an OpenAI chat request to SAP AI Core Bedrock format.
 func openAIToBedrockBody(raw map[string]json.RawMessage) []byte {
 	filtered := make(map[string]json.RawMessage)
@@ -227,8 +249,37 @@ func openAIToBedrockBody(raw map[string]json.RawMessage) []byte {
 	v, _ := json.Marshal("bedrock-2023-05-31")
 	filtered["anthropic_version"] = v
 
+	// Convert OpenAI reasoning_effort to Anthropic thinking block.
+	// Remove reasoning_effort from the filtered map (it's not in BedrockAllowedFields)
+	// and inject the thinking field instead.
+	if effortRaw, ok := raw["reasoning_effort"]; ok {
+		var effort string
+		_ = json.Unmarshal(effortRaw, &effort)
+		if effort != "" && effort != "none" {
+			budget, ok := reasoningBudgets[effort]
+			if !ok {
+				budget = reasoningBudgets["medium"]
+			}
+			thinking, _ := json.Marshal(map[string]interface{}{
+				"type":          "enabled",
+				"budget_tokens": budget,
+			})
+			filtered["thinking"] = thinking
+
+			// Anthropic requires budget_tokens < max_tokens.
+			// Auto-raise max_tokens when the budget would exceed it.
+			var currentMax int
+			if mt, ok := filtered["max_tokens"]; ok {
+				_ = json.Unmarshal(mt, &currentMax)
+			}
+			if currentMax <= budget {
+				v, _ := json.Marshal(budget + 1024)
+				filtered["max_tokens"] = v
+			}
+		}
+	}
+
 	filtered = transform.PromoteSystemMessages(filtered)
-	filtered = transform.StripCacheControl(filtered)
 	filtered = transform.ConvertImagePartsToAnthropic(filtered)
 	filtered = transform.FlattenSystem(filtered)
 
@@ -255,12 +306,13 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 		return data
 	}
 
-	// Concatenate all text blocks.
+	// Concatenate all text blocks; skip thinking blocks.
 	content := ""
 	for _, block := range bedrock.Content {
 		if block.Type == "text" {
 			content += block.Text
 		}
+		// thinking blocks are intentionally skipped
 	}
 
 	var finishReason string

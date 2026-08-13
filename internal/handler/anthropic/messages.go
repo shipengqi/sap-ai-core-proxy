@@ -72,7 +72,6 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 	}
 
 	filtered = transform.PromoteSystemMessages(filtered)
-	filtered = transform.StripCacheControl(filtered)
 	filtered = transform.ConvertImagePartsToAnthropic(filtered)
 	filtered = transform.FlattenSystem(filtered)
 
