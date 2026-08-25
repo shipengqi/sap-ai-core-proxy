@@ -78,6 +78,36 @@ func (h *Handler) chatCompletionsQwen(c *gin.Context, modelStr string, raw map[s
 	bodyBytes, _ := json.Marshal(body)
 
 	if streaming {
+		// Auto-detect thinking support before streaming if needed
+		if _, hasEffort := raw["reasoning_effort"]; hasEffort && !IsThinkingUnsupported(dep.ID) {
+			slog.Info("probing thinking support before streaming", "model", modelStr, "deployment_id", dep.ID)
+
+			// Build minimal probe request (same body as actual request)
+			probeResp, err := h.client.Do(c.Request.Context(), http.MethodPost,
+				buildURL(dep), bytes.NewReader(bodyBytes), nil)
+			if err != nil {
+				c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+				return
+			}
+			probeBody, _ := io.ReadAll(probeResp.Body)
+			_ = probeResp.Body.Close()
+
+			// Check if thinking is unsupported
+			if probeResp.StatusCode == http.StatusBadRequest && IsAdaptiveThinkingError(probeBody) {
+				slog.Info("detected thinking not supported, caching result", "deployment_id", dep.ID)
+				MarkThinkingUnsupported(dep.ID)
+
+				// Rebuild body without thinking
+				body = applyQwenThinking(raw, dep.ID)
+				bodyBytes, _ = json.Marshal(body)
+			} else if probeResp.StatusCode != http.StatusOK {
+				// Probe failed for other reasons, return error
+				c.Data(probeResp.StatusCode, "application/json", probeBody)
+				return
+			}
+			// Probe succeeded (200 OK), thinking is supported - proceed with streaming
+		}
+
 		slog.Info("calling qwen model", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
 		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
 			buildURL(dep), bytes.NewReader(bodyBytes), nil)

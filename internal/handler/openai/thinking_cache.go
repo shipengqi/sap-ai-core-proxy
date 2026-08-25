@@ -28,3 +28,12 @@ func MarkThinkingUnsupported(deploymentID string) {
 func IsAdaptiveThinkingError(body []byte) bool {
 	return bytes.Contains(body, []byte("adaptive thinking is not supported"))
 }
+
+// ClearThinkingCache clears the thinking unsupported cache.
+// This is primarily for testing purposes.
+func ClearThinkingCache() {
+	thinkingUnsupportedCache.Range(func(key, value interface{}) bool {
+		thinkingUnsupportedCache.Delete(key)
+		return true
+	})
+}
