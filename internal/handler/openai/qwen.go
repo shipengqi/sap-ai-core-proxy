@@ -24,7 +24,7 @@ var thinkingBudgets = map[string]int{
 
 // applyQwenThinking translates OpenAI's reasoning_effort into Qwen's
 // enable_thinking / thinking_budget fields. Returns a new map; never mutates raw.
-func applyQwenThinking(raw map[string]json.RawMessage) map[string]json.RawMessage {
+func applyQwenThinking(raw map[string]json.RawMessage, deploymentID string) map[string]json.RawMessage {
 	effortRaw, hasEffort := raw["reasoning_effort"]
 	if !hasEffort {
 		return raw
@@ -35,6 +35,11 @@ func applyQwenThinking(raw map[string]json.RawMessage) map[string]json.RawMessag
 		out[k] = v
 	}
 	delete(out, "reasoning_effort")
+
+	// Skip thinking if deployment is known to not support it
+	if IsThinkingUnsupported(deploymentID) {
+		return out
+	}
 
 	var effort string
 	_ = json.Unmarshal(effortRaw, &effort)
@@ -57,21 +62,22 @@ func applyQwenThinking(raw map[string]json.RawMessage) map[string]json.RawMessag
 }
 
 func (h *Handler) chatCompletionsQwen(c *gin.Context, modelStr string, raw map[string]json.RawMessage, streaming bool) {
-	body := applyQwenThinking(raw)
+	// Get deployment first to pass ID for cache checking
+	dep, err := h.deployments.GetDeployment(c.Request.Context(), modelStr)
+	if err != nil {
+		c.JSON(http.StatusNotFound, errorBody(err.Error()))
+		return
+	}
 
 	// Remove api-version suffix — Alibaba Bailian ignores it but we keep the URL clean.
 	buildURL := func(dep *sapclient.Deployment) string {
 		return dep.DeployedURL + "/chat/completions"
 	}
 
+	body := applyQwenThinking(raw, dep.ID)
 	bodyBytes, _ := json.Marshal(body)
 
 	if streaming {
-		dep, err := h.deployments.GetDeployment(c.Request.Context(), modelStr)
-		if err != nil {
-			c.JSON(http.StatusNotFound, errorBody(err.Error()))
-			return
-		}
 		slog.Info("calling qwen model", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
 		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
 			buildURL(dep), bytes.NewReader(bodyBytes), nil)
@@ -85,22 +91,39 @@ func (h *Handler) chatCompletionsQwen(c *gin.Context, modelStr string, raw map[s
 	}
 
 	slog.Info("calling qwen model", "model", modelStr, "streaming", false)
-	status, respBody, err := h.deployments.FindAndCall(
-		c.Request.Context(), modelStr, 5,
-		func(dep *sapclient.Deployment) (int, []byte, error) {
-			resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				buildURL(dep), bytes.NewReader(bodyBytes), nil)
-			if err != nil {
-				return 0, nil, err
-			}
-			defer func() { _ = resp.Body.Close() }()
-			b, _ := io.ReadAll(resp.Body)
-			return resp.StatusCode, b, nil
-		},
-	)
+
+	// First attempt with thinking (if not cached as unsupported)
+	resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
+		buildURL(dep), bytes.NewReader(bodyBytes), nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, _ := io.ReadAll(resp.Body)
+	status := resp.StatusCode
+
+	// Check if we need to retry without thinking
+	if status == http.StatusBadRequest && IsAdaptiveThinkingError(respBody) {
+		slog.Info("deployment doesn't support adaptive thinking, retrying without it",
+			"model", modelStr, "deployment_id", dep.ID)
+
+		MarkThinkingUnsupported(dep.ID)
+
+		// Retry with thinking disabled (cache will skip thinking now)
+		body = applyQwenThinking(raw, dep.ID)
+		bodyBytes, _ = json.Marshal(body)
+
+		resp, err = h.client.Do(c.Request.Context(), http.MethodPost,
+			buildURL(dep), bytes.NewReader(bodyBytes), nil)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		respBody, _ = io.ReadAll(resp.Body)
+		status = resp.StatusCode
+	}
+
 	c.Data(status, "application/json", respBody)
 }

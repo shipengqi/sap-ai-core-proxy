@@ -119,14 +119,16 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 // or /invoke-with-response-stream (streaming), converting between OpenAI and Bedrock
 // wire formats.
 func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw map[string]json.RawMessage, streaming bool) {
-	bedrockBody := openAIToBedrockBody(raw)
+	// Get deployment first to pass ID for cache checking
+	dep, err := h.deployments.GetDeployment(c.Request.Context(), modelStr)
+	if err != nil {
+		c.JSON(http.StatusNotFound, errorBody(err.Error()))
+		return
+	}
+
+	bedrockBody := openAIToBedrockBody(raw, dep.ID)
 
 	if streaming {
-		dep, err := h.deployments.GetDeployment(c.Request.Context(), modelStr)
-		if err != nil {
-			c.JSON(http.StatusNotFound, errorBody(err.Error()))
-			return
-		}
 		slog.Info("calling anthropic model via openai surface", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
 		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
 			dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(bedrockBody), nil)
@@ -140,24 +142,38 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 	}
 
 	slog.Info("calling anthropic model via openai surface", "model", modelStr, "streaming", false)
-	status, respBody, err := h.deployments.FindAndCall(
-		c.Request.Context(), modelStr, 5,
-		func(dep *sapclient.Deployment) (int, []byte, error) {
-			slog.Debug("trying deployment", "deployment_id", dep.ID, "model", modelStr)
-			resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
-			if err != nil {
-				return 0, nil, err
-			}
-			defer func() { _ = resp.Body.Close() }()
-			b, _ := io.ReadAll(resp.Body)
-			return resp.StatusCode, b, nil
-		},
-	)
+
+	// First attempt with thinking (if not cached as unsupported)
+	resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
+		dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
+	defer func() { _ = resp.Body.Close() }()
+	respBody, _ := io.ReadAll(resp.Body)
+	status := resp.StatusCode
+
+	// Check if we need to retry without thinking
+	if status == http.StatusBadRequest && IsAdaptiveThinkingError(respBody) {
+		slog.Info("deployment doesn't support adaptive thinking, retrying without it",
+			"model", modelStr, "deployment_id", dep.ID)
+
+		MarkThinkingUnsupported(dep.ID)
+
+		// Retry with thinking disabled (cache will skip thinking now)
+		bedrockBody = openAIToBedrockBody(raw, dep.ID)
+		resp, err = h.client.Do(c.Request.Context(), http.MethodPost,
+			dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
+		if err != nil {
+			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+			return
+		}
+		defer func() { _ = resp.Body.Close() }()
+		respBody, _ = io.ReadAll(resp.Body)
+		status = resp.StatusCode
+	}
+
 	if status != http.StatusOK {
 		c.Data(status, "application/json", respBody)
 		return
@@ -228,7 +244,7 @@ var reasoningBudgets = map[string]int{
 }
 
 // openAIToBedrockBody converts an OpenAI chat request to SAP AI Core Bedrock format.
-func openAIToBedrockBody(raw map[string]json.RawMessage) []byte {
+func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string) []byte {
 	filtered := make(map[string]json.RawMessage)
 	for k, v := range raw {
 		if transform.BedrockAllowedFields[k] {
@@ -253,28 +269,31 @@ func openAIToBedrockBody(raw map[string]json.RawMessage) []byte {
 	// Remove reasoning_effort from the filtered map (it's not in BedrockAllowedFields)
 	// and inject the thinking field instead.
 	if effortRaw, ok := raw["reasoning_effort"]; ok {
-		var effort string
-		_ = json.Unmarshal(effortRaw, &effort)
-		if effort != "" && effort != "none" {
-			budget, ok := reasoningBudgets[effort]
-			if !ok {
-				budget = reasoningBudgets["medium"]
-			}
-			thinking, _ := json.Marshal(map[string]interface{}{
-				"type":          "enabled",
-				"budget_tokens": budget,
-			})
-			filtered["thinking"] = thinking
+		// Skip thinking if deployment is known to not support it
+		if !IsThinkingUnsupported(deploymentID) {
+			var effort string
+			_ = json.Unmarshal(effortRaw, &effort)
+			if effort != "" && effort != "none" {
+				budget, ok := reasoningBudgets[effort]
+				if !ok {
+					budget = reasoningBudgets["medium"]
+				}
+				thinking, _ := json.Marshal(map[string]interface{}{
+					"type":          "enabled",
+					"budget_tokens": budget,
+				})
+				filtered["thinking"] = thinking
 
-			// Anthropic requires budget_tokens < max_tokens.
-			// Auto-raise max_tokens when the budget would exceed it.
-			var currentMax int
-			if mt, ok := filtered["max_tokens"]; ok {
-				_ = json.Unmarshal(mt, &currentMax)
-			}
-			if currentMax <= budget {
-				v, _ := json.Marshal(budget + 1024)
-				filtered["max_tokens"] = v
+				// Anthropic requires budget_tokens < max_tokens.
+				// Auto-raise max_tokens when the budget would exceed it.
+				var currentMax int
+				if mt, ok := filtered["max_tokens"]; ok {
+					_ = json.Unmarshal(mt, &currentMax)
+				}
+				if currentMax <= budget {
+					v, _ := json.Marshal(budget + 1024)
+					filtered["max_tokens"] = v
+				}
 			}
 		}
 	}
