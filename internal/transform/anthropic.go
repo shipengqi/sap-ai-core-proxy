@@ -20,6 +20,7 @@ var BedrockAllowedFields = map[string]bool{
 	"tools":             true,
 	"tool_choice":       true,
 	"metadata":          true,
+	"thinking":          true,
 }
 
 // PromoteSystemMessages moves any {"role":"system"} entries from messages[]
@@ -115,7 +116,9 @@ func StripCacheControl(m map[string]json.RawMessage) map[string]json.RawMessage 
 }
 
 // FlattenSystem converts a top-level system array-of-content-blocks into a plain string.
-// The Anthropic SDK sends system as an array when using prompt caching; Bedrock requires a string.
+// The Anthropic SDK sends system as an array when using prompt caching; Bedrock requires a
+// string for plain text, but supports the array form when cache_control blocks are present.
+// Blocks that carry cache_control are left as-is so SAP Bedrock can apply prompt caching.
 func FlattenSystem(m map[string]json.RawMessage) map[string]json.RawMessage {
 	sys, ok := m["system"]
 	if !ok {
@@ -123,17 +126,31 @@ func FlattenSystem(m map[string]json.RawMessage) map[string]json.RawMessage {
 	}
 	var s string
 	if json.Unmarshal(sys, &s) == nil {
-		return m
+		return m // already a plain string — nothing to do
 	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Text string `json:"text"`
-	}
+	var blocks []json.RawMessage
 	if err := json.Unmarshal(sys, &blocks); err != nil {
 		return m
 	}
-	var parts []string
+	// If any block carries cache_control, keep the array so SAP Bedrock can honour it.
 	for _, b := range blocks {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(b, &obj); err == nil {
+			if _, hasCacheControl := obj["cache_control"]; hasCacheControl {
+				return m
+			}
+		}
+	}
+	// No cache_control — flatten to string (Bedrock plain-text requirement).
+	var typed []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(sys, &typed); err != nil {
+		return m
+	}
+	var parts []string
+	for _, b := range typed {
 		if b.Type == "text" && b.Text != "" {
 			parts = append(parts, b.Text)
 		}

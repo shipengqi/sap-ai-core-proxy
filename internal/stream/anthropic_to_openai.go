@@ -15,10 +15,12 @@ import (
 //
 // Event mapping:
 //
-//	message_start          → chunk with role:"assistant" delta
-//	content_block_delta    → chunk with content delta (text_delta only)
-//	message_stop           → data: [DONE]
-//	all other event types  → skipped
+//	message_start                            → chunk with role:"assistant" delta
+//	content_block_start (thinking block)     → chunk with "<think>" content delta
+//	content_block_delta (text_delta only)    → chunk with content delta
+//	content_block_stop  (thinking block)     → chunk with "</think>" content delta
+//	message_stop                             → data: [DONE]
+//	all other event types                    → skipped
 func PipeAnthropicToOpenAI(c *gin.Context, upstream *http.Response, completionID, model string) {
 	defer func() { _ = upstream.Body.Close() }()
 
@@ -48,6 +50,7 @@ func PipeAnthropicToOpenAI(c *gin.Context, upstream *http.Response, completionID
 	scanner.Buffer(make([]byte, 64*1024), 64*1024)
 
 	var currentEventType string
+	var inThinkingBlock bool
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -78,6 +81,20 @@ func PipeAnthropicToOpenAI(c *gin.Context, upstream *http.Response, completionID
 		case "message_start":
 			writeChunk(`{"role":"assistant","content":""}`)
 
+		case "content_block_start":
+			var blockStart struct {
+				ContentBlock struct {
+					Type string `json:"type"`
+				} `json:"content_block"`
+			}
+			if err := json.Unmarshal([]byte(payload), &blockStart); err != nil {
+				continue
+			}
+			if blockStart.ContentBlock.Type == "thinking" {
+				inThinkingBlock = true
+				writeChunk(`{"content":"<think>"}`)
+			}
+
 		case "content_block_delta":
 			var delta struct {
 				Delta struct {
@@ -93,6 +110,12 @@ func PipeAnthropicToOpenAI(c *gin.Context, upstream *http.Response, completionID
 			}
 			textJSON, _ := json.Marshal(delta.Delta.Text)
 			writeChunk(fmt.Sprintf(`{"content":%s}`, textJSON))
+
+		case "content_block_stop":
+			if inThinkingBlock {
+				inThinkingBlock = false
+				writeChunk(`{"content":"</think>"}`)
+			}
 
 		case "message_stop":
 			stopChunk := fmt.Sprintf(`{"id":%q,"object":"chat.completion.chunk","model":%q,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,

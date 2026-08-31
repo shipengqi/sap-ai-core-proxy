@@ -17,6 +17,13 @@ type MockSAPServer struct {
 	*httptest.Server
 	RequestLog []string
 	baseURL    string
+
+	// RejectThinking controls whether the mock rejects requests with thinking parameters.
+	// When true, returns 400 with "adaptive thinking is not supported on this model".
+	RejectThinking bool
+
+	// LastThinkingParam tracks whether the last request contained a thinking parameter.
+	LastThinkingParam bool
 }
 
 // NewMockSAPServer starts a mock SAP AI Core server. Call Close() when done.
@@ -173,6 +180,20 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		_ = json.NewDecoder(r.Body).Decode(&reqBody)
 		if _, ok := reqBody["anthropic_version"]; !ok {
 			t.Errorf("anthropic /invoke: missing anthropic_version in forwarded body")
+		}
+
+		// Track whether thinking parameter is present
+		_, hasThinking := reqBody["thinking"]
+		m.LastThinkingParam = hasThinking
+
+		// If RejectThinking is true and thinking param exists, return 400
+		if m.RejectThinking && hasThinking {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message": "adaptive thinking is not supported on this model",
+			})
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
