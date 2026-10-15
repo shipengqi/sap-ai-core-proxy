@@ -2,7 +2,10 @@
 // and provides provider detection helpers.
 package catalogue
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // aliases maps normalised user-facing model names to the SAP AI Core deployment
 // model name used during deployment discovery.
@@ -14,6 +17,8 @@ var aliases = map[string]string{
 	"claude-opus-4-8":            "anthropic--claude-4.8-opus",
 	"claude-opus-4.8":            "anthropic--claude-4.8-opus",
 	"claude-opus-latest":         "anthropic--claude-4.7-opus",
+	"claude-sonnet-4-6":          "anthropic--claude-4.6-sonnet",
+	"claude-sonnet-4.6":          "anthropic--claude-4.6-sonnet",
 	"claude-sonnet-4-5":          "anthropic--claude-4.5-sonnet",
 	"claude-sonnet-4.5":          "anthropic--claude-4.5-sonnet",
 	"claude-sonnet-4-5-20251022": "anthropic--claude-4.5-sonnet",
@@ -42,13 +47,59 @@ var aliases = map[string]string{
 }
 
 // Normalize translates a user-facing model name to its SAP AI Core deployment
-// model name. If no alias exists the original name is returned unchanged.
+// model name. Resolution order:
+//
+//  1. the explicit alias table above
+//  2. a generated SAP-style name (see sapStyleName) for Claude models that are
+//     not in the table yet
+//  3. the original name, unchanged
 func Normalize(model string) string {
 	lower := strings.ToLower(strings.TrimSpace(model))
 	if v, ok := aliases[lower]; ok {
 		return v
 	}
+	if v := sapStyleName(lower); v != "" {
+		return v
+	}
 	return model
+}
+
+// sapStylePatterns recognise Anthropic's user-facing Claude naming and capture
+// the pieces needed to rebuild SAP AI Core's "<major>.<minor>-<family>" form.
+var (
+	// New convention (Claude 4.x): claude-<family>-<major>-<minor>[-<snapshot>]
+	//   claude-sonnet-4-6          -> anthropic--claude-4.6-sonnet
+	//   claude-sonnet-4-6-20260115 -> anthropic--claude-4.6-sonnet
+	reFamilyFirst = regexp.MustCompile(`^claude-(opus|sonnet|haiku)-(\d+)-(\d+)(?:-\d{8})?$`)
+	// Legacy convention: claude-<major>-<minor>-<family>[-latest|-<snapshot>]
+	//   claude-3-5-sonnet-latest   -> anthropic--claude-3.5-sonnet
+	reVersionFirst = regexp.MustCompile(`^claude-(\d+)-(\d+)-(opus|sonnet|haiku)(?:-(?:latest|\d{8}))?$`)
+	// Legacy convention, single version: claude-<major>-<family>[-latest|-<snapshot>]
+	//   claude-3-opus-latest       -> anthropic--claude-3-opus
+	reMajorOnly = regexp.MustCompile(`^claude-(\d+)-(opus|sonnet|haiku)(?:-(?:latest|\d{8}))?$`)
+)
+
+// sapStyleName rebuilds SAP AI Core's deployment name from an Anthropic-style
+// model name. It is the fallback that keeps newly released Claude versions
+// working without an alias entry.
+//
+// This translation cannot be left to the fuzzy matchers in DeploymentManager:
+// SAP writes the version first ("anthropic--claude-4.6-sonnet") while Anthropic
+// writes the family first ("claude-sonnet-4-6"), so neither substring nor
+// family-prefix matching can bridge the two orderings.
+//
+// Returns "" when the name matches no known shape.
+func sapStyleName(name string) string {
+	if m := reFamilyFirst.FindStringSubmatch(name); m != nil {
+		return "anthropic--claude-" + m[2] + "." + m[3] + "-" + m[1]
+	}
+	if m := reVersionFirst.FindStringSubmatch(name); m != nil {
+		return "anthropic--claude-" + m[1] + "." + m[2] + "-" + m[3]
+	}
+	if m := reMajorOnly.FindStringSubmatch(name); m != nil {
+		return "anthropic--claude-" + m[1] + "-" + m[2]
+	}
+	return ""
 }
 
 // IsAnthropic returns true for Claude model names.

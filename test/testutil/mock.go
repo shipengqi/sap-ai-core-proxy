@@ -73,6 +73,27 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
 				},
 				{
+					"id":            "dep-anthropic-46-001",
+					"status":        "RUNNING",
+					"modelName":     "anthropic--claude-4.6-sonnet",
+					"scenarioId":    "foundation-models",
+					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
+				},
+				{
+					"id":            "dep-anthropic-48-001",
+					"status":        "RUNNING",
+					"modelName":     "anthropic--claude-4.8-opus",
+					"scenarioId":    "foundation-models",
+					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
+				},
+				{
+					"id":            "dep-anthropic-45-haiku-001",
+					"status":        "RUNNING",
+					"modelName":     "anthropic--claude-4.5-haiku",
+					"scenarioId":    "foundation-models",
+					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
+				},
+				{
 					"id":            "dep-gemini-001",
 					"status":        "RUNNING",
 					"modelName":     "gemini-1.5-pro",

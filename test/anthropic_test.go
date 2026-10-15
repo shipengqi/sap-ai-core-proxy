@@ -125,6 +125,51 @@ func TestAnthropic_Messages_Stream(t *testing.T) {
 	}
 }
 
+// TestAnthropic_RequestedClaudeModels verifies the model names Claude Code is
+// configured with resolve to a running SAP deployment end to end.
+func TestAnthropic_RequestedClaudeModels(t *testing.T) {
+	_, _, _, _, hasReal := testutil.RealCreds()
+	if hasReal {
+		t.Skip("skipping mock-only test in real mode")
+	}
+	mock := testutil.NewMockSAPServer(t)
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start mock proxy: %v", err)
+	}
+	defer proxy.Close()
+	defer mock.Close()
+
+	models := []string{"claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5"}
+	for _, model := range models {
+		t.Run(model, func(t *testing.T) {
+			reqBody := `{"model":"` + model + `","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`
+			resp, err := http.Post(proxy.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(reqBody))
+			if err != nil {
+				t.Fatalf("POST /anthropic/v1/messages: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("model %s: expected 200, got %d: %s", model, resp.StatusCode, body)
+			}
+
+			var result struct {
+				Content []struct {
+					Text string `json:"text"`
+				} `json:"content"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if len(result.Content) == 0 || result.Content[0].Text == "" {
+				t.Errorf("model %s: expected non-empty content[0].text", model)
+			}
+		})
+	}
+}
+
 func TestAnthropic_SystemPromotion(t *testing.T) {
 	proxyURL, cleanup := setupAnthropic(t)
 	defer cleanup()

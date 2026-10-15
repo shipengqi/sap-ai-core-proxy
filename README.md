@@ -149,12 +149,22 @@ The proxy automatically translates standard Anthropic model names to SAP AI Core
 | `claude-opus-4.8` / `claude-opus-4-8` | `anthropic--claude-4.8-opus` |
 | `claude-opus-4.5` / `claude-opus-4-5` | `anthropic--claude-4.5-opus` |
 | `claude-sonnet-latest` | `anthropic--claude-4.5-sonnet` |
+| `claude-sonnet-4.6` / `claude-sonnet-4-6` | `anthropic--claude-4.6-sonnet` |
 | `claude-sonnet-4.5` / `claude-sonnet-4-5` | `anthropic--claude-4.5-sonnet` |
 | `claude-haiku-latest` | `anthropic--claude-4.5-haiku` |
+| `claude-haiku-4.5` / `claude-haiku-4-5` | `anthropic--claude-4.5-haiku` |
 | `claude-3-7-sonnet-latest` | `anthropic--claude-3.7-sonnet` |
 | `claude-3-5-sonnet-latest` | `anthropic--claude-3.5-sonnet` |
 | `claude-3-5-haiku-latest` | `anthropic--claude-3.5-haiku` |
 | `claude-3-opus-latest` | `anthropic--claude-3-opus` |
+
+Names not in the table are translated by shape rather than by lookup, so newly released
+Claude versions work without a code change: `claude-<family>-<major>-<minor>` becomes
+`anthropic--claude-<major>.<minor>-<family>` (e.g. `claude-sonnet-4-9` →
+`anthropic--claude-4.9-sonnet`), and the legacy `claude-<major>-<minor>-<family>` /
+`claude-<major>-<family>` shapes are handled too. This is necessary because SAP puts the
+version first while Anthropic puts the family first — a reordering the fuzzy and
+family-prefix matchers cannot bridge on their own.
 
 ## Streaming
 
