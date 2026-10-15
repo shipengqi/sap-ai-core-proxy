@@ -161,10 +161,11 @@ The proxy automatically translates standard Anthropic model names to SAP AI Core
 | `claude-3-opus-latest` | `anthropic--claude-3-opus` |
 
 `claude-<family>-latest` is resolved against the live deployment list, so it always means the
-newest running version of that family — no table edit is needed when a new release appears.
+newest running version of that family — no table edit is needed when a new release appears, and
+these aliases are deliberately absent from the table so they cannot be frozen by accident.
 Version-pinned legacy aliases such as `claude-3-5-sonnet-latest` stay fixed, because they name
 one specific version rather than a moving target. If no deployment of the family is running,
-the alias table entry is used as a fallback.
+the request fails with a 404 naming the requested model.
 
 Names not in the table are translated by shape rather than by lookup, so newly released
 Claude versions work without a code change: `claude-<family>-<major>-<minor>` becomes

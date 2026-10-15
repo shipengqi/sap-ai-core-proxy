@@ -187,8 +187,10 @@ func TestAnthropic_LatestAliases(t *testing.T) {
 	defer mock.Close()
 
 	// The mock runs claude-4.8-opus, claude-4.6-sonnet and claude-4.5-haiku.
-	// claude-opus-latest used to resolve to a pinned 4.7 that has no
-	// deployment here, so this also guards against re-pinning the table.
+	// These aliases have no entry in the catalogue table, so the only way they can
+	// resolve is the dynamic pass against the live deployment list — if that
+	// regresses, this test fails with a 404. Version ordering within a family is
+	// covered by sapclient.TestNewestOfFamily.
 	for _, model := range []string{"claude-opus-latest", "claude-sonnet-latest", "claude-haiku-latest"} {
 		t.Run(model, func(t *testing.T) {
 			reqBody := `{"model":"` + model + `","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`

@@ -19,10 +19,14 @@ func TestNormalize(t *testing.T) {
 		// Previously aliased models must keep working.
 		{"sonnet 4.5 dash", "claude-sonnet-4-5", "anthropic--claude-4.5-sonnet"},
 		{"sonnet 4.5 snapshot", "claude-sonnet-4-5-20251022", "anthropic--claude-4.5-sonnet"},
-		{"sonnet latest fallback", "claude-sonnet-latest", "anthropic--claude-4.6-sonnet"},
-		{"opus latest fallback", "claude-opus-latest", "anthropic--claude-4.8-opus"},
-		{"haiku latest fallback", "claude-haiku-latest", "anthropic--claude-4.5-haiku"},
 		{"opus 4.5", "claude-opus-4.5", "anthropic--claude-4.5-opus"},
+
+		// Bare family-level "-latest" aliases must NOT be pinned in the table:
+		// DeploymentManager resolves them against the live deployment list so they
+		// track the newest running version. Normalize leaves them untouched.
+		{"sonnet latest not pinned", "claude-sonnet-latest", "claude-sonnet-latest"},
+		{"opus latest not pinned", "claude-opus-latest", "claude-opus-latest"},
+		{"haiku latest not pinned", "claude-haiku-latest", "claude-haiku-latest"},
 
 		// Newly released versions resolve without an alias entry.
 		{"sonnet 4.9 no alias", "claude-sonnet-4-9", "anthropic--claude-4.9-sonnet"},

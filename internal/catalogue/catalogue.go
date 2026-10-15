@@ -11,24 +11,23 @@ import (
 // model name used during deployment discovery.
 // Source: sap_ai_core_helper.py _MODEL_ALIASES.
 var aliases = map[string]string{
-	// Claude 4 family — map to both versioned and latest SAP names.
-	// The "-latest" entries are a last-resort fallback only: DeploymentManager
-	// resolves those aliases against the live deployment list so they always
-	// track the newest running version rather than a frozen one.
+	// Claude 4 family. Versioned names are pinned here; the bare family-level
+	// "-latest" aliases (claude-opus-latest, claude-sonnet-latest,
+	// claude-haiku-latest) are deliberately absent. DeploymentManager resolves
+	// those against the live deployment list so they always mean the newest
+	// running version — pinning them here would freeze them at whatever release
+	// happened to be current when this table was last edited.
 	"claude-opus-4-5":            "anthropic--claude-4.5-opus",
 	"claude-opus-4.5":            "anthropic--claude-4.5-opus",
 	"claude-opus-4-8":            "anthropic--claude-4.8-opus",
 	"claude-opus-4.8":            "anthropic--claude-4.8-opus",
-	"claude-opus-latest":         "anthropic--claude-4.8-opus",
 	"claude-sonnet-4-6":          "anthropic--claude-4.6-sonnet",
 	"claude-sonnet-4.6":          "anthropic--claude-4.6-sonnet",
 	"claude-sonnet-4-5":          "anthropic--claude-4.5-sonnet",
 	"claude-sonnet-4.5":          "anthropic--claude-4.5-sonnet",
 	"claude-sonnet-4-5-20251022": "anthropic--claude-4.5-sonnet",
-	"claude-sonnet-latest":       "anthropic--claude-4.6-sonnet",
 	"claude-haiku-4-5":           "anthropic--claude-4.5-haiku",
 	"claude-haiku-4.5":           "anthropic--claude-4.5-haiku",
-	"claude-haiku-latest":        "anthropic--claude-4.5-haiku",
 
 	// Claude 3.7 family
 	"claude-3-7-sonnet-latest":            "anthropic--claude-3.7-sonnet",
@@ -114,9 +113,8 @@ func sapStyleName(name string) string {
 //
 // Version-pinned legacy aliases such as "claude-3-5-sonnet-latest" are
 // deliberately not matched: those name one specific version, not a moving
-// target. Callers are expected to resolve the returned family against the
-// live deployment list rather than a hardcoded version, which is why the
-// "-latest" entries in aliases are only a last-resort fallback.
+// target. Bare family-level aliases have no entry in the table above at all —
+// this is the only path that resolves them, against the live deployment list.
 func LatestFamily(model string) (string, bool) {
 	m := reLatestFamily.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model)))
 	if m == nil {
