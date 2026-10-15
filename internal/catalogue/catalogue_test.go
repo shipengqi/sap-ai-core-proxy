@@ -19,8 +19,9 @@ func TestNormalize(t *testing.T) {
 		// Previously aliased models must keep working.
 		{"sonnet 4.5 dash", "claude-sonnet-4-5", "anthropic--claude-4.5-sonnet"},
 		{"sonnet 4.5 snapshot", "claude-sonnet-4-5-20251022", "anthropic--claude-4.5-sonnet"},
-		{"sonnet latest", "claude-sonnet-latest", "anthropic--claude-4.5-sonnet"},
-		{"opus latest", "claude-opus-latest", "anthropic--claude-4.7-opus"},
+		{"sonnet latest fallback", "claude-sonnet-latest", "anthropic--claude-4.6-sonnet"},
+		{"opus latest fallback", "claude-opus-latest", "anthropic--claude-4.8-opus"},
+		{"haiku latest fallback", "claude-haiku-latest", "anthropic--claude-4.5-haiku"},
 		{"opus 4.5", "claude-opus-4.5", "anthropic--claude-4.5-opus"},
 
 		// Newly released versions resolve without an alias entry.
@@ -56,6 +57,37 @@ func TestNormalize_CaseAndWhitespace(t *testing.T) {
 	for _, in := range []string{"  Claude-Sonnet-4-6  ", "CLAUDE-SONNET-4-6", "claude-sonnet-4-6"} {
 		if got := Normalize(in); got != "anthropic--claude-4.6-sonnet" {
 			t.Errorf("Normalize(%q) = %q, want anthropic--claude-4.6-sonnet", in, got)
+		}
+	}
+}
+
+func TestLatestFamily(t *testing.T) {
+	want := map[string]string{
+		"claude-opus-latest":    "opus",
+		"claude-sonnet-latest":  "sonnet",
+		"claude-haiku-latest":   "haiku",
+		"Claude-Opus-Latest":    "opus",
+		"  claude-opus-latest ": "opus",
+	}
+	for in, family := range want {
+		got, ok := LatestFamily(in)
+		if !ok {
+			t.Errorf("LatestFamily(%q) ok = false, want true", in)
+			continue
+		}
+		if got != family {
+			t.Errorf("LatestFamily(%q) = %q, want %q", in, got, family)
+		}
+	}
+
+	// Version-pinned legacy aliases name a specific version, not a moving
+	// target, so they must not be treated as family-latest.
+	for _, in := range []string{
+		"claude-3-5-sonnet-latest", "claude-3-opus-latest", "claude-3-7-sonnet-latest",
+		"claude-sonnet-4-6", "claude-opus-4-8", "gpt-4o", "",
+	} {
+		if family, ok := LatestFamily(in); ok {
+			t.Errorf("LatestFamily(%q) = (%q, true), want (\"\", false)", in, family)
 		}
 	}
 }

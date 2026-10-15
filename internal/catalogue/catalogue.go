@@ -11,18 +11,21 @@ import (
 // model name used during deployment discovery.
 // Source: sap_ai_core_helper.py _MODEL_ALIASES.
 var aliases = map[string]string{
-	// Claude 4 family — map to both versioned and latest SAP names
+	// Claude 4 family — map to both versioned and latest SAP names.
+	// The "-latest" entries are a last-resort fallback only: DeploymentManager
+	// resolves those aliases against the live deployment list so they always
+	// track the newest running version rather than a frozen one.
 	"claude-opus-4-5":            "anthropic--claude-4.5-opus",
 	"claude-opus-4.5":            "anthropic--claude-4.5-opus",
 	"claude-opus-4-8":            "anthropic--claude-4.8-opus",
 	"claude-opus-4.8":            "anthropic--claude-4.8-opus",
-	"claude-opus-latest":         "anthropic--claude-4.7-opus",
+	"claude-opus-latest":         "anthropic--claude-4.8-opus",
 	"claude-sonnet-4-6":          "anthropic--claude-4.6-sonnet",
 	"claude-sonnet-4.6":          "anthropic--claude-4.6-sonnet",
 	"claude-sonnet-4-5":          "anthropic--claude-4.5-sonnet",
 	"claude-sonnet-4.5":          "anthropic--claude-4.5-sonnet",
 	"claude-sonnet-4-5-20251022": "anthropic--claude-4.5-sonnet",
-	"claude-sonnet-latest":       "anthropic--claude-4.5-sonnet",
+	"claude-sonnet-latest":       "anthropic--claude-4.6-sonnet",
 	"claude-haiku-4-5":           "anthropic--claude-4.5-haiku",
 	"claude-haiku-4.5":           "anthropic--claude-4.5-haiku",
 	"claude-haiku-latest":        "anthropic--claude-4.5-haiku",
@@ -77,6 +80,10 @@ var (
 	// Legacy convention, single version: claude-<major>-<family>[-latest|-<snapshot>]
 	//   claude-3-opus-latest       -> anthropic--claude-3-opus
 	reMajorOnly = regexp.MustCompile(`^claude-(\d+)-(opus|sonnet|haiku)(?:-(?:latest|\d{8}))?$`)
+	// Bare family-level alias, e.g. claude-opus-latest. These are resolved
+	// against the live deployment list (see DeploymentManager.findDeployment)
+	// so they always mean the newest version actually running.
+	reLatestFamily = regexp.MustCompile(`^claude-(opus|sonnet|haiku)-latest$`)
 )
 
 // sapStyleName rebuilds SAP AI Core's deployment name from an Anthropic-style
@@ -100,6 +107,22 @@ func sapStyleName(name string) string {
 		return "anthropic--claude-" + m[1] + "-" + m[2]
 	}
 	return ""
+}
+
+// LatestFamily reports whether model is a bare family-level "-latest" alias
+// (e.g. "claude-opus-latest") and, if so, which family it names.
+//
+// Version-pinned legacy aliases such as "claude-3-5-sonnet-latest" are
+// deliberately not matched: those name one specific version, not a moving
+// target. Callers are expected to resolve the returned family against the
+// live deployment list rather than a hardcoded version, which is why the
+// "-latest" entries in aliases are only a last-resort fallback.
+func LatestFamily(model string) (string, bool) {
+	m := reLatestFamily.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model)))
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
 }
 
 // IsAnthropic returns true for Claude model names.

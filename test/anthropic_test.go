@@ -170,6 +170,41 @@ func TestAnthropic_RequestedClaudeModels(t *testing.T) {
 	}
 }
 
+// TestAnthropic_LatestAliases verifies the bare "-latest" aliases track the
+// newest running deployment of each family rather than a pinned version.
+func TestAnthropic_LatestAliases(t *testing.T) {
+	_, _, _, _, hasReal := testutil.RealCreds()
+	if hasReal {
+		t.Skip("skipping mock-only test in real mode")
+	}
+	mock := testutil.NewMockSAPServer(t)
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start mock proxy: %v", err)
+	}
+	defer proxy.Close()
+	defer mock.Close()
+
+	// The mock runs claude-4.8-opus, claude-4.6-sonnet and claude-4.5-haiku.
+	// claude-opus-latest used to resolve to a pinned 4.7 that has no
+	// deployment here, so this also guards against re-pinning the table.
+	for _, model := range []string{"claude-opus-latest", "claude-sonnet-latest", "claude-haiku-latest"} {
+		t.Run(model, func(t *testing.T) {
+			reqBody := `{"model":"` + model + `","max_tokens":32,"messages":[{"role":"user","content":"hi"}]}`
+			resp, err := http.Post(proxy.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(reqBody))
+			if err != nil {
+				t.Fatalf("POST /anthropic/v1/messages: %v", err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if resp.StatusCode != http.StatusOK {
+				body, _ := io.ReadAll(resp.Body)
+				t.Fatalf("model %s: expected 200, got %d: %s", model, resp.StatusCode, body)
+			}
+		})
+	}
+}
+
 func TestAnthropic_SystemPromotion(t *testing.T) {
 	proxyURL, cleanup := setupAnthropic(t)
 	defer cleanup()

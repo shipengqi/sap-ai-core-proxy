@@ -7,6 +7,8 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -123,9 +125,24 @@ func (d *DeploymentManager) findDeployment(ctx context.Context, modelName string
 		return nil, err
 	}
 
+	// 0. Bare "-latest" aliases (claude-opus-latest, claude-sonnet-latest,
+	// claude-haiku-latest) are resolved against the live deployment list so
+	// they always mean the newest running version of that family. Pinning
+	// them in the alias table instead would freeze them at whatever version
+	// was current when the table was last edited.
+	if family, ok := catalogue.LatestFamily(modelName); ok {
+		if dep := d.newestOfFamily(deployments, family); dep != nil {
+			slog.Info("resolved -latest alias against deployments",
+				"requested", modelName, "family", family, "matched", dep.EffectiveModelName())
+			return dep, nil
+		}
+		slog.Warn("no deployment found for -latest family, falling back to alias table",
+			"requested", modelName, "family", family)
+	}
+
 	// Build a deduplicated list of candidate names to search:
-	// 1. the catalogue-aliased name (e.g. "anthropic--claude-4.7-opus")
-	// 2. the original user-facing name (e.g. "claude-opus-latest")
+	// 1. the catalogue-aliased name (e.g. "anthropic--claude-4.8-opus")
+	// 2. the original user-facing name (e.g. "claude-opus-4-8")
 	// This lets the alias hint SAP's internal name while the original provides
 	// a fuzzy/family fallback when the SAP environment uses a different name.
 	aliased := catalogue.Normalize(modelName)
@@ -325,6 +342,67 @@ func (d *DeploymentManager) fetch(ctx context.Context) ([]Deployment, error) {
 	}
 	slog.Info("deployments refreshed", "count", len(running))
 	return running, nil
+}
+
+// claudeVersionPattern matches a SAP Claude deployment name once the vendor
+// prefix has been stripped, e.g. "claude-4.8-opus", "claude-3.5-sonnet",
+// "claude-3-opus". Capture 1 is the version, capture 2 the family.
+var claudeVersionPattern = regexp.MustCompile(`^claude-(\d+(?:\.\d+)?)-(opus|sonnet|haiku)$`)
+
+// newestOfFamily returns the running deployment with the highest version
+// number among those in the given Claude family, or nil if the family has no
+// running deployment. Blacklisted deployments are skipped.
+func (d *DeploymentManager) newestOfFamily(deployments []Deployment, family string) *Deployment {
+	var best *Deployment
+	var bestVer []int
+
+	for i := range deployments {
+		dep := &deployments[i]
+		if d.isBlacklisted(dep.DeployedURL) {
+			continue
+		}
+		m := claudeVersionPattern.FindStringSubmatch(normalizeDepName(dep.EffectiveModelName()))
+		if m == nil || m[2] != family {
+			continue
+		}
+		ver := parseVersion(m[1])
+		if best == nil || compareVersion(ver, bestVer) > 0 {
+			best, bestVer = dep, ver
+		}
+	}
+	return best
+}
+
+// parseVersion turns "4.8" into [4 8] and "3" into [3].
+func parseVersion(v string) []int {
+	parts := strings.Split(v, ".")
+	out := make([]int, len(parts))
+	for i, p := range parts {
+		n, _ := strconv.Atoi(p)
+		out[i] = n
+	}
+	return out
+}
+
+// compareVersion compares two dotted version slices, treating missing segments
+// as zero so that [4] < [4 8].
+func compareVersion(a, b []int) int {
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var av, bv int
+		if i < len(a) {
+			av = a[i]
+		}
+		if i < len(b) {
+			bv = b[i]
+		}
+		if av != bv {
+			if av > bv {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
 }
 
 // normalizeDepName strips the SAP vendor prefix (e.g. "anthropic--") so that

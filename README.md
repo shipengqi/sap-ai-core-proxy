@@ -131,8 +131,9 @@ All config values can be overridden by environment variables (higher priority th
 
 ### Deployment Discovery
 
-On every request, the proxy resolves the upstream SAP AI Core deployment URL in three passes:
+On every request, the proxy resolves the upstream SAP AI Core deployment URL in these passes:
 
+0. **`-latest` family resolution** — a bare `claude-<family>-latest` alias is matched against the live deployment list and bound to the highest version of that family (see below)
 1. **Exact match** — `deployment.modelName == normalizedModel`
 2. **Fuzzy substring match** — either name contains the other
 3. **Family prefix fallback** — strips the version suffix and matches the family (e.g. `claude-opus-4.8` → `claude-opus` matches any `*claude-opus*` deployment)
@@ -145,18 +146,24 @@ The proxy automatically translates standard Anthropic model names to SAP AI Core
 
 | User-Facing Name | SAP AI Core Deployment Name |
 |---|---|
-| `claude-opus-latest` | `anthropic--claude-4.7-opus` |
+| `claude-opus-latest` | newest running `opus` deployment — resolved dynamically |
 | `claude-opus-4.8` / `claude-opus-4-8` | `anthropic--claude-4.8-opus` |
 | `claude-opus-4.5` / `claude-opus-4-5` | `anthropic--claude-4.5-opus` |
-| `claude-sonnet-latest` | `anthropic--claude-4.5-sonnet` |
+| `claude-sonnet-latest` | newest running `sonnet` deployment — resolved dynamically |
 | `claude-sonnet-4.6` / `claude-sonnet-4-6` | `anthropic--claude-4.6-sonnet` |
 | `claude-sonnet-4.5` / `claude-sonnet-4-5` | `anthropic--claude-4.5-sonnet` |
-| `claude-haiku-latest` | `anthropic--claude-4.5-haiku` |
+| `claude-haiku-latest` | newest running `haiku` deployment — resolved dynamically |
 | `claude-haiku-4.5` / `claude-haiku-4-5` | `anthropic--claude-4.5-haiku` |
 | `claude-3-7-sonnet-latest` | `anthropic--claude-3.7-sonnet` |
 | `claude-3-5-sonnet-latest` | `anthropic--claude-3.5-sonnet` |
 | `claude-3-5-haiku-latest` | `anthropic--claude-3.5-haiku` |
 | `claude-3-opus-latest` | `anthropic--claude-3-opus` |
+
+`claude-<family>-latest` is resolved against the live deployment list, so it always means the
+newest running version of that family — no table edit is needed when a new release appears.
+Version-pinned legacy aliases such as `claude-3-5-sonnet-latest` stay fixed, because they name
+one specific version rather than a moving target. If no deployment of the family is running,
+the alias table entry is used as a fallback.
 
 Names not in the table are translated by shape rather than by lookup, so newly released
 Claude versions work without a code change: `claude-<family>-<major>-<minor>` becomes
