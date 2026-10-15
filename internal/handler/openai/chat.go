@@ -165,6 +165,15 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Surface upstream failures as real HTTP errors. Once the SSE headers are
+		// written the status is locked at 200 and the client would only ever see an
+		// empty stream, hiding the actual upstream error.
+		if upstream.StatusCode != http.StatusOK {
+			defer func() { _ = upstream.Body.Close() }()
+			errBody, _ := io.ReadAll(upstream.Body)
+			c.Data(upstream.StatusCode, "application/json", errBody)
+			return
+		}
 		c.Status(http.StatusOK)
 		stream.PipeAnthropicToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
 		return
@@ -327,6 +336,18 @@ func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string) []
 		}
 	}
 
+	// parallel_tool_calls is OpenAI-only and not in BedrockAllowedFields; carry it
+	// through so the tool conversion can fold it into tool_choice.
+	if v, ok := raw["parallel_tool_calls"]; ok {
+		filtered["parallel_tool_calls"] = v
+	}
+
+	// Translate OpenAI tool-calling shapes into Anthropic content blocks. Without
+	// this, a "tool" role or an OpenAI-shaped tools array is forwarded verbatim and
+	// rejected upstream.
+	filtered = transform.ConvertOpenAIToolMessagesToAnthropic(filtered)
+	filtered = transform.ConvertOpenAIToolsToAnthropic(filtered)
+
 	filtered = transform.PromoteSystemMessages(filtered)
 	filtered = transform.ConvertImagePartsToAnthropic(filtered)
 	filtered = transform.FlattenSystem(filtered)
@@ -340,8 +361,11 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 	var bedrock struct {
 		ID      string `json:"id"`
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
 		Usage      struct {
@@ -354,13 +378,28 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 		return data
 	}
 
-	// Concatenate all text blocks; skip thinking blocks.
+	// Concatenate all text blocks; skip thinking blocks. tool_use blocks become
+	// OpenAI tool_calls so a tool-calling loop can continue.
 	content := ""
+	var toolCalls []map[string]interface{}
 	for _, block := range bedrock.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			content += block.Text
+		case "tool_use":
+			args := "{}"
+			if len(block.Input) > 0 && string(block.Input) != "null" {
+				args = string(block.Input)
+			}
+			toolCalls = append(toolCalls, map[string]interface{}{
+				"id":   block.ID,
+				"type": "function",
+				"function": map[string]string{
+					"name":      block.Name,
+					"arguments": args,
+				},
+			})
 		}
-		// thinking blocks are intentionally skipped
 	}
 
 	var finishReason string
@@ -372,6 +411,21 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 	default:
 		finishReason = "stop"
 	}
+	if finishReason == "stop" && len(toolCalls) > 0 {
+		finishReason = "tool_calls"
+	}
+
+	message := map[string]interface{}{
+		"role":    "assistant",
+		"content": content,
+	}
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = toolCalls
+		// OpenAI reports null content when the turn is purely tool calls.
+		if content == "" {
+			message["content"] = nil
+		}
+	}
 
 	openAI := map[string]interface{}{
 		"id":     "chatcmpl-" + bedrock.ID,
@@ -379,11 +433,8 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 		"model":  model,
 		"choices": []map[string]interface{}{
 			{
-				"index": 0,
-				"message": map[string]string{
-					"role":    "assistant",
-					"content": content,
-				},
+				"index":         0,
+				"message":       message,
 				"finish_reason": finishReason,
 			},
 		},

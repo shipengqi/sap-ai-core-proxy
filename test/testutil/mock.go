@@ -5,6 +5,7 @@ package testutil
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,6 +25,29 @@ type MockSAPServer struct {
 
 	// LastThinkingParam tracks whether the last request contained a thinking parameter.
 	LastThinkingParam bool
+
+	// LastInvokeBody captures the most recent body posted to the Anthropic /invoke endpoint.
+	LastInvokeBody map[string]json.RawMessage
+
+	// LastInvokeStreamBody captures the most recent body posted to
+	// /invoke-with-response-stream.
+	LastInvokeStreamBody map[string]json.RawMessage
+
+	// ToolCallResponse makes the Anthropic mock answer with a tool_use block
+	// (or tool_use SSE events) instead of plain text.
+	ToolCallResponse bool
+
+	// StreamingErrorStatus, when non-zero, makes the Anthropic streaming endpoint
+	// fail with that HTTP status and a JSON error body.
+	StreamingErrorStatus int
+
+	// LastOpenAIChatBody captures the most recent body posted to the OpenAI
+	// compatible /chat/completions endpoint.
+	LastOpenAIChatBody map[string]json.RawMessage
+
+	// OpenAIToolCallResponse makes the OpenAI-compatible mock answer with tool_calls
+	// instead of plain text.
+	OpenAIToolCallResponse bool
 }
 
 // NewMockSAPServer starts a mock SAP AI Core server. Call Close() when done.
@@ -73,6 +97,27 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
 				},
 				{
+					"id":            "dep-anthropic-46-001",
+					"status":        "RUNNING",
+					"modelName":     "anthropic--claude-4.6-sonnet",
+					"scenarioId":    "foundation-models",
+					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
+				},
+				{
+					"id":            "dep-anthropic-48-001",
+					"status":        "RUNNING",
+					"modelName":     "anthropic--claude-4.8-opus",
+					"scenarioId":    "foundation-models",
+					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
+				},
+				{
+					"id":            "dep-anthropic-45-haiku-001",
+					"status":        "RUNNING",
+					"modelName":     "anthropic--claude-4.5-haiku",
+					"scenarioId":    "foundation-models",
+					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
+				},
+				{
 					"id":            "dep-gemini-001",
 					"status":        "RUNNING",
 					"modelName":     "gemini-1.5-pro",
@@ -96,8 +141,12 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		m.validateAuth(t, w, r)
 		m.validateResourceGroup(t, w, r)
 
+		bodyBytes, _ := io.ReadAll(r.Body)
 		var reqBody map[string]interface{}
-		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		_ = json.Unmarshal(bodyBytes, &reqBody)
+		var rawBody map[string]json.RawMessage
+		_ = json.Unmarshal(bodyBytes, &rawBody)
+		m.LastOpenAIChatBody = rawBody
 		streaming, _ := reqBody["stream"].(bool)
 
 		if streaming {
@@ -106,6 +155,36 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 			_, _ = fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"index\":0}]}\n\n")
 			_, _ = fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"!\"},\"index\":0}]}\n\n")
 			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+			return
+		}
+
+		if m.OpenAIToolCallResponse {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":     "chatcmpl-mock-tool",
+				"object": "chat.completion",
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"message": map[string]interface{}{
+							"role":    "assistant",
+							"content": nil,
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_mock_1",
+									"type": "function",
+									"function": map[string]string{
+										"name":      "get_weather",
+										"arguments": `{"city":"Berlin"}`,
+									},
+								},
+							},
+						},
+						"finish_reason": "tool_calls",
+					},
+				},
+				"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+			})
 			return
 		}
 
@@ -178,6 +257,7 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 
 		var reqBody map[string]json.RawMessage
 		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		m.LastInvokeBody = reqBody
 		if _, ok := reqBody["anthropic_version"]; !ok {
 			t.Errorf("anthropic /invoke: missing anthropic_version in forwarded body")
 		}
@@ -192,6 +272,22 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"message": "adaptive thinking is not supported on this model",
+			})
+			return
+		}
+
+		if m.ToolCallResponse {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":   "msg-mock-tool-001",
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]interface{}{
+					{"type": "tool_use", "id": "toolu_mock_1", "name": "get_weather", "input": map[string]string{"city": "Berlin"}},
+				},
+				"model":       "anthropic--claude-3.5-sonnet",
+				"stop_reason": "tool_use",
+				"usage":       map[string]int{"input_tokens": 10, "output_tokens": 8},
 			})
 			return
 		}
@@ -214,11 +310,37 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 	mux.HandleFunc("/v2/inference/deployments/dep-anthropic-001/invoke-with-response-stream", func(w http.ResponseWriter, r *http.Request) {
 		m.log(r)
 		m.validateAuth(t, w, r)
+
+		var reqBody map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		m.LastInvokeStreamBody = reqBody
+
+		if m.StreamingErrorStatus != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(m.StreamingErrorStatus)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message": "mock upstream streaming failure",
+			})
+			return
+		}
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
 		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"anthropic--claude-3.5-sonnet\",\"usage\":{\"input_tokens\":10}}}\n\n")
+
+		if m.ToolCallResponse {
+			_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_mock_1\",\"name\":\"get_weather\",\"input\":{}}}\n\n")
+			_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\"}}\n\n")
+			_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"Berlin\\\"}\"}}\n\n")
+			_, _ = fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+			_, _ = fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":15}}\n\n")
+			_, _ = fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			return
+		}
+
 		_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
 		_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello!\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":3}}\n\n")
 		_, _ = fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	})
 

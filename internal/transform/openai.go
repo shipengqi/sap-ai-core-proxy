@@ -4,11 +4,18 @@ package transform
 
 import (
 	"encoding/json"
+	"strings"
 )
 
 // AnthropicToOpenAIBody converts an Anthropic messages request to the SAP AI Core
 // OpenAI-compatible chat completions body (sent to /chat/completions?api-version=...).
 func AnthropicToOpenAIBody(raw map[string]json.RawMessage, streaming bool) []byte {
+	// Translate Anthropic tool blocks and declarations into the OpenAI wire shape.
+	// Without this, tool_use / tool_result content blocks and input_schema tools are
+	// forwarded verbatim and rejected by the OpenAI-compatible endpoint.
+	raw = ConvertAnthropicToolMessagesToOpenAI(raw)
+	raw = ConvertAnthropicToolsToOpenAI(raw)
+
 	sap := make(map[string]json.RawMessage)
 
 	// Forward messages as-is.
@@ -32,6 +39,9 @@ func AnthropicToOpenAIBody(raw map[string]json.RawMessage, streaming bool) []byt
 	}
 	if v, ok := raw["tool_choice"]; ok {
 		sap["tool_choice"] = v
+	}
+	if v, ok := raw["parallel_tool_calls"]; ok {
+		sap["parallel_tool_calls"] = v
 	}
 
 	// max_tokens → max_completion_tokens.
@@ -87,7 +97,14 @@ func OpenAIToAnthropicResponse(data []byte, model string) []byte {
 		ID      string `json:"id"`
 		Choices []struct {
 			Message struct {
-				Content string `json:"content"`
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"message"`
 			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
@@ -102,12 +119,17 @@ func OpenAIToAnthropicResponse(data []byte, model string) []byte {
 	}
 
 	content := ""
+	stopReason := "end_turn"
+	var toolCalls []struct {
+		ID       string `json:"id"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
 	if len(openAI.Choices) > 0 {
 		content = openAI.Choices[0].Message.Content
-	}
-
-	stopReason := "end_turn"
-	if len(openAI.Choices) > 0 {
+		toolCalls = openAI.Choices[0].Message.ToolCalls
 		switch openAI.Choices[0].FinishReason {
 		case "length":
 			stopReason = "max_tokens"
@@ -115,15 +137,37 @@ func OpenAIToAnthropicResponse(data []byte, model string) []byte {
 			stopReason = "tool_use"
 		}
 	}
+	if stopReason == "end_turn" && len(toolCalls) > 0 {
+		stopReason = "tool_use"
+	}
+
+	// Anthropic content is a block array: text first, then one tool_use per call.
+	blocks := make([]map[string]interface{}, 0, len(toolCalls)+1)
+	if content != "" {
+		blocks = append(blocks, map[string]interface{}{"type": "text", "text": content})
+	}
+	for _, call := range toolCalls {
+		input := json.RawMessage(`{}`)
+		if trimmed := strings.TrimSpace(call.Function.Arguments); trimmed != "" && json.Valid([]byte(trimmed)) {
+			input = json.RawMessage(trimmed)
+		}
+		blocks = append(blocks, map[string]interface{}{
+			"type":  "tool_use",
+			"id":    call.ID,
+			"name":  call.Function.Name,
+			"input": input,
+		})
+	}
+	if len(blocks) == 0 {
+		blocks = append(blocks, map[string]interface{}{"type": "text", "text": ""})
+	}
 
 	anthropic := map[string]interface{}{
-		"id":    "msg_" + openAI.ID,
-		"type":  "message",
-		"role":  "assistant",
-		"model": model,
-		"content": []map[string]string{
-			{"type": "text", "text": content},
-		},
+		"id":            "msg_" + openAI.ID,
+		"type":          "message",
+		"role":          "assistant",
+		"model":         model,
+		"content":       blocks,
 		"stop_reason":   stopReason,
 		"stop_sequence": nil,
 		"usage": map[string]int{
