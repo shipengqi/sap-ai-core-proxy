@@ -10,6 +10,7 @@ A Go reverse proxy that exposes SAP AI Core LLM deployments through standard API
 - **Automatic auth** — OAuth 2.0 client-credentials token exchange with in-memory caching
 - **Deployment discovery** — queries SAP AI Core for RUNNING deployments; 12-hour cache; 3-tier model matching (exact → fuzzy → family prefix fallback)
 - **Model aliases** — translates standard model names (e.g. `claude-3-5-sonnet-latest`) to SAP AI Core deployment names automatically
+- **Tool calling** — OpenAI `tools` / `tool_calls` / `role: "tool"` and Anthropic `tool_use` / `tool_result` blocks are translated into each other, so a tool-calling loop works across either surface regardless of which model family backs it
 - **Claude Code / VSCode / IDE compatible** — works with any client that speaks OpenAI or Anthropic APIs
 
 ## Quick Start
