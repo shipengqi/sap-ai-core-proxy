@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -48,6 +49,12 @@ type MockSAPServer struct {
 	// OpenAIToolCallResponse makes the OpenAI-compatible mock answer with tool_calls
 	// instead of plain text.
 	OpenAIToolCallResponse bool
+
+	// mu guards the bookkeeping fields below. The mock is driven by concurrent
+	// integration tests — the cache-diagnostics suite fires fifty parallel
+	// requests at it — and -race flags the unsynchronised appends, so every
+	// mutation of Last*/RequestLog goes through this mutex.
+	mu sync.Mutex
 }
 
 // NewMockSAPServer starts a mock SAP AI Core server. Call Close() when done.
@@ -146,7 +153,9 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		_ = json.Unmarshal(bodyBytes, &reqBody)
 		var rawBody map[string]json.RawMessage
 		_ = json.Unmarshal(bodyBytes, &rawBody)
+		m.mu.Lock()
 		m.LastOpenAIChatBody = rawBody
+		m.mu.Unlock()
 		streaming, _ := reqBody["stream"].(bool)
 
 		if streaming {
@@ -278,14 +287,16 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 
 		var reqBody map[string]json.RawMessage
 		_ = json.NewDecoder(r.Body).Decode(&reqBody)
-		m.LastInvokeBody = reqBody
 		if _, ok := reqBody["anthropic_version"]; !ok {
 			t.Errorf("anthropic /invoke: missing anthropic_version in forwarded body")
 		}
 
 		// Track whether thinking parameter is present
 		_, hasThinking := reqBody["thinking"]
+		m.mu.Lock()
+		m.LastInvokeBody = reqBody
 		m.LastThinkingParam = hasThinking
+		m.mu.Unlock()
 
 		// If RejectThinking is true and thinking param exists, return 400
 		if m.RejectThinking && hasThinking {
@@ -341,7 +352,9 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 
 		var reqBody map[string]json.RawMessage
 		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		m.mu.Lock()
 		m.LastInvokeStreamBody = reqBody
+		m.mu.Unlock()
 
 		if m.StreamingErrorStatus != 0 {
 			w.Header().Set("Content-Type", "application/json")
@@ -433,6 +446,8 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 }
 
 func (m *MockSAPServer) log(r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.RequestLog = append(m.RequestLog, r.Method+" "+r.URL.Path)
 }
 
