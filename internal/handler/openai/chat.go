@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
@@ -40,6 +41,13 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 	c.Set("model", modelStr)
+
+	// Cache attribution. On this surface the system prompt is a message rather
+	// than a top-level field, so the system fingerprint stays empty and the
+	// system prompt is hashed as part of the message prefix. That is less
+	// precise than the Anthropic surface but still catches the drift that
+	// matters.
+	diagnostics.ObserveRequest(c, body)
 
 	if _, ok := raw["messages"]; !ok {
 		c.JSON(http.StatusBadRequest, errorBody("missing required field: messages"))

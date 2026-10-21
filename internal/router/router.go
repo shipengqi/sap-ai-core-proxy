@@ -3,10 +3,12 @@ package router
 import (
 	"bytes"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/anthropic"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/gemini"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/litellm"
@@ -15,6 +17,9 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
+
+// metricsContentType is the Prometheus text exposition format.
+const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
 
 // New creates and returns a configured *gin.Engine with all routes registered.
 // When debug is true, diagnostic endpoints are registered. When metrics is true,
@@ -28,6 +33,12 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 	// are not inference surfaces, so health checks and scrapes do not pollute the
 	// counters.
 	collector := usage.NewCollector()
+	diag := diagnostics.NewCollector()
+
+	// diagnostics is registered first, which makes it the outer middleware: it
+	// can only read the usage record after usage.Middleware has committed it on
+	// the way out.
+	r.Use(diagnostics.Middleware(diag))
 	r.Use(usage.Middleware(collector))
 
 	oa := openaihandler.NewHandler(client, deployments)
@@ -80,8 +91,18 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 	if metrics {
 		// Token accounting for the one-week measurement window. Both endpoints
 		// serve counters only, never request or response content.
-		r.GET("/metrics", collector.MetricsHandler)
+		//
+		// /metrics stays a single endpoint: two packages own families, so the
+		// payload is the concatenation of both. Splitting it would force every
+		// scraper to know about two targets.
+		r.GET("/metrics", func(c *gin.Context) {
+			body := collector.Snapshot().Prometheus() + diag.MetricsText()
+			c.Data(http.StatusOK, metricsContentType, []byte(body))
+		})
 		r.GET("/stats", collector.StatsHandler)
+		// Cache attribution answers a different question than /stats: not how
+		// many tokens were cached, but why a request was not served from cache.
+		r.GET("/stats/cache", diag.CacheStatsHandler)
 	}
 
 	if debug {

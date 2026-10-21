@@ -18,6 +18,9 @@ import (
 // intact.
 type accumulatorKey struct{}
 
+// recordKey is the private context key for the committed Record.
+type recordKey struct{}
+
 // Middleware attaches an Accumulator to the request and publishes the finished
 // request to col exactly once.
 //
@@ -59,7 +62,24 @@ func Middleware(col *Collector) gin.HandlerFunc {
 		record.Model = model
 		record.Latency = time.Since(start)
 		col.Add(record)
+
+		// Publish the committed record so an outer middleware can correlate its
+		// own observations with the token counts. The value travels in the
+		// request context rather than gin.Keys for the same reason the
+		// accumulator does: a private key type cannot collide.
+		c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), recordKey{}, record))
 	}
+}
+
+// RecordFromContext returns the record the usage middleware committed for this
+// request. It is only available to middleware registered before Middleware,
+// because only an outer middleware runs after that commit.
+func RecordFromContext(c *gin.Context) (Record, bool) {
+	if c == nil || c.Request == nil {
+		return Record{}, false
+	}
+	rec, ok := c.Request.Context().Value(recordKey{}).(Record)
+	return rec, ok
 }
 
 // surfaceFromPath derives the surface from the request path. Requests that match

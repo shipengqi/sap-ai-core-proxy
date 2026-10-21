@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
@@ -42,6 +43,10 @@ func (h *Handler) Messages(c *gin.Context) {
 	}
 
 	c.Set("model", modelStr)
+
+	// Cache attribution: fingerprint the hot zone before any transformation runs,
+	// so the comparison reflects what the client sent. Read-only.
+	diagnostics.ObserveRequest(c, body)
 
 	var streaming bool
 	if s, ok := raw["stream"]; ok {

@@ -1,0 +1,384 @@
+package diagnostics
+
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
+)
+
+const (
+	// maxModelLabels mirrors the usage package's cardinality cap. Model names are
+	// caller-controlled, so an unbounded set would let a client grow the payload.
+	maxModelLabels    = 200
+	otherModelLabel   = "__other__"
+	unknownModelLabel = "unknown"
+	// maxTopSessions bounds the per-session list in /stats/cache.
+	maxTopSessions = 20
+	// sessionKeyPrefix is how many hex characters of the session key are
+	// published. Enough to correlate two requests by eye, short enough that it
+	// cannot be used to reconstruct anything.
+	sessionKeyPrefix = 8
+)
+
+type modelKey struct {
+	surface string
+	model   string
+}
+
+type volatileKey struct {
+	surface string
+	kind    string
+}
+
+type outcomeSeries struct {
+	key     modelKey
+	outcome Outcome
+	count   int64
+}
+
+type resultSeries struct {
+	key    modelKey
+	result Result
+	count  int64
+}
+
+type sessionStat struct {
+	key      string
+	requests int64
+	busted   int64
+}
+
+// Collector aggregates cache attribution for the lifetime of the process.
+type Collector struct {
+	mu       sync.Mutex
+	since    time.Time
+	models   map[string]struct{}
+	outcome  map[outcomeKey]int64
+	result   map[resultKey]int64
+	volatile map[volatileKey]int64
+	skipped  map[string]int64
+	// sessions is both the LRU used for classification and the source of the
+	// per-session counters, so there is one notion of "a conversation".
+	sessions   *sessionStore
+	perSession map[string]*sessionStat
+}
+
+type outcomeKey struct {
+	modelKey
+	outcome Outcome
+}
+
+type resultKey struct {
+	modelKey
+	result Result
+}
+
+// NewCollector returns an empty collector whose measurement window starts now.
+func NewCollector() *Collector {
+	return &Collector{
+		since:      time.Now(),
+		models:     make(map[string]struct{}),
+		outcome:    make(map[outcomeKey]int64),
+		result:     make(map[resultKey]int64),
+		volatile:   make(map[volatileKey]int64),
+		skipped:    make(map[string]int64),
+		sessions:   newSessionStore(defaultSessionCapacity, defaultSessionTTL),
+		perSession: make(map[string]*sessionStat),
+	}
+}
+
+// entry is one finished request as the middleware hands it over.
+type entry struct {
+	surface  string
+	model    string
+	session  string
+	outcome  Outcome
+	result   Result
+	volatile map[string]int
+	skipped  string
+}
+
+// Add records one request. A skipped request only increments the skip counter:
+// it carries no classification, and folding it into the outcome totals would
+// make the denominator disagree with /stats.
+func (c *Collector) Add(e entry) {
+	if e.skipped != "" {
+		c.mu.Lock()
+		c.skipped[e.skipped]++
+		c.mu.Unlock()
+		return
+	}
+	if e.surface == "" {
+		return
+	}
+
+	model := c.label(e.model)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.outcome[outcomeKey{modelKey{e.surface, model}, e.outcome}]++
+	c.result[resultKey{modelKey{e.surface, model}, e.result}]++
+	for kind, n := range e.volatile {
+		if n > 0 {
+			c.volatile[volatileKey{e.surface, kind}] += int64(n)
+		}
+	}
+
+	if e.session == "" {
+		return
+	}
+	stat := c.perSession[e.session]
+	if stat == nil {
+		stat = &sessionStat{key: e.session}
+		c.perSession[e.session] = stat
+	}
+	stat.requests++
+	if e.result == ResultBusted {
+		stat.busted++
+	}
+}
+
+// label normalises a model name and enforces the cardinality cap. It takes the
+// lock itself so callers can use it before the main critical section.
+func (c *Collector) label(model string) string {
+	model = catalogue.Normalize(model)
+	if model == "" {
+		return unknownModelLabel
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if model == otherModelLabel {
+		return otherModelLabel
+	}
+	if _, ok := c.models[model]; ok {
+		return model
+	}
+	if len(c.models) >= maxModelLabels {
+		return otherModelLabel
+	}
+	c.models[model] = struct{}{}
+	return model
+}
+
+// OutcomeSeries is one (surface, model, outcome) counter.
+type OutcomeSeries struct {
+	Surface string  `json:"surface"`
+	Model   string  `json:"model"`
+	Outcome Outcome `json:"outcome"`
+	Count   int64   `json:"count"`
+}
+
+// ResultSeries is one (surface, model, result) counter.
+type ResultSeries struct {
+	Surface string `json:"surface"`
+	Model   string `json:"model"`
+	Result  Result `json:"result"`
+	Count   int64  `json:"count"`
+}
+
+// VolatileSeries is one (surface, kind) volatile-pattern counter.
+type VolatileSeries struct {
+	Surface string `json:"surface"`
+	Kind    string `json:"kind"`
+	Count   int64  `json:"count"`
+}
+
+// SkippedSeries is one skip-reason counter.
+type SkippedSeries struct {
+	Reason string `json:"reason"`
+	Count  int64  `json:"count"`
+}
+
+// SessionSeries is one conversation, identified only by a truncated key.
+type SessionSeries struct {
+	Key      string `json:"key"`
+	Requests int64  `json:"requests"`
+	Busted   int64  `json:"busted"`
+}
+
+// Snapshot is an immutable view backing both endpoints.
+type Snapshot struct {
+	Since         time.Time        `json:"-"`
+	UptimeSeconds float64          `json:"uptime_seconds"`
+	Sessions      int              `json:"tracked_sessions"`
+	ByResult      []ResultSeries   `json:"by_result"`
+	ByOutcome     []OutcomeSeries  `json:"by_outcome"`
+	Volatile      []VolatileSeries `json:"volatile"`
+	Skipped       []SkippedSeries  `json:"skipped"`
+	TopSessions   []SessionSeries  `json:"top_sessions"`
+}
+
+// Snapshot returns a consistent copy of all counters.
+func (c *Collector) Snapshot() Snapshot {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	snap := Snapshot{
+		Since:         c.since,
+		UptimeSeconds: time.Since(c.since).Seconds(),
+		Sessions:      c.sessions.len(),
+	}
+
+	for k, n := range c.result {
+		snap.ByResult = append(snap.ByResult, ResultSeries{
+			Surface: k.surface, Model: k.model, Result: k.result, Count: n,
+		})
+	}
+	for k, n := range c.outcome {
+		snap.ByOutcome = append(snap.ByOutcome, OutcomeSeries{
+			Surface: k.surface, Model: k.model, Outcome: k.outcome, Count: n,
+		})
+	}
+	for k, n := range c.volatile {
+		snap.Volatile = append(snap.Volatile, VolatileSeries{
+			Surface: k.surface, Kind: k.kind, Count: n,
+		})
+	}
+	for reason, n := range c.skipped {
+		snap.Skipped = append(snap.Skipped, SkippedSeries{Reason: reason, Count: n})
+	}
+
+	for key, stat := range c.perSession {
+		snap.TopSessions = append(snap.TopSessions, SessionSeries{
+			Key:      key[:min(len(key), sessionKeyPrefix)],
+			Requests: stat.requests,
+			Busted:   stat.busted,
+		})
+	}
+
+	sort.Slice(snap.ByResult, func(i, j int) bool {
+		return lessSeries(snap.ByResult[i].Surface, snap.ByResult[i].Model, string(snap.ByResult[i].Result),
+			snap.ByResult[j].Surface, snap.ByResult[j].Model, string(snap.ByResult[j].Result))
+	})
+	sort.Slice(snap.ByOutcome, func(i, j int) bool {
+		return lessSeries(snap.ByOutcome[i].Surface, snap.ByOutcome[i].Model, string(snap.ByOutcome[i].Outcome),
+			snap.ByOutcome[j].Surface, snap.ByOutcome[j].Model, string(snap.ByOutcome[j].Outcome))
+	})
+	sort.Slice(snap.Volatile, func(i, j int) bool {
+		if snap.Volatile[i].Surface != snap.Volatile[j].Surface {
+			return snap.Volatile[i].Surface < snap.Volatile[j].Surface
+		}
+		return snap.Volatile[i].Kind < snap.Volatile[j].Kind
+	})
+	sort.Slice(snap.Skipped, func(i, j int) bool {
+		return snap.Skipped[i].Reason < snap.Skipped[j].Reason
+	})
+	// Most-busted first: that is the list an operator actually reads.
+	sort.Slice(snap.TopSessions, func(i, j int) bool {
+		if snap.TopSessions[i].Busted != snap.TopSessions[j].Busted {
+			return snap.TopSessions[i].Busted > snap.TopSessions[j].Busted
+		}
+		if snap.TopSessions[i].Requests != snap.TopSessions[j].Requests {
+			return snap.TopSessions[i].Requests > snap.TopSessions[j].Requests
+		}
+		return snap.TopSessions[i].Key < snap.TopSessions[j].Key
+	})
+	if len(snap.TopSessions) > maxTopSessions {
+		snap.TopSessions = snap.TopSessions[:maxTopSessions]
+	}
+
+	return snap
+}
+
+func lessSeries(as, am, al, bs, bm, bl string) bool {
+	if as != bs {
+		return as < bs
+	}
+	if am != bm {
+		return am < bm
+	}
+	return al < bl
+}
+
+// metricsContentType is the Prometheus text exposition format.
+const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
+
+// labelEscaper matches the usage package's escaper exactly. The format defines
+// only three escapes; emitting \r or \t would be an illegal escape sequence and
+// would make the whole scrape fail.
+var labelEscaper = strings.NewReplacer(
+	`\`, `\\`,
+	`"`, `\"`,
+	"\n", `\n`,
+)
+
+// Prometheus renders the snapshot in the Prometheus text exposition format.
+func (s Snapshot) Prometheus() string {
+	var b strings.Builder
+
+	writeHeader := func(name, help, kind string) {
+		fmt.Fprintf(&b, "# HELP %s %s\n", name, help)
+		fmt.Fprintf(&b, "# TYPE %s %s\n", name, kind)
+	}
+	writeSeries := func(name string, labels [][2]string, value int64) {
+		b.WriteString(name)
+		if len(labels) > 0 {
+			b.WriteString("{")
+			for i, l := range labels {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				b.WriteString(l[0])
+				b.WriteString(`="`)
+				b.WriteString(labelEscaper.Replace(l[1]))
+				b.WriteString(`"`)
+			}
+			b.WriteString("}")
+		}
+		b.WriteString(" ")
+		b.WriteString(strconv.FormatInt(value, 10))
+		b.WriteString("\n")
+	}
+
+	writeHeader(
+		"sap_proxy_cache_prefix_total",
+		"What changed in the cache hot zone since the previous request of the same conversation: identical, live_zone_only, append_only are healthy; system_changed, tools_changed and messages_rewritten are drift the client can fix.",
+		"counter",
+	)
+	for _, r := range s.ByOutcome {
+		writeSeries("sap_proxy_cache_prefix_total", [][2]string{
+			{"surface", r.Surface}, {"model", r.Model}, {"outcome", string(r.Outcome)},
+		}, r.Count)
+	}
+
+	writeHeader(
+		"sap_proxy_cache_result_total",
+		"Attribution of prompt-cache behaviour, crossing the prefix classification with the cache counters the upstream reported. busted means the prefix changed; rewrite means the prefix was stable but the cache had expired or the request landed elsewhere; no_cache means the upstream reported no cache activity at all.",
+		"counter",
+	)
+	for _, r := range s.ByResult {
+		writeSeries("sap_proxy_cache_result_total", [][2]string{
+			{"surface", r.Surface}, {"model", r.Model}, {"result", string(r.Result)},
+		}, r.Count)
+	}
+
+	writeHeader(
+		"sap_proxy_cache_volatile_total",
+		"Volatile patterns found in the cache hot zone (system, tools, message prefix). A non-zero value is a likely reason the prefix never matches: a timestamp or random id changes on every request.",
+		"counter",
+	)
+	for _, r := range s.Volatile {
+		writeSeries("sap_proxy_cache_volatile_total", [][2]string{
+			{"surface", r.Surface}, {"kind", r.Kind},
+		}, r.Count)
+	}
+
+	writeHeader(
+		"sap_proxy_cache_skipped_total",
+		"Requests the cache attribution did not examine, by reason. Skipping is not an error: the request was proxied normally.",
+		"counter",
+	)
+	for _, r := range s.Skipped {
+		writeSeries("sap_proxy_cache_skipped_total", [][2]string{{"reason", r.Reason}}, r.Count)
+	}
+
+	return b.String()
+}
