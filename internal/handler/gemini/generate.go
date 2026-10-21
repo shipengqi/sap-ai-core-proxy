@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 func (h *Handler) Generate(c *gin.Context) {
@@ -47,6 +48,8 @@ func (h *Handler) Generate(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeGemini(c, upstream)
 		return
@@ -60,5 +63,8 @@ func (h *Handler) Generate(c *gin.Context) {
 	}
 	defer func() { _ = upstream.Body.Close() }()
 	respBody, _ := io.ReadAll(upstream.Body)
+	// Native Gemini body: the observer reads usageMetadata. Observation only, the
+	// bytes are forwarded unchanged.
+	usage.ObserveJSONBody(c, respBody)
 	c.Data(upstream.StatusCode, "application/json", respBody)
 }

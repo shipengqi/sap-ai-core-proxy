@@ -13,6 +13,7 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // ChatCompletions proxies POST /openai/v1/chat/completions to SAP AI Core.
@@ -88,6 +89,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeOpenAI(c, upstream)
 		return
@@ -112,6 +115,8 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
+	// Observation only: respBody is forwarded unchanged.
+	usage.ObserveJSONBody(c, respBody)
 	c.Data(status, "application/json", respBody)
 }
 
@@ -165,6 +170,8 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		// Surface upstream failures as real HTTP errors. Once the SSE headers are
 		// written the status is locked at 200 and the client would only ever see an
 		// empty stream, hiding the actual upstream error.
@@ -218,6 +225,9 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 	}
 
 	openAIResp := bedrockToOpenAIResponse(respBody, modelStr)
+	// The converted body carries the Bedrock usage block restated as
+	// prompt_tokens / completion_tokens.
+	usage.ObserveJSONBody(c, openAIResp)
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
@@ -239,6 +249,8 @@ func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeGeminiToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
 		return
@@ -269,6 +281,9 @@ func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map
 	}
 
 	openAIResp := geminiToOpenAIResponse(respBody, modelStr)
+	// The converted body carries Gemini's usageMetadata restated as
+	// prompt_tokens / completion_tokens.
+	usage.ObserveJSONBody(c, openAIResp)
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 

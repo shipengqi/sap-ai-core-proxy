@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // PipeAnthropicToOpenAI reads an Anthropic-format SSE stream from upstream (SAP
@@ -26,6 +28,8 @@ import (
 //	all other event types                    → skipped
 func PipeAnthropicToOpenAI(c *gin.Context, upstream *http.Response, completionID, model string) {
 	defer func() { _ = upstream.Body.Close() }()
+
+	usage.MarkStream(c)
 
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -82,10 +86,21 @@ func PipeAnthropicToOpenAI(c *gin.Context, upstream *http.Response, completionID
 		}
 
 		if !strings.HasPrefix(line, "data:") {
+			// An upstream that answers 200 with a bare JSON error body (no SSE
+			// framing) is not forwarded — this pipe drops non-data lines, which is
+			// pre-existing behaviour and must stay — but it still has to be
+			// inspected, otherwise the failure is counted as a success.
+			if strings.HasPrefix(line, "{") {
+				usage.ObserveAnthropicEvent(c, line)
+			}
 			continue
 		}
 
 		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+
+		// The upstream here is Anthropic-shaped, so the usage arrives in
+		// message_start / message_delta even though the caller sees OpenAI chunks.
+		usage.ObserveAnthropicEvent(c, payload)
 
 		// Infer event type from payload "type" field if not set by event: line.
 		eventType := currentEventType

@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 type Handler struct {
@@ -112,6 +113,9 @@ func (h *Handler) doOrchestration(c *gin.Context, dep *sapclient.Deployment, req
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
+	// The orchestration envelope's final_result is an OpenAI-shaped completion,
+	// so the usage block sits at its top level. Observation only.
+	usage.ObserveJSONBody(c, result)
 	c.Data(http.StatusOK, "application/json", result)
 }
 

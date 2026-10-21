@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 type SAPAICore struct {
@@ -19,6 +20,10 @@ type SAPAICore struct {
 type Server struct {
 	Port     int    `json:"port"`
 	LogLevel string `json:"log_level"`
+	// Metrics enables the /metrics and /stats observation endpoints. It defaults
+	// to true: token accounting is the point of P0, and the endpoints expose no
+	// request content — only counters.
+	Metrics bool `json:"metrics"`
 }
 
 type Config struct {
@@ -29,7 +34,9 @@ type Config struct {
 func Load() (*Config, error) {
 	cfg := &Config{
 		SAPAICore: SAPAICore{ResourceGroup: "default"},
-		Server:    Server{Port: 3001, LogLevel: "info"},
+		// Metrics is set before decoding so a config file that predates the field
+		// keeps the endpoints enabled instead of silently turning them off.
+		Server: Server{Port: 3001, LogLevel: "info", Metrics: true},
 	}
 
 	path := filepath.Join(homeDir(), ".aicoreproxy", "config.json")
@@ -74,6 +81,22 @@ func overrideFromEnv(cfg *Config) {
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		cfg.Server.LogLevel = v
 	}
+	if v := os.Getenv("METRICS_ENABLED"); v != "" {
+		cfg.Server.Metrics = parseBool(v, cfg.Server.Metrics)
+	}
+}
+
+// parseBool accepts the usual truthy/falsy spellings. Unrecognised values keep
+// the current setting rather than failing startup: a typo in an env var must not
+// take the proxy down.
+func parseBool(v string, fallback bool) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "t", "true", "y", "yes", "on", "enabled":
+		return true
+	case "0", "f", "false", "n", "no", "off", "disabled":
+		return false
+	}
+	return fallback
 }
 
 func (c *Config) validate() error {

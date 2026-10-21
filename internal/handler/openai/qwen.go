@@ -11,6 +11,7 @@ import (
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // thinkingBudgets maps OpenAI reasoning_effort levels to Qwen thinking_budget token counts.
@@ -115,6 +116,8 @@ func (h *Handler) chatCompletionsQwen(c *gin.Context, modelStr string, raw map[s
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeOpenAI(c, upstream)
 		return
@@ -155,5 +158,7 @@ func (h *Handler) chatCompletionsQwen(c *gin.Context, modelStr string, raw map[s
 		status = resp.StatusCode
 	}
 
+	// Qwen answers in OpenAI format; observation only, the body is unchanged.
+	usage.ObserveJSONBody(c, respBody)
 	c.Data(status, "application/json", respBody)
 }

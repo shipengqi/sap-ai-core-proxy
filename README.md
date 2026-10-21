@@ -75,6 +75,7 @@ The proxy starts on `http://localhost:3001` (default).
 | `sap_ai_core.resource_group` | No | `"default"` | SAP AI Core resource group |
 | `server.port` | No | `3001` | Listen port |
 | `server.log_level` | No | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
+| `server.metrics` | No | `true` | Register `GET /metrics` and `GET /stats` |
 
 ### Environment Variable Overrides
 
@@ -90,6 +91,7 @@ All config values can be overridden by environment variables (higher priority th
 | `SAP_AI_CORE_RESOURCE_GROUP` | `sap_ai_core.resource_group` |
 | `PORT` | `server.port` |
 | `LOG_LEVEL` | `server.log_level` |
+| `METRICS_ENABLED` | `server.metrics` |
 
 ## API Endpoints
 
@@ -127,6 +129,21 @@ All config values can be overridden by environment variables (higher priority th
 | POST | `/litellm/v1/chat/completions` | Chat via SAP Orchestration |
 | POST | `/litellm/v1/completions` | Completions via SAP Orchestration |
 | POST | `/litellm/v1/embeddings` | Embeddings (direct deployment) |
+
+### Usage Metrics
+
+Token accounting is on by default; set `server.metrics: false` (or `METRICS_ENABLED=false`) to stop registering these routes.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/stats` | JSON: totals, per-surface and per-model tokens, cache hit ratio |
+| GET | `/metrics` | Prometheus text exposition (hand-written, no extra dependency) |
+
+Three things to know before reading the numbers:
+
+- `sap_proxy_requests_total{status}` is the **upstream-effective** status, not what the client received. A streaming request whose upstream failed is recorded with the upstream error code (or `502`) even though the client got `200`, because the SSE headers are written before the upstream answer is known.
+- `usage_missing` means "the response was inspected but the upstream reported no usage". It never counts failed requests or endpoints that are not instrumented.
+- `uninstrumented` means "the request succeeded but no observation path read the response". A non-zero value points at a proxy code path missing accounting, not at a silent upstream.
 
 ## Model Routing & Fallback
 

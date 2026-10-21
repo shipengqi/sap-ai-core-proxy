@@ -13,14 +13,22 @@ import (
 	openaihandler "github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/middleware"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // New creates and returns a configured *gin.Engine with all routes registered.
-// When debug is true, diagnostic endpoints are registered.
-func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, debug bool) *gin.Engine {
+// When debug is true, diagnostic endpoints are registered. When metrics is true,
+// the /metrics and /stats usage endpoints are registered.
+func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, debug, metrics bool) *gin.Engine {
 	r := gin.New()
 	r.Use(middleware.Logger())
 	r.Use(middleware.CORS())
+
+	// The usage middleware is installed for every route; it ignores paths that
+	// are not inference surfaces, so health checks and scrapes do not pollute the
+	// counters.
+	collector := usage.NewCollector()
+	r.Use(usage.Middleware(collector))
 
 	oa := openaihandler.NewHandler(client, deployments)
 	an := anthropic.NewHandler(client, deployments)
@@ -68,6 +76,13 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "service": "sap-ai-core-proxy"})
 	})
+
+	if metrics {
+		// Token accounting for the one-week measurement window. Both endpoints
+		// serve counters only, never request or response content.
+		r.GET("/metrics", collector.MetricsHandler)
+		r.GET("/stats", collector.StatsHandler)
+	}
 
 	if debug {
 		// Debug: list all deployments matching a model name

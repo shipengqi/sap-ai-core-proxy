@@ -14,6 +14,7 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // Messages proxies POST /anthropic/v1/messages to SAP AI Core.
@@ -147,6 +148,9 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status, otherwise
+		// a failed stream would be indistinguishable from a successful one.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeAnthropic(c, upstream)
 		return
@@ -190,6 +194,10 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 		status = resp.StatusCode
 	}
 
+	// Token accounting: the upstream usage block is read out of the response we
+	// are about to forward. Observation only — respBody is passed through byte
+	// for byte.
+	usage.ObserveJSONBody(c, respBody)
 	c.Data(status, "application/json", respBody)
 }
 
@@ -230,5 +238,8 @@ func (h *Handler) messagesOpenAI(c *gin.Context, modelName string, raw map[strin
 	}
 
 	anthropicResp := transform.OpenAIToAnthropicResponse(respBody, modelName)
+	// The converted body is what the client receives and it carries the same
+	// token counts as the upstream OpenAI answer.
+	usage.ObserveJSONBody(c, anthropicResp)
 	c.Data(http.StatusOK, "application/json", anthropicResp)
 }

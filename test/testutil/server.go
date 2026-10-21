@@ -28,7 +28,7 @@ func NewTestProxy(mockURL string) (*httptest.Server, error) {
 				ClientSecret:  "test-secret",
 				ResourceGroup: "test-group",
 			},
-			Server: config.Server{Port: 0, LogLevel: "error"},
+			Server: config.Server{Port: 0, LogLevel: "error", Metrics: true},
 		}
 	} else {
 		var err error
@@ -42,7 +42,9 @@ func NewTestProxy(mockURL string) (*httptest.Server, error) {
 	client := sapclient.NewClient(cfg.SAPAICore.BaseURL, cfg.SAPAICore.ResourceGroup, auth)
 	deployments := sapclient.NewDeploymentManager(client)
 
-	r := router.New(client, deployments, false)
+	// The usage endpoints are always enabled in tests so the observation path is
+	// exercised by the integration suite.
+	r := router.New(client, deployments, false, true)
 	return httptest.NewServer(r), nil
 }
 

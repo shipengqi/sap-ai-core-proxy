@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // ImageGenerations proxies POST /openai/v1/images/generations to SAP AI Core.
@@ -33,6 +34,12 @@ func (h *Handler) ImageGenerations(c *gin.Context) {
 		_ = json.Unmarshal(m, &model)
 	}
 	c.Set("model", model)
+
+	// Image generation is billed per image, not per token, and none of the three
+	// response shapes here carries a token usage block. Declaring that up front
+	// keeps these requests out of usage_missing and uninstrumented — and out of
+	// the "somebody forgot an Observe call" signal, which must stay meaningful.
+	usage.MarkNoUsageExpected(c)
 
 	dep, err := h.deployments.GetDeployment(c.Request.Context(), model)
 	if err != nil {

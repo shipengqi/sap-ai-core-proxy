@@ -11,6 +11,7 @@ import (
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // chatCompletionsPerplexity passes Perplexity Sonar requests through unchanged.
@@ -36,6 +37,8 @@ func (h *Handler) chatCompletionsPerplexity(c *gin.Context, modelStr string, raw
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeOpenAI(c, upstream)
 		return
@@ -59,5 +62,7 @@ func (h *Handler) chatCompletionsPerplexity(c *gin.Context, modelStr string, raw
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
+	// Sonar answers in OpenAI format; observation only, the body is unchanged.
+	usage.ObserveJSONBody(c, respBody)
 	c.Data(status, "application/json", respBody)
 }

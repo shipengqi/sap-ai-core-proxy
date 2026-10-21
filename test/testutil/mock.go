@@ -214,6 +214,19 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 				{"object": "embedding", "embedding": []float64{0.1, 0.2, 0.3}, "index": 0},
 			},
 			"model": "gpt-4o",
+			"usage": map[string]int{"prompt_tokens": 7, "total_tokens": 7},
+		})
+	})
+
+	// OpenAI image generation. Like the real endpoint it reports no token usage:
+	// image models are billed per image.
+	mux.HandleFunc("/v2/inference/deployments/dep-openai-001/images/generations", func(w http.ResponseWriter, r *http.Request) {
+		m.log(r)
+		m.validateAuth(t, w, r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"created": 1,
+			"data":    []map[string]string{{"url": "https://example.invalid/image.png"}},
 		})
 	})
 
@@ -223,10 +236,18 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		m.validateAuth(t, w, r)
 		if r.Method == http.MethodPost {
 			w.Header().Set("Content-Type", "application/json")
+			// The Responses API reports usage as input_tokens/output_tokens, with
+			// the cached part under input_tokens_details.
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":     "resp-mock-001",
 				"object": "response",
 				"status": "completed",
+				"usage": map[string]interface{}{
+					"input_tokens":         30,
+					"output_tokens":        7,
+					"total_tokens":         37,
+					"input_tokens_details": map[string]int{"cached_tokens": 5},
+				},
 			})
 			return
 		}
@@ -302,7 +323,14 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 			},
 			"model":       "anthropic--claude-3.5-sonnet",
 			"stop_reason": "end_turn",
-			"usage":       map[string]int{"input_tokens": 10, "output_tokens": 8},
+			// Cache counters are reported separately from input_tokens by
+			// Anthropic; the usage tests rely on these exact numbers.
+			"usage": map[string]int{
+				"input_tokens":                10,
+				"output_tokens":               8,
+				"cache_read_input_tokens":     4,
+				"cache_creation_input_tokens": 2,
+			},
 		})
 	})
 
@@ -326,7 +354,7 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"anthropic--claude-3.5-sonnet\",\"usage\":{\"input_tokens\":10}}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"anthropic--claude-3.5-sonnet\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":4,\"cache_creation_input_tokens\":2}}}\n\n")
 
 		if m.ToolCallResponse {
 			_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_mock_1\",\"name\":\"get_weather\",\"input\":{}}}\n\n")
@@ -353,7 +381,7 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		if isStream {
 			w.Header().Set("Transfer-Encoding", "chunked")
-			_, _ = fmt.Fprintf(w, `[{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello from mock Gemini streaming!"}]},"finishReason":"STOP"}]}]`)
+			_, _ = fmt.Fprintf(w, `[{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello from mock Gemini streaming!"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":6,"totalTokenCount":18}}]`)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -365,6 +393,12 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 					},
 					"finishReason": "STOP",
 				},
+			},
+			// Gemini reports prompt/candidate token counts under usageMetadata.
+			"usageMetadata": map[string]int{
+				"promptTokenCount":     12,
+				"candidatesTokenCount": 6,
+				"totalTokenCount":      18,
 			},
 		})
 	})

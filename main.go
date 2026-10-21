@@ -29,7 +29,7 @@ func main() {
 	client := sapclient.NewClient(cfg.SAPAICore.BaseURL, cfg.SAPAICore.ResourceGroup, auth)
 	deployments := sapclient.NewDeploymentManager(client)
 
-	r := router.New(client, deployments, cfg.Server.LogLevel == "debug")
+	r := router.New(client, deployments, cfg.Server.LogLevel == "debug", cfg.Server.Metrics)
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	slog.Info("server starting", "addr", addr)

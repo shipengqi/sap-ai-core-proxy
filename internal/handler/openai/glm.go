@@ -12,6 +12,7 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // chatCompletionsGlm handles Z.ai GLM models (zai--* prefix).
@@ -39,6 +40,8 @@ func (h *Handler) chatCompletionsGlm(c *gin.Context, modelStr string, raw map[st
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeAnthropicToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
 		return
@@ -69,6 +72,8 @@ func (h *Handler) chatCompletionsGlm(c *gin.Context, modelStr string, raw map[st
 
 	// GLM returns Anthropic Messages format; convert back to OpenAI format.
 	openAIResp := glmAnthropicToOpenAIResponse(respBody, modelStr)
+	// The converted body carries GLM's usage restated as OpenAI counters.
+	usage.ObserveJSONBody(c, openAIResp)
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
