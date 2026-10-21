@@ -83,27 +83,57 @@ func Middleware(col *Collector) gin.HandlerFunc {
 		if model == "" {
 			model = req.model
 		}
+		if !rec.Observed && !rec.NoUsageExpected {
+			// Nobody read the response, so there is no cache activity to cross the
+			// classification with. Attributing it anyway would fold "we could not
+			// look" into "nothing was cached" — the same confusion the usage
+			// package separates with its Observed flag.
+			col.Add(entry{skipped: skipNoObservation})
+			return
+		}
 		col.observe(req, rec.Tokens, rec.HasUsage, model)
 	}
 }
 
 // observe classifies the request against its predecessor, stores the new state
 // and records the attribution.
+//
+// The get/classify/put sequence runs under the collector lock so the three steps
+// are atomic with respect to other requests of the same conversation.
+//
+// Honest note on why: two concurrent requests could both read the same
+// predecessor, so the second would be judged against a state the first already
+// replaced. The race detector cannot see it — the session store locks
+// internally, so each individual access is safe — and the window proved too
+// small to trigger in practice either: 64 goroutines released from a barrier
+// produced first_request=1 with and without the lock. The lock is therefore
+// precautionary. It is still worth taking because it makes the invariant
+// structural instead of scheduling-dependent, and the cost is one uncontended
+// mutex on a path that already allocates.
 func (c *Collector) observe(req request, tokens usage.Tokens, hasUsage bool, model string) {
+	var outcome Outcome
+
+	c.mu.Lock()
 	prev, known := c.sessions.get(req.session)
-	outcome := classify(prev, known, req.fp, req.msgCount, req.msgHash)
+	outcome = classify(prev, known, req.fp, req.msgCount, req.msgHash)
 	c.sessions.put(req.session, sessionState{
 		fp:       req.fp,
 		msgCount: req.msgCount,
-		msgHash:  req.msgHash,
 	})
+	c.mu.Unlock()
+
+	result := attribute(outcome, tokens, hasUsage)
+	// The per-conversation counters live in the same store, so they are bumped
+	// under that store's own lock once the classification is settled.
+	c.sessions.countBump(req.session, result == ResultBusted)
 
 	c.Add(entry{
 		surface:  req.surface,
 		model:    model,
 		session:  req.session,
 		outcome:  outcome,
-		result:   attribute(outcome, tokens, hasUsage),
+		result:   result,
 		volatile: req.volatile,
+		markers:  req.markers,
 	})
 }

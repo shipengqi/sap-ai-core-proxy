@@ -62,10 +62,11 @@ type Collector struct {
 	result   map[resultKey]int64
 	volatile map[volatileKey]int64
 	skipped  map[string]int64
+	noMarker map[modelKey]int64
 	// sessions is both the LRU used for classification and the source of the
-	// per-session counters, so there is one notion of "a conversation".
-	sessions   *sessionStore
-	perSession map[string]*sessionStat
+	// per-conversation counters, so there is one notion of "a conversation" and
+	// one bound that retires both its state and its counters.
+	sessions *sessionStore
 }
 
 type outcomeKey struct {
@@ -81,14 +82,14 @@ type resultKey struct {
 // NewCollector returns an empty collector whose measurement window starts now.
 func NewCollector() *Collector {
 	return &Collector{
-		since:      time.Now(),
-		models:     make(map[string]struct{}),
-		outcome:    make(map[outcomeKey]int64),
-		result:     make(map[resultKey]int64),
-		volatile:   make(map[volatileKey]int64),
-		skipped:    make(map[string]int64),
-		sessions:   newSessionStore(defaultSessionCapacity, defaultSessionTTL),
-		perSession: make(map[string]*sessionStat),
+		since:    time.Now(),
+		models:   make(map[string]struct{}),
+		outcome:  make(map[outcomeKey]int64),
+		result:   make(map[resultKey]int64),
+		volatile: make(map[volatileKey]int64),
+		skipped:  make(map[string]int64),
+		noMarker: make(map[modelKey]int64),
+		sessions: newSessionStore(defaultSessionCapacity, defaultSessionTTL),
 	}
 }
 
@@ -100,7 +101,11 @@ type entry struct {
 	outcome  Outcome
 	result   Result
 	volatile map[string]int
-	skipped  string
+	// markers counts explicit cache_control blocks the client sent. It is what
+	// separates "the client never opted into caching" from "the provider ignored
+	// the markers", which a zero cache_read alone cannot tell apart.
+	markers int
+	skipped string
 }
 
 // Add records one request. A skipped request only increments the skip counter:
@@ -130,17 +135,11 @@ func (c *Collector) Add(e entry) {
 		}
 	}
 
-	if e.session == "" {
-		return
-	}
-	stat := c.perSession[e.session]
-	if stat == nil {
-		stat = &sessionStat{key: e.session}
-		c.perSession[e.session] = stat
-	}
-	stat.requests++
-	if e.result == ResultBusted {
-		stat.busted++
+	// A stable prefix with markers and no cache activity means the client asked
+	// for a cache and got none. A stable prefix without markers means it never
+	// asked. Those need different follow-ups, so they are counted apart.
+	if e.markers == 0 && e.result == ResultNoCache {
+		c.noMarker[modelKey{e.surface, model}]++
 	}
 }
 
@@ -197,6 +196,13 @@ type SkippedSeries struct {
 	Count  int64  `json:"count"`
 }
 
+// NoMarkerSeries counts requests whose client never opted into caching.
+type NoMarkerSeries struct {
+	Surface string `json:"surface"`
+	Model   string `json:"model"`
+	Count   int64  `json:"count"`
+}
+
 // SessionSeries is one conversation, identified only by a truncated key.
 type SessionSeries struct {
 	Key      string `json:"key"`
@@ -213,6 +219,7 @@ type Snapshot struct {
 	ByOutcome     []OutcomeSeries  `json:"by_outcome"`
 	Volatile      []VolatileSeries `json:"volatile"`
 	Skipped       []SkippedSeries  `json:"skipped"`
+	NoMarker      []NoMarkerSeries `json:"no_marker"`
 	TopSessions   []SessionSeries  `json:"top_sessions"`
 }
 
@@ -245,14 +252,15 @@ func (c *Collector) Snapshot() Snapshot {
 	for reason, n := range c.skipped {
 		snap.Skipped = append(snap.Skipped, SkippedSeries{Reason: reason, Count: n})
 	}
-
-	for key, stat := range c.perSession {
-		snap.TopSessions = append(snap.TopSessions, SessionSeries{
-			Key:      key[:min(len(key), sessionKeyPrefix)],
-			Requests: stat.requests,
-			Busted:   stat.busted,
+	for k, n := range c.noMarker {
+		snap.NoMarker = append(snap.NoMarker, NoMarkerSeries{
+			Surface: k.surface, Model: k.model, Count: n,
 		})
 	}
+
+	// The per-conversation list comes from the same store that bounds it, so an
+	// evicted conversation takes its counters with it.
+	snap.TopSessions = c.sessions.topStats(maxTopSessions)
 
 	sort.Slice(snap.ByResult, func(i, j int) bool {
 		return lessSeries(snap.ByResult[i].Surface, snap.ByResult[i].Model, string(snap.ByResult[i].Result),
@@ -271,19 +279,12 @@ func (c *Collector) Snapshot() Snapshot {
 	sort.Slice(snap.Skipped, func(i, j int) bool {
 		return snap.Skipped[i].Reason < snap.Skipped[j].Reason
 	})
-	// Most-busted first: that is the list an operator actually reads.
-	sort.Slice(snap.TopSessions, func(i, j int) bool {
-		if snap.TopSessions[i].Busted != snap.TopSessions[j].Busted {
-			return snap.TopSessions[i].Busted > snap.TopSessions[j].Busted
+	sort.Slice(snap.NoMarker, func(i, j int) bool {
+		if snap.NoMarker[i].Surface != snap.NoMarker[j].Surface {
+			return snap.NoMarker[i].Surface < snap.NoMarker[j].Surface
 		}
-		if snap.TopSessions[i].Requests != snap.TopSessions[j].Requests {
-			return snap.TopSessions[i].Requests > snap.TopSessions[j].Requests
-		}
-		return snap.TopSessions[i].Key < snap.TopSessions[j].Key
+		return snap.NoMarker[i].Model < snap.NoMarker[j].Model
 	})
-	if len(snap.TopSessions) > maxTopSessions {
-		snap.TopSessions = snap.TopSessions[:maxTopSessions]
-	}
 
 	return snap
 }
@@ -378,6 +379,17 @@ func (s Snapshot) Prometheus() string {
 	)
 	for _, r := range s.Skipped {
 		writeSeries("sap_proxy_cache_skipped_total", [][2]string{{"reason", r.Reason}}, r.Count)
+	}
+
+	writeHeader(
+		"sap_proxy_cache_no_marker_total",
+		"Requests with a stable prefix that reported no cache activity and carried no cache_control marker at all. The client never opted into caching, so the provider had nothing to serve. Distinct from a request that sent markers and still saw no activity, which points at the provider.",
+		"counter",
+	)
+	for _, r := range s.NoMarker {
+		writeSeries("sap_proxy_cache_no_marker_total", [][2]string{
+			{"surface", r.Surface}, {"model", r.Model},
+		}, r.Count)
 	}
 
 	return b.String()

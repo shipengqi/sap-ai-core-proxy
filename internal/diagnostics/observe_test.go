@@ -1,6 +1,7 @@
 package diagnostics
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"testing"
 	"time"
@@ -84,38 +85,79 @@ func TestSessionStoreHoldsTheBound(t *testing.T) {
 	}
 }
 
-// TestAppendOnlyWindowIsBounded documents the deliberate blind spot: a rewrite
-// beyond the stored window is not detected.
-func TestAppendOnlyWindowIsBounded(t *testing.T) {
-	hashes := make([][32]byte, maxStoredMessageHashes)
+// TestAppendOnlyIsExact pins that append-only detection covers the whole
+// history rather than a capped window. The capped version missed every rewrite
+// past the window — 84% of them on a 200-message conversation — and missed
+// exactly where they are hardest to see by eye.
+func TestAppendOnlyIsExact(t *testing.T) {
+	// A conversation that already ran past any reasonable window.
+	const total = 100
+	hashes := make([][32]byte, total)
 	for i := range hashes {
-		hashes[i] = [32]byte{byte(i + 1)}
+		hashes[i] = sha256.Sum256([]byte{byte(i)})
 	}
-	prev := sessionState{msgCount: 100, msgHash: hashes}
-
-	// A long conversation that keeps growing is append-only.
-	grown := make([][32]byte, maxStoredMessageHashes+1)
-	copy(grown, hashes)
-	grown[maxStoredMessageHashes] = [32]byte{99}
-	if !isAppendOnly(prev, 101, grown) {
-		t.Error("growth beyond the stored window should still classify as append_only")
+	prev := sessionState{
+		msgCount: total,
+		fp:       fingerprints{FullChain: chainAt(hashes, total)},
 	}
 
-	// A rewrite inside the stored window is detected.
-	edited := make([][32]byte, maxStoredMessageHashes+1)
-	copy(edited, hashes)
-	edited[5] = [32]byte{42}
-	if isAppendOnly(prev, 101, edited) {
-		t.Error("an edit inside the stored window must not classify as append_only")
+	clone := func() [][32]byte {
+		out := make([][32]byte, total)
+		copy(out, hashes)
+		return out
+	}
+	if isAppendOnly(prev, total, clone()) {
+		t.Error("an identical history must not read as append-only: growth requires more messages")
 	}
 
-	// A rewrite beyond the stored window is not detected. This is the accepted
-	// trade documented on isAppendOnly; the assertion pins the behaviour so a
-	// future change has to update it deliberately.
-	deep := make([][32]byte, maxStoredMessageHashes+1)
-	copy(deep, hashes)
-	deep[maxStoredMessageHashes] = [32]byte{77}
-	if !isAppendOnly(prev, 101, deep) {
-		t.Error("a rewrite beyond the stored window is expected to be missed")
+	grown := append(clone(), [32]byte{99})
+	if !isAppendOnly(prev, total+1, grown) {
+		t.Error("a conversation that keeps growing should classify as append_only")
+	}
+
+	// An edit deep in the history, far past where a window would have stopped.
+	deep := clone()
+	deep[total-10] = [32]byte{42}
+	if isAppendOnly(prev, total+1, deep) {
+		t.Errorf("an edit at message %d must be detected, not folded into append_only", total-10)
+	}
+
+	near := clone()
+	near[3] = [32]byte{42}
+	if isAppendOnly(prev, total+1, near) {
+		t.Error("an edit near the start of the history must be detected")
+	}
+
+	if isAppendOnly(prev, 0, nil) {
+		t.Error("an empty current conversation is not growth")
+	}
+}
+
+// TestPerSessionCountersFollowTheLRUBound proves the per-conversation counters
+// are retired together with the session, which is what keeps the store bounded.
+func TestPerSessionCountersFollowTheLRUBound(t *testing.T) {
+	col := NewCollector()
+
+	first := parseRequest(body(userMsg("conversation one")), "anthropic", "m", "ip")
+	col.observe(first, usage.Tokens{CacheRead: 10}, true, "m")
+
+	stats := col.sessions.topStats(maxTopSessions)
+	if len(stats) != 1 || stats[0].Requests != 1 {
+		t.Fatalf("top stats = %+v, want one session with one request", stats)
+	}
+
+	// Push the store past its capacity so the first conversation is evicted.
+	for i := 0; i < defaultSessionCapacity+10; i++ {
+		col.observe(parseRequest(body(userMsg(fmt.Sprintf("filler %d", i))), "anthropic", "m", "ip"),
+			usage.Tokens{}, true, "m")
+	}
+
+	for _, s := range col.sessions.topStats(maxTopSessions) {
+		if s.Requests == 1 && s.Key == "" {
+			t.Errorf("evicted conversation still present: %+v", s)
+		}
+	}
+	if got := col.sessions.len(); got != defaultSessionCapacity {
+		t.Errorf("tracked sessions = %d, want the cap %d", got, defaultSessionCapacity)
 	}
 }

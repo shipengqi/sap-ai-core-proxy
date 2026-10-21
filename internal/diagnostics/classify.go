@@ -90,25 +90,27 @@ func classify(prev sessionState, known bool, cur fingerprints, curCount int, cur
 // isAppendOnly reports whether the current conversation extends the previous
 // one without editing it.
 //
-// Only the first maxStoredMessageHashes messages are compared, so a rewrite
-// deep inside a long conversation is reported as append_only. That is a
-// deliberate trade: remembering every message hash would grow without bound for
-// the conversations that matter most, and the deep-rewrite case is rare because
-// clients append history rather than edit it.
+// The comparison is exact, not windowed: the chain digest of the previous
+// request's whole history is replayed over the first prevCount messages of the
+// current request, so an edit anywhere in the retained history is detected. The
+// earlier design compared only the first 32 message hashes, which let a rewrite
+// beyond that window land in the healthy bucket — on a 200-message conversation
+// that missed 84% of rewrites, and busted is the very signal this package exists
+// to report.
+//
+// The cost is one extra pass over the current request's message hashes, which is
+// linear in a length the caller already walked. No per-session storage grows
+// with conversation length: only the chain digest is kept.
 func isAppendOnly(prev sessionState, curCount int, curHashes [][32]byte) bool {
 	if curCount <= prev.msgCount {
 		return false
 	}
-	n := len(prev.msgHash)
-	if n == 0 || n > len(curHashes) {
+	if prev.fp.FullChain == (fingerprints{}.FullChain) {
+		// The previous request carried no messages at all, so there is no history
+		// to extend.
 		return false
 	}
-	for i := 0; i < n; i++ {
-		if prev.msgHash[i] != curHashes[i] {
-			return false
-		}
-	}
-	return true
+	return chainAt(curHashes, prev.msgCount) == prev.fp.FullChain
 }
 
 // attribute crosses the classification with the cache counters the upstream

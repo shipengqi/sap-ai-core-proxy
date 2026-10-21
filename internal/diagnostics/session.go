@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"container/list"
+	"sort"
 	"sync"
 	"time"
 )
@@ -17,11 +18,18 @@ const (
 	defaultSessionTTL = 30 * time.Minute
 )
 
-// sessionState is the previous request of one conversation.
+// sessionState is the previous request of one conversation plus the counters
+// accumulated for it.
+//
+// The counters live here rather than in a parallel map on the Collector so both
+// share one bound: when the LRU evicts a conversation, its counters leave with
+// it. A separate map would have kept every session key ever seen resident for
+// the lifetime of the process.
 type sessionState struct {
 	fp       fingerprints
 	msgCount int
-	msgHash  [][32]byte
+	requests int64
+	busted   int64
 	seen     time.Time
 }
 
@@ -81,13 +89,19 @@ func (s *sessionStore) get(key string) (sessionState, bool) {
 	return entry.st, true
 }
 
-// put stores state for key, evicting the least recently used entry when full.
+// put stores state for key, accumulating the counters rather than replacing
+// them. Everything else — the fingerprints and the message count — is replaced,
+// because that is the observation the next request of the session will compare
+// against.
 func (s *sessionStore) put(key string, st sessionState) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	st.seen = s.now()
 	if el, ok := s.items[key]; ok {
+		prev := el.Value.(*sessionEntry).st
+		st.requests += prev.requests
+		st.busted += prev.busted
 		el.Value.(*sessionEntry).st = st
 		s.order.MoveToFront(el)
 		return
@@ -104,6 +118,55 @@ func (s *sessionStore) put(key string, st sessionState) {
 		s.order.Remove(oldest)
 		delete(s.items, oldest.Value.(*sessionEntry).key)
 	}
+}
+
+// countBump adds one request, and one busted result when busted, to a session.
+// It is called while the store lock is held by the caller, so it takes no lock
+// of its own.
+func (s *sessionStore) countBump(key string, busted bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	el, ok := s.items[key]
+	if !ok {
+		return
+	}
+	st := el.Value.(*sessionEntry)
+	st.st.requests++
+	if busted {
+		st.st.busted++
+	}
+}
+
+// topStats returns the conversations with the most busted results, truncated to
+// limit, most-busted first.
+func (s *sessionStore) topStats(limit int) []SessionSeries {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]SessionSeries, 0, len(s.items))
+	for _, el := range s.items {
+		st := el.Value.(*sessionEntry).st
+		out = append(out, SessionSeries{
+			Key:      el.Value.(*sessionEntry).key[:min(len(el.Value.(*sessionEntry).key), sessionKeyPrefix)],
+			Requests: st.requests,
+			Busted:   st.busted,
+		})
+	}
+
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Busted != out[j].Busted {
+			return out[i].Busted > out[j].Busted
+		}
+		if out[i].Requests != out[j].Requests {
+			return out[i].Requests > out[j].Requests
+		}
+		return out[i].Key < out[j].Key
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out
 }
 
 // len reports the number of tracked sessions. Used by tests and /stats/cache.

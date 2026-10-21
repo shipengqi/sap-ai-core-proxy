@@ -172,3 +172,93 @@ func TestCacheDiag_EditingTheFirstMessageStartsANewSession(t *testing.T) {
 		t.Errorf("messages_rewritten = %d, want 0: an edited first message is a new conversation, not a rewrite", got)
 	}
 }
+
+// TestCacheDiag_ConcurrentFirstSightIsCountedOnce is a regression guard, not a
+// reproduction. The sequence bug it guards against — classify running as
+// get/classify/put with no lock around the three — could not be triggered even
+// with 64 goroutines released from a barrier, because each store operation
+// finishes before the scheduler moves on. The assertion holds with and without
+// the lock, so it proves nothing about the lock; it would catch a far grosser
+// regression such as classification being skipped entirely.
+func TestCacheDiag_ConcurrentFirstSightIsCountedOnce(t *testing.T) {
+	proxyURL, cleanup := setupMetrics(t)
+	defer cleanup()
+
+	const n = 20
+	body := `{"model":"claude-3-5-sonnet-latest","max_tokens":16,"messages":[{"role":"user","content":"first sight under load"}]}`
+
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			resp, err := http.Post(proxyURL+"/anthropic/v1/messages", "application/json", strings.NewReader(body))
+			if err != nil {
+				return
+			}
+			_ = resp.Body.Close()
+		}()
+	}
+	wg.Wait()
+
+	stats := getCacheStats(t, proxyURL)
+	if got := stats.outcome("first_request"); got > 1 {
+		t.Errorf("first_request = %d, want at most 1: concurrent first sightings of one conversation must not double count", got)
+	}
+	var total int64
+	for _, o := range stats.ByOutcome {
+		total += o.Count
+	}
+	if total != n {
+		t.Errorf("total outcomes = %d, want %d", total, n)
+	}
+}
+
+// TestCacheDiag_DeepHistoryEditIsDetected pins the exact append-only chain: a
+// rewrite 40 messages into a 60-message conversation must not be folded into the
+// healthy bucket. The previous windowed comparison missed it, and busted is the
+// signal this feature exists to report.
+func TestCacheDiag_DeepHistoryEditIsDetected(t *testing.T) {
+	proxyURL, cleanup := setupMetrics(t)
+	defer cleanup()
+
+	msg := func(role, text string) string {
+		return `{"role":"` + role + `","content":"` + text + `"}`
+	}
+	const total = 60
+	var history []string
+	for i := 0; i < total; i++ {
+		if i%2 == 0 {
+			history = append(history, msg("user", "m"))
+		} else {
+			history = append(history, msg("assistant", "r"))
+		}
+	}
+
+	post := func(text []string) {
+		postMessages(t, proxyURL, `{"model":"claude-3-5-sonnet-latest","max_tokens":16,"messages":[`+
+			strings.Join(text, ",")+`]}`)
+	}
+	post(history)
+	post(append(append([]string{}, history...), msg("user", "next")))
+
+	// Rewrite a message deep in the history AND grow the conversation, so the
+	// message count still rises. Both are needed: without the growth the
+	// curCount <= prev.msgCount guard already rejects append-only and the deep
+	// edit path is never reached.
+	edited := append([]string{}, history...)
+	edited[40] = msg("assistant", "REWRITTEN")
+	edited = append(edited, msg("user", "next"), msg("assistant", "ack"))
+	post(edited)
+
+	stats := getCacheStats(t, proxyURL)
+	if got := stats.outcome("append_only"); got != 1 {
+		t.Errorf("append_only = %d, want 1 (the growth step)", got)
+	}
+	if got := stats.outcome("messages_rewritten"); got != 1 {
+		t.Errorf("messages_rewritten = %d, want 1: an edit at message 40 of 60 must be detected", got)
+	}
+	if got := stats.result("busted"); got != 1 {
+		t.Errorf("busted = %d, want 1", got)
+	}
+}

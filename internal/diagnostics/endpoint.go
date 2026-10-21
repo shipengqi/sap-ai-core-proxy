@@ -16,6 +16,7 @@ type statsResponse struct {
 	ByOutcome       []OutcomeSeries  `json:"by_outcome"`
 	Volatile        []VolatileSeries `json:"volatile"`
 	Skipped         []SkippedSeries  `json:"skipped"`
+	NoMarker        []NoMarkerSeries `json:"no_marker"`
 	TopSessions     []SessionSeries  `json:"top_sessions"`
 }
 
@@ -36,6 +37,9 @@ func (c *Collector) CacheStatsHandler(ctx *gin.Context) {
 	if snap.Skipped == nil {
 		snap.Skipped = []SkippedSeries{}
 	}
+	if snap.NoMarker == nil {
+		snap.NoMarker = []NoMarkerSeries{}
+	}
 	if snap.TopSessions == nil {
 		snap.TopSessions = []SessionSeries{}
 	}
@@ -48,6 +52,7 @@ func (c *Collector) CacheStatsHandler(ctx *gin.Context) {
 		ByOutcome:       snap.ByOutcome,
 		Volatile:        snap.Volatile,
 		Skipped:         snap.Skipped,
+		NoMarker:        snap.NoMarker,
 		TopSessions:     snap.TopSessions,
 	})
 }

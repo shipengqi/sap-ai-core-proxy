@@ -23,14 +23,12 @@ import (
 	"encoding/json"
 )
 
-// maxBodyBytes caps the request body this package will parse. Beyond it the
-// request is counted as skipped instead of buffered or parsed: a runaway body
-// must not cost the proxy memory for a diagnostic that nobody asked for.
+// maxBodyBytes caps the request body this package will parse and scan. Beyond
+// it the request is counted as skipped instead of analysed: an oversized body
+// costs the proxy a scan and a copy it has no way to use. It does not bound the
+// memory the request already consumed — the handler has read the whole body by
+// then — it bounds what this package adds on top.
 const maxBodyBytes = 8 << 20
-
-// maxStoredMessageHashes bounds the per-session memory used to detect
-// append-only conversation growth. See isAppendOnly for what the bound costs.
-const maxStoredMessageHashes = 32
 
 // fingerprints are the SHA-256 digests of the four regions that decide whether
 // a provider prompt cache can still hit.
@@ -39,12 +37,18 @@ const maxStoredMessageHashes = 32
 // re-encoded value. Re-encoding would make the fingerprint depend on this
 // package's marshalling choices, so an unrelated refactor could silently change
 // every hash and make all traffic look like drift.
+//
+// Prefix and FullChain are chained digests: each message hash is folded into the
+// running accumulator, so the digest of a run of messages can only be recomputed
+// by replaying them in order. That is what makes append-only detection exact
+// instead of windowed — see isAppendOnly.
 type fingerprints struct {
-	System   [32]byte
-	Tools    [32]byte
-	Prefix   [32]byte
-	LiveZone [32]byte
-	First    [32]byte
+	System    [32]byte
+	Tools     [32]byte
+	Prefix    [32]byte
+	FullChain [32]byte
+	LiveZone  [32]byte
+	First     [32]byte
 }
 
 // request is what ObserveRequest extracts from one inbound body.
@@ -99,12 +103,10 @@ func parseRequest(body []byte, surface, model, clientIP string) request {
 	req.markers = countCacheControl(shape.System) + countCacheControl(shape.Tools)
 
 	req.msgCount = len(shape.Messages)
-	req.msgHash = make([][32]byte, 0, min(len(shape.Messages), maxStoredMessageHashes))
-	for i, msg := range shape.Messages {
+	req.msgHash = make([][32]byte, 0, len(shape.Messages))
+	for _, msg := range shape.Messages {
 		h := digest(msg)
-		if i < maxStoredMessageHashes {
-			req.msgHash = append(req.msgHash, h)
-		}
+		req.msgHash = append(req.msgHash, h)
 		req.markers += countCacheControlInMessage(msg)
 	}
 
@@ -112,8 +114,9 @@ func parseRequest(body []byte, surface, model, clientIP string) request {
 		req.fp.First = req.msgHash[0]
 		req.fp.LiveZone = digest(shape.Messages[n-1])
 		if n > 1 {
-			req.fp.Prefix = digestMessages(shape.Messages[:n-1])
+			req.fp.Prefix = chainAt(req.msgHash, n-1)
 		}
+		req.fp.FullChain = chainAt(req.msgHash, n)
 	}
 
 	req.session = sessionKey(shape.Metadata.UserID, clientIP, req.fp.First)
@@ -131,20 +134,24 @@ func digest(raw json.RawMessage) [32]byte {
 	return sha256.Sum256(raw)
 }
 
-// digestMessages hashes a run of messages by chaining their individual digests,
-// so a change to any message changes the result without concatenating the
-// messages themselves.
-func digestMessages(msgs []json.RawMessage) [32]byte {
-	h := sha256.New()
-	var sum [32]byte
-	for _, m := range msgs {
-		sum = sha256.Sum256(m)
-		h.Write(sum[:])
+// chainAt folds the first upto message hashes into a running digest.
+//
+// The fold is ordered and incremental: the digest of a run is a function of
+// every message in it, in order, and cannot be reproduced without replaying
+// them. That property is what turns append-only detection from "compare the
+// part we kept" into "compare the whole history", which removes the blind spot
+// a capped hash window had.
+func chainAt(hashes [][32]byte, upto int) [32]byte {
+	var acc [32]byte = seedDigest
+	for i := 0; i < upto && i < len(hashes); i++ {
+		acc = sha256.Sum256(append(acc[:], hashes[i][:]...))
 	}
-	var out [32]byte
-	copy(out[:], h.Sum(nil))
-	return out
+	return acc
 }
+
+// seedDigest starts every chain so that an empty run does not hash to the same
+// value as a run whose first message hashed to the seed.
+var seedDigest = sha256.Sum256([]byte("sap-ai-core-proxy/chain/v1"))
 
 // prefixBytes concatenates the messages that form the cache hot zone, for the
 // volatile scan. Only those messages are scanned: the live zone is expected to
@@ -257,6 +264,7 @@ const (
 	skipNotInference   = "not_inference_surface"
 	skipNoRequestState = "no_request_state"
 	skipFailedRequest  = "failed_request"
+	skipNoObservation  = "no_observation"
 )
 
 func min(a, b int) int {

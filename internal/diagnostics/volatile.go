@@ -33,6 +33,15 @@ const volatileCap = 10
 // Plain dates are counted only where they are not part of an ISO timestamp,
 // otherwise every timestamp would also be reported as a date and inflate that
 // counter by the timestamp count.
+// volatileMatchLimit caps how many matches a pattern may return per region.
+//
+// FindAllIndex would otherwise allocate one slice entry per match, so a body
+// that is nothing but timestamps (a pasted log file) would make the allocator
+// the most expensive part of the request path for a number that is capped at
+// volatileCap anyway. The limit is deliberately several times the cap so the
+// "is this region volatile at all" answer never depends on the cutoff.
+const volatileMatchLimit = volatileCap * 4
+
 func scanVolatile(regions ...[]byte) map[string]int {
 	counts := make(map[string]int, 4)
 	for _, region := range regions {
@@ -40,12 +49,14 @@ func scanVolatile(regions ...[]byte) map[string]int {
 			continue
 		}
 
-		countCapped(counts, VolatileTimestamp, isoTimestampRe.FindAllIndex(region, volatileCap))
-		countCapped(counts, VolatileUUID, uuidV4Re.FindAllIndex(region, volatileCap))
-		countCapped(counts, VolatileLongHex, longHexRe.FindAllIndex(region, volatileCap))
+		countCapped(counts, VolatileTimestamp, isoTimestampRe.FindAllIndex(region, volatileMatchLimit))
+		countCapped(counts, VolatileUUID, uuidV4Re.FindAllIndex(region, volatileMatchLimit))
+		countCapped(counts, VolatileLongHex, longHexRe.FindAllIndex(region, volatileMatchLimit))
 
-		timestamps := isoTimestampRe.FindAllIndex(region, -1)
-		for _, idx := range plainDateRe.FindAllIndex(region, -1) {
+		// The timestamp matcher runs once more with the same limit, so the
+		// "skip dates inside timestamps" pass costs the same as any other scan.
+		timestamps := isoTimestampRe.FindAllIndex(region, volatileMatchLimit)
+		for _, idx := range plainDateRe.FindAllIndex(region, volatileMatchLimit) {
 			if counts[VolatileDate] >= volatileCap {
 				break
 			}

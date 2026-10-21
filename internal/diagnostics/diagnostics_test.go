@@ -37,6 +37,9 @@ func TestParseRequestFingerprintsAreStable(t *testing.T) {
 	if a.msgCount != 2 || len(a.msgHash) != 2 {
 		t.Errorf("msgCount=%d msgHash=%d, want 2/2", a.msgCount, len(a.msgHash))
 	}
+	if a.fp.FullChain == (fingerprints{}.FullChain) {
+		t.Error("FullChain was not set for a body with messages")
+	}
 }
 
 func TestParseRequestSystemChangeKeepsPrefix(t *testing.T) {
@@ -93,8 +96,21 @@ func TestCountCacheControl(t *testing.T) {
 }
 
 func TestClassifyLadder(t *testing.T) {
-	base := fingerprints{System: [32]byte{1}, Tools: [32]byte{2}, Prefix: [32]byte{3}, LiveZone: [32]byte{4}}
-	prev := sessionState{fp: base, msgCount: 2, msgHash: [][32]byte{{7}, {8}}}
+	// The previous request carried exactly these two messages, so its history
+	// chain is the fold of both. The appended case must replay the same first two
+	// hashes to be recognised as growth rather than as a rewrite.
+	prevHashes := [][32]byte{{7}, {8}}
+	base := fingerprints{
+		System:    [32]byte{1},
+		Tools:     [32]byte{2},
+		Prefix:    [32]byte{3},
+		LiveZone:  [32]byte{4},
+		FullChain: chainAt(prevHashes, len(prevHashes)),
+	}
+	prev := sessionState{fp: base, msgCount: len(prevHashes)}
+	appended := func(extra [32]byte) [][32]byte {
+		return append(append([][32]byte{}, prevHashes...), extra)
+	}
 
 	changed := func(mutate func(*fingerprints)) fingerprints {
 		f := base
@@ -111,27 +127,27 @@ func TestClassifyLadder(t *testing.T) {
 		hash  [][32]byte
 		want  Outcome
 	}{
-		{"unknown session", false, sessionState{}, base, 2, prev.msgHash, OutcomeFirstRequest},
-		{"nothing changed", true, prev, base, 2, prev.msgHash, OutcomeIdentical},
+		{"unknown session", false, sessionState{}, base, 2, nil, OutcomeFirstRequest},
+		{"nothing changed", true, prev, base, 2, prevHashes, OutcomeIdentical},
 		{
 			"system changed", true, prev,
 			changed(func(f *fingerprints) { f.System = [32]byte{9} }),
-			2, prev.msgHash, OutcomeSystemChanged,
+			2, prevHashes, OutcomeSystemChanged,
 		},
 		{
 			"tools changed", true, prev,
 			changed(func(f *fingerprints) { f.Tools = [32]byte{9} }),
-			2, prev.msgHash, OutcomeToolsChanged,
+			2, prevHashes, OutcomeToolsChanged,
 		},
 		{
 			"live zone only", true, prev,
 			changed(func(f *fingerprints) { f.LiveZone = [32]byte{9} }),
-			2, prev.msgHash, OutcomeLiveZoneOnly,
+			2, prevHashes, OutcomeLiveZoneOnly,
 		},
 		{
 			"appended", true, prev,
 			changed(func(f *fingerprints) { f.Prefix = [32]byte{9} }),
-			4, [][32]byte{{7}, {8}, {10}, {11}}, OutcomeAppendOnly,
+			4, appended([32]byte{10}), OutcomeAppendOnly,
 		},
 		{
 			"rewritten", true, prev,
@@ -314,19 +330,75 @@ func TestCollectorRendersPrometheusAndEscapesLabels(t *testing.T) {
 	}
 }
 
-func TestCollectorSnapshotOrdersSessionsByBusted(t *testing.T) {
+// TestCollectorCountsSessionsThroughObserve covers the path the middleware
+// actually takes: the counters ride on the session store, so they are only
+// maintained by observe(). Add() alone records the aggregates.
+func TestCollectorCountsSessionsThroughObserve(t *testing.T) {
 	col := NewCollector()
-	col.Add(entry{surface: "anthropic", model: "m", session: "aaaaaaaaaaaaaaaa", outcome: OutcomeAppendOnly, result: ResultHit})
-	col.Add(entry{surface: "anthropic", model: "m", session: "bbbbbbbbbbbbbbbb", outcome: OutcomeSystemChanged, result: ResultBusted})
+
+	steady := parseRequest(body(userMsg("steady conversation")), "anthropic", "m", "ip")
+	// First sight, then a repeat so the second one is classified against the
+	// first rather than being first_request itself.
+	col.observe(steady, usage.Tokens{CacheRead: 10}, true, "m")
+	col.observe(steady, usage.Tokens{CacheRead: 10}, true, "m")
+
+	drifted := parseRequest(
+		[]byte(`{"system":"changed","messages":[`+userMsg("steady conversation")+`]}`),
+		"anthropic", "m", "ip",
+	)
+	col.observe(drifted, usage.Tokens{CacheRead: 10}, true, "m")
 
 	snap := col.Snapshot()
-	if len(snap.TopSessions) != 2 {
-		t.Fatalf("top sessions = %d, want 2", len(snap.TopSessions))
+	if len(snap.TopSessions) != 1 {
+		t.Fatalf("top sessions = %d, want 1", len(snap.TopSessions))
 	}
-	if snap.TopSessions[0].Busted != 1 {
-		t.Errorf("first session should be the busted one, got %+v", snap.TopSessions[0])
+	if got := snap.TopSessions[0].Requests; got != 3 {
+		t.Errorf("session requests = %d, want 3", got)
+	}
+	if got := snap.TopSessions[0].Busted; got != 1 {
+		t.Errorf("session busted = %d, want 1", got)
 	}
 	if len(snap.TopSessions[0].Key) != sessionKeyPrefix {
 		t.Errorf("session key was not truncated: %q", snap.TopSessions[0].Key)
+	}
+}
+
+// TestNoMarkerSeparatesOptingOutFromBeingIgnored is the disambiguation the
+// marker count exists for: a client that never sent cache_control and a client
+// whose markers the provider ignored both show a zero cache read, but only one
+// of them can be fixed.
+func TestNoMarkerSeparatesOptingOutFromBeingIgnored(t *testing.T) {
+	col := NewCollector()
+
+	// No marker at all: the client never opted in. The first sight of a session
+	// is first_request, so three requests give two attributable ones.
+	col.observe(parseRequest(body(userMsg("one")), "anthropic", "m", "ip"), usage.Tokens{}, true, "m")
+	col.observe(parseRequest(body(userMsg("one")), "anthropic", "m", "ip"), usage.Tokens{}, true, "m")
+	col.observe(parseRequest(body(userMsg("one")), "anthropic", "m", "ip"), usage.Tokens{}, true, "m")
+
+	// Markers present, still no cache activity: that points at the provider.
+	withMarkers := []byte(`{"system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],` +
+		`"messages":[` + userMsg("one") + `]}`)
+	col.observe(parseRequest(withMarkers, "anthropic", "m", "ip"), usage.Tokens{}, true, "m")
+	col.observe(parseRequest(withMarkers, "anthropic", "m", "ip"), usage.Tokens{}, true, "m")
+	col.observe(parseRequest(withMarkers, "anthropic", "m", "ip"), usage.Tokens{}, true, "m")
+
+	snap := col.Snapshot()
+	var noMarker int64
+	for _, r := range snap.NoMarker {
+		noMarker += r.Count
+	}
+	if noMarker != 2 {
+		t.Errorf("no_marker = %d, want 2 (only the requests that never sent a marker)", noMarker)
+	}
+
+	var noCache int64
+	for _, r := range snap.ByResult {
+		if r.Result == ResultNoCache {
+			noCache += r.Count
+		}
+	}
+	if noCache != 4 {
+		t.Errorf("no_cache = %d, want 4 (both causes still land there for the raw count)", noCache)
 	}
 }
