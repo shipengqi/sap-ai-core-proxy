@@ -32,3 +32,6 @@ coverage/
 reference_*.ts
 token.txt
 requests/
+
+# WorkBuddy workspace metadata
+.workbuddy-ai/
