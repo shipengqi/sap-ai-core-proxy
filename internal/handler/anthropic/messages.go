@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
@@ -67,6 +68,23 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 	if err != nil {
 		c.JSON(http.StatusNotFound, errorBody(err.Error()))
 		return
+	}
+
+	// Live-zone compression runs once, before the body builder, so a retry
+	// rebuilds the same bytes instead of compressing twice. Only the last user
+	// message can change: everything before it is the cache prefix, which costs
+	// 1.25x to rewrite and would cost more than the tokens saved.
+	if compress.Enabled() {
+		var report compress.Report
+		raw, report = compress.CompressLiveZone(raw)
+		compress.Observe(usage.SurfaceAnthropic, report)
+		if report.BlocksCompressed > 0 {
+			slog.Debug("compressed live zone", "model", modelName,
+				"blocks", report.BlocksCompressed,
+				"bytes_before", report.OriginalBytes,
+				"bytes_after", report.CompressedBytes,
+				"strategy", report.Strategy)
+		}
 	}
 
 	// Build request body with thinking parameter handling

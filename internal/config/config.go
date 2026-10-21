@@ -24,6 +24,13 @@ type Server struct {
 	// to true: token accounting is the point of P0, and the endpoints expose no
 	// request content — only counters.
 	Metrics bool `json:"metrics"`
+	// CompressLogs enables live-zone log compression: the tool output in the
+	// last user message is shrunk before the request goes upstream.
+	//
+	// It defaults to false on purpose. The saving only materialises when the
+	// text really is a log, and a wrong guess changes what the model sees, so
+	// it stays opt-in until the measurements say otherwise.
+	CompressLogs bool `json:"compress_logs"`
 }
 
 type Config struct {
@@ -84,6 +91,20 @@ func overrideFromEnv(cfg *Config) {
 	if v := os.Getenv("METRICS_ENABLED"); v != "" {
 		cfg.Server.Metrics = parseBool(v, cfg.Server.Metrics)
 	}
+	if v := os.Getenv("COMPRESS_LOGS"); v != "" {
+		cfg.Server.CompressLogs = parseBool(v, cfg.Server.CompressLogs)
+	}
+}
+
+// CompressSkipStrategies returns the strategies the escape valve turns off, from
+// COMPRESS_LOGS_SKIP (comma separated). An empty env var means nothing is
+// skipped, which is the default.
+func CompressSkipStrategies() []string {
+	v := os.Getenv("COMPRESS_LOGS_SKIP")
+	if v == "" {
+		return nil
+	}
+	return strings.Split(v, ",")
 }
 
 // parseBool accepts the usual truthy/falsy spellings. Unrecognised values keep

@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/anthropic"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/gemini"
@@ -92,17 +93,21 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 		// Token accounting for the one-week measurement window. Both endpoints
 		// serve counters only, never request or response content.
 		//
-		// /metrics stays a single endpoint: two packages own families, so the
-		// payload is the concatenation of both. Splitting it would force every
-		// scraper to know about two targets.
+		// /metrics stays a single endpoint: three packages own families now
+		// (usage, diagnostics, compress), so the payload is the concatenation of
+		// all three. Splitting it would force every scraper to know about three
+		// targets.
 		r.GET("/metrics", func(c *gin.Context) {
-			body := collector.Snapshot().Prometheus() + diag.MetricsText()
+			body := collector.Snapshot().Prometheus() + diag.MetricsText() + compress.MetricsText()
 			c.Data(http.StatusOK, metricsContentType, []byte(body))
 		})
 		r.GET("/stats", collector.StatsHandler)
 		// Cache attribution answers a different question than /stats: not how
 		// many tokens were cached, but why a request was not served from cache.
 		r.GET("/stats/cache", diag.CacheStatsHandler)
+		// Compression answers a third question: how many bytes of tool output
+		// were removed before the request went upstream.
+		r.GET("/stats/compress", compress.StatsHandler)
 	}
 
 	if debug {

@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/config"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/router"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
@@ -24,6 +25,10 @@ func main() {
 	if cfg.Server.LogLevel != "debug" {
 		gin.SetMode(gin.ReleaseMode)
 	}
+
+	// The kill switch is global: when it is off, the compression path is never
+	// entered, not even to count.
+	compress.Configure(cfg.Server.CompressLogs, config.CompressSkipStrategies())
 
 	auth := sapclient.NewAuthManager(cfg.SAPAICore.TokenURL, cfg.SAPAICore.ClientID, cfg.SAPAICore.ClientSecret)
 	client := sapclient.NewClient(cfg.SAPAICore.BaseURL, cfg.SAPAICore.ResourceGroup, auth)
