@@ -162,46 +162,17 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 		return
 	}
 
-	// Snapshot the client's own cache markers before any transformation runs:
-	// when the client already controls the cache breakpoints, the proxy must not
-	// add one of its own.
 	clientProvidedCacheControl := transform.HasCacheControl(raw)
 	bedrockBody, markerResult := openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
+
+	// Counted once per request, from the first build: the thinking retries below
+	// rebuild the same body and would otherwise inflate the counter. The model
+	// label is the resolved deployment model name so it joins /stats by_model.
 	if markerResult != "" {
-		// Reported once per request; the rebuild paths below reuse this value.
 		diagnostics.ObserveAutoMarker(usage.SurfaceOpenAI, dep.EffectiveModelName(), markerResult)
 	}
 
 	if streaming {
-		// Auto-detect thinking support before streaming if needed
-		if _, hasEffort := raw["reasoning_effort"]; hasEffort && !IsThinkingUnsupported(dep.ID) {
-			slog.Info("probing thinking support before streaming", "model", modelStr, "deployment_id", dep.ID)
-
-			// Build minimal probe request (same body as actual request)
-			probeResp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
-			if err != nil {
-				c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-				return
-			}
-			probeBody, _ := io.ReadAll(probeResp.Body)
-			_ = probeResp.Body.Close()
-
-			// Check if thinking is unsupported
-			if probeResp.StatusCode == http.StatusBadRequest && IsAdaptiveThinkingError(probeBody) {
-				slog.Info("detected thinking not supported, caching result", "deployment_id", dep.ID)
-				MarkThinkingUnsupported(dep.ID)
-
-				// Rebuild body without thinking
-				bedrockBody, _ = openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
-			} else if probeResp.StatusCode != http.StatusOK {
-				// Probe failed for other reasons, return error
-				c.Data(probeResp.StatusCode, "application/json", probeBody)
-				return
-			}
-			// Probe succeeded (200 OK), thinking is supported - proceed with streaming
-		}
-
 		slog.Info("calling anthropic model via openai surface", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
 		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
 			dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(bedrockBody), nil)
@@ -209,6 +180,31 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+
+		// Avoid a hidden full non-streaming generation as a capability probe. If
+		// the stream endpoint rejects adaptive thinking before emitting SSE, retry
+		// the same endpoint once without thinking instead.
+		_, sentEffort := raw["reasoning_effort"]
+		if upstream.StatusCode == http.StatusBadRequest && sentEffort && !IsThinkingUnsupported(dep.ID) {
+			errBody, _ := io.ReadAll(upstream.Body)
+			_ = upstream.Body.Close()
+			if IsAdaptiveThinkingError(errBody) {
+				MarkThinkingUnsupported(dep.ID)
+				// Retry only: the auto-marker outcome was already counted above.
+				bedrockBody, _ = openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
+				upstream, err = h.client.DoStreaming(c.Request.Context(), http.MethodPost,
+					dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(bedrockBody), nil)
+				if err != nil {
+					c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+					return
+				}
+			} else {
+				usage.MarkUpstreamStatus(c, http.StatusBadRequest)
+				c.Data(http.StatusBadRequest, "application/json", errBody)
+				return
+			}
+		}
+
 		// Recorded before c.Status(200) locks the client-visible status.
 		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		// Surface upstream failures as real HTTP errors. Once the SSE headers are
@@ -245,7 +241,8 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 
 		MarkThinkingUnsupported(dep.ID)
 
-		// Retry with thinking disabled (cache will skip thinking now)
+		// Retry with thinking disabled (cache will skip thinking now). The
+		// auto-marker outcome was already counted from the first build.
 		bedrockBody, _ = openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
 		resp, err = h.client.Do(c.Request.Context(), http.MethodPost,
 			dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
@@ -336,9 +333,9 @@ var reasoningBudgets = map[string]int{
 }
 
 // openAIToBedrockBody converts an OpenAI chat request to SAP AI Core Bedrock format.
-// The second return value is the auto cache-marker outcome for this build, or ""
-// when the feature is off; callers report it once per request, not per rebuild.
-func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string, anthropicAutoCache, clientProvidedCacheControl bool) ([]byte, string) {
+// It also returns the auto cache-marker outcome for the caller to count once per
+// request, since this function runs again on every thinking retry.
+func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string, anthropicAutoCache bool, clientProvidedCacheControl bool) ([]byte, string) {
 	filtered := make(map[string]json.RawMessage)
 	for k, v := range raw {
 		if transform.BedrockAllowedFields[k] {

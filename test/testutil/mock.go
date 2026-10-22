@@ -352,9 +352,20 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 
 		var reqBody map[string]json.RawMessage
 		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		_, hasThinking := reqBody["thinking"]
 		m.mu.Lock()
 		m.LastInvokeStreamBody = reqBody
+		m.LastThinkingParam = hasThinking
 		m.mu.Unlock()
+
+		if m.RejectThinking && hasThinking {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message": "adaptive thinking is not supported on this model",
+			})
+			return
+		}
 
 		if m.StreamingErrorStatus != 0 {
 			w.Header().Set("Content-Type", "application/json")
