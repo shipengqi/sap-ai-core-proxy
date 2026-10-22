@@ -434,14 +434,15 @@ func TestQA_StatusLabelIsEffectiveStatus(t *testing.T) {
 // successes, and only an end-to-end test can see it.
 func TestQA_F1_StreamFailureAcrossSurfaces(t *testing.T) {
 	tests := []struct {
-		name        string
-		path        string
-		request     string
-		setup       func(*qaUpstream)
-		wantSurface string
-		wantModel   string
-		wantStatus  int
-		wantBody    string
+		name             string
+		path             string
+		request          string
+		setup            func(*qaUpstream)
+		wantSurface      string
+		wantModel        string
+		wantStatus       int
+		wantClientStatus int
+		wantBody         string
 	}{
 		{
 			name:    "anthropic",
@@ -464,10 +465,11 @@ func TestQA_F1_StreamFailureAcrossSurfaces(t *testing.T) {
 				u.chatStreamStatus = http.StatusTooManyRequests
 				u.chatStream = []byte(`{"error":{"message":"slow down","type":"rate_limit"}}`)
 			},
-			wantSurface: "openai",
-			wantModel:   "gpt-4o",
-			wantStatus:  http.StatusTooManyRequests,
-			wantBody:    `{"error":{"message":"slow down","type":"rate_limit"}}` + "\n",
+			wantSurface:      "openai",
+			wantModel:        "gpt-4o",
+			wantStatus:       http.StatusTooManyRequests,
+			wantClientStatus: http.StatusTooManyRequests,
+			wantBody:         `{"error":{"message":"slow down","type":"rate_limit"}}`,
 		},
 		{
 			name:    "gemini",
@@ -525,8 +527,12 @@ func TestQA_F1_StreamFailureAcrossSurfaces(t *testing.T) {
 			defer proxy.Close()
 
 			status, body := qaPost(t, proxy.URL+tc.path, tc.request)
-			if status != http.StatusOK {
-				t.Fatalf("client status = %d, want the unchanged 200: %s", status, body)
+			wantClientStatus := tc.wantClientStatus
+			if wantClientStatus == 0 {
+				wantClientStatus = http.StatusOK
+			}
+			if status != wantClientStatus {
+				t.Fatalf("client status = %d, want %d: %s", status, wantClientStatus, body)
 			}
 			if string(body) != tc.wantBody {
 				t.Errorf("client body = %q, want %q", body, tc.wantBody)

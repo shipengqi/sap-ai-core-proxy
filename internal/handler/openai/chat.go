@@ -97,8 +97,23 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
-		// Recorded before c.Status(200) locks the client-visible status.
+		// SAP can reject a streaming request before emitting any SSE bytes (for
+		// example, 429 token-rate limiting). Preserve that HTTP error instead of
+		// turning it into a misleading 200 empty stream that clients report as
+		// "user cancelled".
+		usage.MarkStream(c)
 		usage.MarkUpstreamStatus(c, upstream.StatusCode)
+		if upstream.StatusCode < http.StatusOK || upstream.StatusCode >= http.StatusMultipleChoices {
+			defer func() { _ = upstream.Body.Close() }()
+			copyUpstreamErrorHeaders(c, upstream)
+			errBody, _ := io.ReadAll(upstream.Body)
+			contentType := upstream.Header.Get("Content-Type")
+			if contentType == "" {
+				contentType = "application/json"
+			}
+			c.Data(upstream.StatusCode, contentType, errBody)
+			return
+		}
 		c.Status(http.StatusOK)
 		stream.PipeOpenAI(c, upstream)
 		return
@@ -126,6 +141,14 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	// Observation only: respBody is forwarded unchanged.
 	usage.ObserveJSONBody(c, respBody)
 	c.Data(status, "application/json", respBody)
+}
+
+func copyUpstreamErrorHeaders(c *gin.Context, upstream *http.Response) {
+	for _, name := range []string{"Retry-After", "RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Request-Id", "X-Request-Id"} {
+		for _, value := range upstream.Header.Values(name) {
+			c.Writer.Header().Add(name, value)
+		}
+	}
 }
 
 // chatCompletionsAnthropic handles Claude models via Bedrock /invoke (non-streaming)
