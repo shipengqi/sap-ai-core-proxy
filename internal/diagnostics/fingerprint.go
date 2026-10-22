@@ -225,7 +225,7 @@ func digest(raw json.RawMessage) [32]byte {
 // part we kept" into "compare the whole history", which removes the blind spot
 // a capped hash window had.
 func chainAt(hashes [][32]byte, upto int) [32]byte {
-	var acc [32]byte = seedDigest
+	var acc = seedDigest
 	for i := 0; i < upto && i < len(hashes); i++ {
 		acc = sha256.Sum256(append(acc[:], hashes[i][:]...))
 	}

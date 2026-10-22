@@ -579,7 +579,7 @@ func TestQA_UninstrumentedMetricIsExposed(t *testing.T) {
 
 	text := qaGetMetrics(t, proxy.URL)
 	samples := qaParseMetrics(t, text)
-	want := fmt.Sprintf(`sap_proxy_uninstrumented_total{surface="anthropic",model="anthropic--claude-3.5-sonnet"} 0`)
+	want := `sap_proxy_uninstrumented_total{surface="anthropic",model="anthropic--claude-3.5-sonnet"} 0`
 	if !strings.Contains(text, want) {
 		t.Errorf("/metrics is missing %q\n%s", want, text)
 	}

@@ -40,24 +40,6 @@ type divergenceKey struct {
 	where string
 }
 
-type outcomeSeries struct {
-	key     modelKey
-	outcome Outcome
-	count   int64
-}
-
-type resultSeries struct {
-	key    modelKey
-	result Result
-	count  int64
-}
-
-type sessionStat struct {
-	key      string
-	requests int64
-	busted   int64
-}
-
 // Collector aggregates cache attribution for the lifetime of the process.
 type Collector struct {
 	mu       sync.Mutex
@@ -339,9 +321,6 @@ func lessSeries(as, am, al, bs, bm, bl string) bool {
 	}
 	return al < bl
 }
-
-// metricsContentType is the Prometheus text exposition format.
-const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
 
 // divergenceMetricName is the family that splits messages_rewritten by where the
 // prefix moved. It exists because the outcome alone cannot be acted on: a tail

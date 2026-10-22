@@ -80,7 +80,7 @@ func render(base string, s stats.Snapshot, logs *LogBuffer, width, height int) s
 		b.WriteString("  " + dim + "No requests recorded yet" + reset + "\n")
 	}
 	for _, x := range s.Stats.BySurface {
-		b.WriteString(fmt.Sprintf("  %-14s %8s requests   %8s failures   %s\n", x.Surface, format.HumanCount(x.Requests), format.HumanCount(x.Failures), format.Percent(x.CacheHitRatio)))
+		fmt.Fprintf(&b, "  %-14s %8s requests   %8s failures   %s\n", x.Surface, format.HumanCount(x.Requests), format.HumanCount(x.Failures), format.Percent(x.CacheHitRatio))
 	}
 	b.WriteString(renderCompression(s))
 	b.WriteString("\n  " + bold + white + "QUALITY SIGNALS" + reset + "\n" + fmt.Sprintf("  %s  %s  %s\n", badge("MISSING USAGE", s.Stats.Totals.UsageMissing, yellow), badge("UNINSTRUMENTED", s.Stats.Totals.Uninstrumented, yellow), badge("CAPTURE DROPPED", s.Stats.Totals.UsageCaptureDropped, yellow)))
@@ -142,9 +142,9 @@ func renderCompression(s stats.Snapshot) string {
 		saved = 0
 	}
 	reduction := float64(saved) / float64(before)
-	b.WriteString(fmt.Sprintf("  Before %s   After %s   Saved %s   Reduction %s\n",
-		format.HumanBytes(before), format.HumanBytes(after), green+format.HumanBytes(saved)+reset, green+format.Percent(reduction)+reset))
-	b.WriteString(fmt.Sprintf("  Blocks compressed %s   skipped %s\n", format.HumanCount(compressed), format.HumanCount(skipped)))
+	fmt.Fprintf(&b, "  Before %s   After %s   Saved %s   Reduction %s\n",
+		format.HumanBytes(before), format.HumanBytes(after), green+format.HumanBytes(saved)+reset, green+format.Percent(reduction)+reset)
+	fmt.Fprintf(&b, "  Blocks compressed %s   skipped %s\n", format.HumanCount(compressed), format.HumanCount(skipped))
 	return b.String()
 }
 

@@ -71,16 +71,6 @@ func splitLines(text string) []line {
 	return lines
 }
 
-// joinLines is the inverse of splitLines.
-func joinLines(lines []line) string {
-	var b strings.Builder
-	for _, l := range lines {
-		b.WriteString(l.text)
-		b.WriteString(l.term)
-	}
-	return b.String()
-}
-
 // lineKind is what a line is, which decides whether it survives.
 type lineKind int
 
