@@ -17,6 +17,7 @@ type statsResponse struct {
 	Volatile        []VolatileSeries   `json:"volatile"`
 	Skipped         []SkippedSeries    `json:"skipped"`
 	NoMarker        []NoMarkerSeries   `json:"no_marker"`
+	Divergence      []DivergenceSeries `json:"divergence"`
 	AutoMarker      []AutoMarkerSeries `json:"auto_marker"`
 	TopSessions     []SessionSeries    `json:"top_sessions"`
 }
@@ -41,6 +42,12 @@ func (c *Collector) CacheStatsHandler(ctx *gin.Context) {
 	if snap.NoMarker == nil {
 		snap.NoMarker = []NoMarkerSeries{}
 	}
+	// An empty divergence list must marshal as [] rather than null, exactly like
+	// the other lists: a consumer that iterates the field blindly is the normal
+	// case, and a null would make it a special case.
+	if snap.Divergence == nil {
+		snap.Divergence = []DivergenceSeries{}
+	}
 	// The auto-marker counters live in their own process-wide collector: they
 	// describe a transformation the proxy applied, not a property of the cache
 	// fingerprint, so they are merged in here rather than folded into Snapshot.
@@ -61,6 +68,7 @@ func (c *Collector) CacheStatsHandler(ctx *gin.Context) {
 		Volatile:        snap.Volatile,
 		Skipped:         snap.Skipped,
 		NoMarker:        snap.NoMarker,
+		Divergence:      snap.Divergence,
 		AutoMarker:      autoMarker,
 		TopSessions:     snap.TopSessions,
 	})

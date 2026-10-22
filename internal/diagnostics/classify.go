@@ -58,6 +58,56 @@ const (
 	ResultNoUsage = Result("no_usage")
 )
 
+// Where a rewrite landed, as the value of the `where` label. Values are
+// Prometheus label values, so they must stay stable.
+const (
+	// DivergenceTail means the previous request's last message is the only one
+	// that changed: the client re-sent or edited its final turn before
+	// continuing. The whole cacheable prefix before it is still intact.
+	DivergenceTail = "tail"
+	// DivergenceHistory means the divergence is older than the previous
+	// request's last message, so a message inside the retained history changed.
+	// On a real session that is thinking-block stripping, a system-reminder
+	// injected into history, or a compaction rewriting earlier turns — the
+	// expensive case, because the provider has to recompute everything after
+	// the edited message.
+	DivergenceHistory = "history"
+)
+
+// divergenceWhere locates a rewrite inside the retained history.
+//
+// It answers the question classify() cannot: "messages_rewritten" says the
+// prefix moved, not where it moved. Two causes dominate in practice and they
+// need opposite fixes, so they are counted apart.
+//
+// The whole computation reuses state that is already stored: prev.fp.Prefix is
+// the chain digest of the previous request's first msgCount-1 messages, so
+// replaying the current hashes over the same run tells us whether the previous
+// last message is still the last message of that run. No per-message hash is
+// retained, so the memory cost stays O(1) per conversation regardless of how
+// long the conversation is.
+//
+// An empty result means "not classified": the caller only asks after a
+// messages_rewritten outcome, and a conversation with fewer than two messages
+// has no prefix to compare against (parseRequest leaves Prefix at its zero
+// value in that case, so a comparison would be meaningless rather than merely
+// imprecise).
+func divergenceWhere(prev sessionState, curCount int, curHashes [][32]byte) string {
+	if prev.msgCount < 2 {
+		return ""
+	}
+	// A current request shorter than the compared run cannot reproduce it, so it
+	// cannot be a tail-only rewrite; folding a truncated run would compare a
+	// different question and could only match by accident.
+	if curCount < prev.msgCount-1 {
+		return DivergenceHistory
+	}
+	if chainAt(curHashes, prev.msgCount-1) == prev.fp.Prefix {
+		return DivergenceTail
+	}
+	return DivergenceHistory
+}
+
 // classify compares the current fingerprints with the previous request of the
 // same conversation.
 //

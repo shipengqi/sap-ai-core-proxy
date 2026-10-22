@@ -18,9 +18,12 @@
 package diagnostics
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 )
 
 // maxBodyBytes caps the request body this package will parse and scan. Beyond
@@ -121,7 +124,87 @@ func parseRequest(body []byte, surface, model, clientIP string) request {
 
 	req.session = sessionKey(shape.Metadata.UserID, clientIP, req.fp.First)
 	req.volatile = scanVolatile(shape.System, shape.Tools, prefixBytes(shape.Messages))
+
+	// One-off, debug-only pinpointing aid. The aggregate counters say a rewrite
+	// happened; they cannot say which message moved. Two consecutive requests of
+	// one session, diffed by eye on these lines, show exactly that.
+	logMessageHashes(req.session, req.msgHash, shape.Messages)
+
 	return req
+}
+
+// hashPrefixHexLen is how many hex characters of a message digest the debug log
+// prints. Eight is 32 bits: enough to tell two messages apart by eye, short
+// enough that the line stays readable on a 200-message conversation.
+const hashPrefixHexLen = 8
+
+// roleUnknown labels a message whose role could not be read. It is a label
+// value, so it must stay stable.
+const roleUnknown = "unknown"
+
+// formatMessageHashes renders the per-message digests as `<index>:<role>:<hash>`.
+//
+// The format is fixed and deliberately narrow. It carries an index, a role and
+// eight hex characters of a SHA-256 digest — never a byte of message content,
+// system content or tool definition. That is the whole point: this line is meant
+// to be diffed across requests of one conversation, and it must be safe to keep
+// in a log a support engineer can read.
+//
+// roles may be shorter than hashes (or nil); the missing entries are reported as
+// roleUnknown rather than skipped, so the index of every message stays visible.
+func formatMessageHashes(hashes [][32]byte, roles []string) []string {
+	out := make([]string, 0, len(hashes))
+	for i, h := range hashes {
+		role := roleUnknown
+		if i < len(roles) && roles[i] != "" {
+			role = roles[i]
+		}
+		sum := hex.EncodeToString(h[:])
+		out = append(out, fmt.Sprintf("%d:%s:%s", i, role, sum[:hashPrefixHexLen]))
+	}
+	return out
+}
+
+// messageRole extracts the role of one raw message. Only the role field is
+// decoded, and the value is passed through untouched: it is a protocol field the
+// provider itself parses, not free-form text.
+func messageRole(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return roleUnknown
+	}
+	var msg struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return roleUnknown
+	}
+	if msg.Role == "" {
+		return roleUnknown
+	}
+	return msg.Role
+}
+
+// logMessageHashes emits the per-message digest line, but only when debug
+// logging is on.
+//
+// The level check comes first on purpose: with debug off — the default in
+// production — this costs one atomic load and allocates nothing, so the
+// observation stays free for a gateway that never turns it on.
+func logMessageHashes(session string, hashes [][32]byte, messages []json.RawMessage) {
+	if !slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		return
+	}
+	roles := make([]string, len(hashes))
+	for i := range hashes {
+		if i < len(messages) {
+			roles[i] = messageRole(messages[i])
+		}
+	}
+	slog.Debug("cache message hashes",
+		"session", session,
+		"count", len(hashes),
+		"messages", formatMessageHashes(hashes, roles),
+	)
 }
 
 // digest returns the SHA-256 of raw, or the zero value when raw is empty. The

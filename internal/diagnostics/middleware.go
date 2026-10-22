@@ -112,10 +112,19 @@ func Middleware(col *Collector) gin.HandlerFunc {
 // mutex on a path that already allocates.
 func (c *Collector) observe(req request, tokens usage.Tokens, hasUsage bool, model string) {
 	var outcome Outcome
+	var divergence string
 
 	c.mu.Lock()
 	prev, known := c.sessions.get(req.session)
 	outcome = classify(prev, known, req.fp, req.msgCount, req.msgHash)
+	// The divergence split is only meaningful for a rewrite: for every other
+	// outcome the prefix either did not move or grew without being edited, so
+	// there is nothing to locate. Computing it here, while prev is still in hand,
+	// is what keeps the classification O(1) in memory — prev.fp.Prefix is the
+	// only history this needs.
+	if outcome == OutcomeMessagesRewritten {
+		divergence = divergenceWhere(prev, req.msgCount, req.msgHash)
+	}
 	c.sessions.put(req.session, sessionState{
 		fp:       req.fp,
 		msgCount: req.msgCount,
@@ -128,12 +137,13 @@ func (c *Collector) observe(req request, tokens usage.Tokens, hasUsage bool, mod
 	c.sessions.countBump(req.session, result == ResultBusted)
 
 	c.Add(entry{
-		surface:  req.surface,
-		model:    model,
-		session:  req.session,
-		outcome:  outcome,
-		result:   result,
-		volatile: req.volatile,
-		markers:  req.markers,
+		surface:    req.surface,
+		model:      model,
+		session:    req.session,
+		outcome:    outcome,
+		result:     result,
+		volatile:   req.volatile,
+		markers:    req.markers,
+		divergence: divergence,
 	})
 }
