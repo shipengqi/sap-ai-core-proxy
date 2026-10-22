@@ -66,6 +66,7 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 		av1.GET("/models", an.ListModels)
 		av1.HEAD("/models", func(c *gin.Context) { c.Status(200) })
 		av1.POST("/messages", an.Messages)
+		av1.POST("/messages/count_tokens", an.CountTokens)
 	}
 	// Claude Code connectivity probe: HEAD {ANTHROPIC_BASE_URL}
 	r.HEAD("/anthropic", func(c *gin.Context) { c.Status(200) })

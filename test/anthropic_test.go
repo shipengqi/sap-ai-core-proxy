@@ -208,6 +208,36 @@ func TestAnthropic_LatestAliases(t *testing.T) {
 	}
 }
 
+func TestAnthropic_CountTokensClaudeCodeEndpoint(t *testing.T) {
+	mock := testutil.NewMockSAPServer(t)
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start mock proxy: %v", err)
+	}
+	defer proxy.Close()
+	defer mock.Close()
+
+	body := `{"model":"claude-sonnet-4-6[1m]","system":[{"type":"text","text":"You are Claude Code"}],"messages":[{"role":"user","content":"hello world"}],"tools":[{"name":"read","description":"Read a file","input_schema":{"type":"object"}}]}`
+	resp, err := http.Post(proxy.URL+"/anthropic/v1/messages/count_tokens", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /anthropic/v1/messages/count_tokens: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		got, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, got)
+	}
+	var result struct {
+		InputTokens int `json:"input_tokens"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if result.InputTokens <= 0 {
+		t.Fatalf("input_tokens = %d, want positive estimate", result.InputTokens)
+	}
+}
+
 func TestAnthropic_SystemPromotion(t *testing.T) {
 	proxyURL, cleanup := setupAnthropic(t)
 	defer cleanup()
