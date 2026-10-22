@@ -1,12 +1,19 @@
 package test
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"math"
 	"net/http"
 	"strings"
 	"testing"
+
+	collectorv1 "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	commonv1 "go.opentelemetry.io/proto/otlp/common/v1"
+	metricsv1 "go.opentelemetry.io/proto/otlp/metrics/v1"
+	resourcev1 "go.opentelemetry.io/proto/otlp/resource/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/shipengqi/sap-ai-core-proxy/test/testutil"
 )
@@ -83,21 +90,75 @@ func getStats(t *testing.T, proxyURL string) metricsStats {
 }
 
 func getMetrics(t *testing.T, proxyURL string) string {
+	return getMetricsAt(t, proxyURL, "/metrics")
+}
+
+func getMetricsAt(t *testing.T, proxyURL, path string) string {
 	t.Helper()
-	resp, err := http.Get(proxyURL + "/metrics")
+	resp, err := http.Get(proxyURL + path)
 	if err != nil {
-		t.Fatalf("GET /metrics: %v", err)
+		t.Fatalf("GET %s: %v", path, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("GET /metrics: expected 200, got %d", resp.StatusCode)
+		t.Fatalf("GET %s: expected 200, got %d", path, resp.StatusCode)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read /metrics: %v", err)
+		t.Fatalf("read %s: %v", path, err)
 	}
 	return string(body)
+}
+
+// TestMetrics_OTLPReceiver accepts a standard OTLP HTTP/protobuf metrics export
+// and acknowledges it without mixing arbitrary agent telemetry into /metrics.
+func TestMetrics_OTLPReceiver(t *testing.T) {
+	proxyURL, cleanup := setupMetrics(t)
+	defer cleanup()
+
+	request := &collectorv1.ExportMetricsServiceRequest{ResourceMetrics: []*metricsv1.ResourceMetrics{{
+		Resource: &resourcev1.Resource{Attributes: []*commonv1.KeyValue{{
+			Key: "service.name", Value: &commonv1.AnyValue{Value: &commonv1.AnyValue_StringValue{StringValue: "claude-code"}},
+		}}},
+		ScopeMetrics: []*metricsv1.ScopeMetrics{{Metrics: []*metricsv1.Metric{{
+			Name: "claude.tokens", Description: "Tokens exported by Claude Code",
+			Data: &metricsv1.Metric_Sum{Sum: &metricsv1.Sum{
+				AggregationTemporality: metricsv1.AggregationTemporality_AGGREGATION_TEMPORALITY_CUMULATIVE,
+				IsMonotonic:            true,
+				DataPoints:             []*metricsv1.NumberDataPoint{{Value: &metricsv1.NumberDataPoint_AsInt{AsInt: 42}}},
+			}},
+		}}}},
+	}}}
+	body, err := proto.Marshal(request)
+	if err != nil {
+		t.Fatalf("marshal OTLP request: %v", err)
+	}
+	resp, err := http.Post(proxyURL+"/otel/v1/metrics", "application/x-protobuf", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST OTLP metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("POST OTLP metrics: expected 200, got %d", resp.StatusCode)
+	}
+	if got := getMetrics(t, proxyURL); strings.Contains(got, "claude_tokens") || strings.Contains(got, "claude-code") {
+		t.Errorf("/metrics must not expose discarded OTLP telemetry\n%s", got)
+	}
+}
+
+func TestMetrics_OTLPReceiverRejectsGET(t *testing.T) {
+	proxyURL, cleanup := setupMetrics(t)
+	defer cleanup()
+
+	resp, err := http.Get(proxyURL + "/otel/v1/metrics")
+	if err != nil {
+		t.Fatalf("GET OTLP metrics: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /otel/v1/metrics status = %d, want 404", resp.StatusCode)
+	}
 }
 
 // TestMetrics_AnthropicUsageAccounting drives the native Anthropic surface both

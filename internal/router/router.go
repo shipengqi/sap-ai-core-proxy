@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	collectorv1 "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
@@ -24,7 +26,7 @@ const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
 
 // New creates and returns a configured *gin.Engine with all routes registered.
 // When debug is true, diagnostic endpoints are registered. When metrics is true,
-// the /metrics and /stats usage endpoints are registered.
+// the /metrics and /stats usage endpoints plus the OTLP POST receiver are registered.
 func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, debug, metrics, anthropicAutoCache bool) *gin.Engine {
 	r := gin.New()
 	r.Use(middleware.Logger())
@@ -94,14 +96,36 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 		// Token accounting for the one-week measurement window. Both endpoints
 		// serve counters only, never request or response content.
 		//
-		// /metrics stays a single endpoint: three packages own families now
-		// (usage, diagnostics, compress), so the payload is the concatenation of
-		// all three. Splitting it would force every scraper to know about three
-		// targets.
-		r.GET("/metrics", func(c *gin.Context) {
-			body := collector.Snapshot().Prometheus() + diag.MetricsText() + compress.MetricsText() +
-				diagnostics.AutoMarkerMetricsText()
+		// /metrics exposes proxy-owned metric families only. OTLP exports from
+		// clients are accepted separately at POST /otel/v1/metrics and discarded:
+		// mixing arbitrary agent telemetry into this registry would create label
+		// cardinality, privacy, and semantic-collision problems.
+		metricsHandler := func(c *gin.Context) {
+			body := collector.Snapshot().Prometheus() + diag.MetricsText() + compress.MetricsText() + diagnostics.AutoMarkerMetricsText()
 			c.Data(http.StatusOK, metricsContentType, []byte(body))
+		}
+		r.GET("/metrics", metricsHandler)
+		r.POST("/otel/v1/metrics", func(c *gin.Context) {
+			if !strings.HasPrefix(c.GetHeader("Content-Type"), "application/x-protobuf") {
+				c.Status(http.StatusUnsupportedMediaType)
+				return
+			}
+			body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 4<<20))
+			if err != nil {
+				c.Status(http.StatusRequestEntityTooLarge)
+				return
+			}
+			request := new(collectorv1.ExportMetricsServiceRequest)
+			if err := proto.Unmarshal(body, request); err != nil {
+				c.Status(http.StatusBadRequest)
+				return
+			}
+			// A successfully decoded OTLP export is intentionally acknowledged but
+			// not stored. This endpoint is a compatibility sink for any agent that
+			// targets this proxy; only proxy-owned observations belong in /metrics.
+			_ = request
+			c.Header("Content-Type", "application/x-protobuf")
+			c.Status(http.StatusOK)
 		})
 		r.GET("/stats", collector.StatsHandler)
 		// Cache attribution answers a different question than /stats: not how
