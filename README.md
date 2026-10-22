@@ -76,9 +76,9 @@ The proxy starts on `http://localhost:3001` (default).
 | `sap_ai_core.resource_group` | No | `"default"` | SAP AI Core resource group |
 | `server.port` | No | `3001` | Listen port |
 | `server.log_level` | No | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
-| `server.metrics` | No | `true` | Register `GET /metrics` and `GET /stats` |
+| `server.metrics` | No | `true` | Register `GET /metrics`, `GET /stats`, and the OTLP receiver `POST /otel/v1/metrics` |
 | `server.compress_logs` | No | `false` | Deterministically compress every recognisable `tool_result` log in the request, history included. The transform is a pure function of the input text, so a rewritten history is byte-identical from turn to turn and the prompt cache keeps hitting; the model therefore sees compressed history logs in long sessions. Leave disabled unless validated |
-| `server.anthropic_auto_cache` | No | `false` | Add `{"type":"ephemeral"}` to the last tool sent to Claude Bedrock, but only when the client set no `cache_control` anywhere in its request |
+| `server.anthropic_auto_cache` | No | `false` | Add `{"type":"ephemeral"}` cache control to the final tool sent to Claude Bedrock only when the client provided no `cache_control` anywhere in its request |
 
 ### Environment Variable Overrides
 
@@ -96,8 +96,8 @@ All config values can be overridden by environment variables (higher priority th
 | `LOG_LEVEL` | `server.log_level` |
 | `METRICS_ENABLED` | `server.metrics` |
 | `COMPRESS_LOGS` | `server.compress_logs` |
-| `COMPRESS_LOGS_SKIP` | Compression skip strategies (comma-separated, for example `log,json`) |
 | `ANTHROPIC_AUTO_CACHE` | `server.anthropic_auto_cache` |
+| `COMPRESS_LOGS_SKIP` | Compression skip strategies (comma-separated, for example `log,json`) |
 
 ## API Endpoints
 
@@ -138,12 +138,15 @@ All config values can be overridden by environment variables (higher priority th
 
 ### Usage Metrics
 
-Token accounting is on by default; set `server.metrics: false` (or `METRICS_ENABLED=false`) to stop registering these routes.
+Token accounting is on by default; set `server.metrics: false` (or `METRICS_ENABLED=false`) to stop registering these routes. The OTLP endpoint is an acknowledge-only compatibility sink for clients such as agent CLIs: it does not forward telemetry to SAP AI Core or mix arbitrary client metrics and labels into the proxy's Prometheus registry.
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/stats` | JSON: totals, per-surface and per-model tokens, cache hit ratio |
 | GET | `/metrics` | Prometheus text exposition (hand-written, no extra dependency) |
+| POST | `/otel/v1/metrics` | Standard OTLP/HTTP Protobuf compatibility sink; validates and acknowledges client telemetry without storing or exposing it |
+| GET | `/stats/cache` | Cache attribution: hit/rewrite/no-cache/no-usage, drift, volatile patterns, and tracked sessions |
+| GET | `/stats/compress` | Compression block counts, before/after bytes, and skip reasons |
 
 Three things to know before reading the numbers:
 
@@ -348,12 +351,49 @@ sudo systemctl restart aicoreproxy    # restart
 sudo journalctl -u aicoreproxy -f     # tail logs
 ```
 
+## Terminal Dashboard
+
+The repository includes a read-only terminal dashboard in the same Go module. `make run` starts the Gin proxy and dashboard together by default:
+
+```bash
+make run
+```
+
+The dashboard starts in the same process as the proxy and refreshes metrics automatically. To run only the proxy, disable it explicitly:
+
+```bash
+make run WITH_TUI=0
+# or run the binary directly:
+./aicoreproxy -no-tui
+# equivalent target:
+make server
+```
+
+To run the dashboard against an already-running proxy:
+
+```bash
+make tui
+# or
+go run ./cmd/aicore-tui --url http://localhost:3001 --interval 5s
+```
+
+The dashboard polls `/stats`, `/stats/cache`, and `/stats/compress`, and shows request totals, failures, token/cache counters, cache hit ratio, per-surface totals, compression counters, and endpoint health. It defaults to `http://localhost:3001`; `--plain` prints one snapshot and exits, which is useful for scripts:
+
+```bash
+go run ./cmd/aicore-tui --plain
+```
+
+When launched through `make run` or `./aicoreproxy` in an interactive terminal, the dashboard and proxy run together in one process. The dashboard is automatically skipped when stdout is redirected or captured (for example by WorkBuddy, systemd, Docker, or another process), preventing ANSI terminal control sequences from corrupting the caller's output. The `-no-tui` flag disables the dashboard explicitly. The standalone `make tui` target remains available for connecting to an already-running proxy.
+
 ## Makefile Targets
 
 | Target | Description |
 |---|---|
 | `make build` | Build the binary (`./aicoreproxy`) |
-| `make run` | Run with `go run ./...` |
+| `make run` | Run the Gin proxy and TUI together (default) |
+| `make run WITH_TUI=0` | Run only the Gin proxy |
+| `make server` | Run only the Gin proxy |
+| `make tui` | Run the read-only terminal dashboard against an existing proxy |
 | `make test` | Run unit tests |
 | `make test.integration` | Run integration tests (mock mode if no env vars set) |
 | `make vet` | Run `go vet` |
@@ -367,8 +407,15 @@ sudo journalctl -u aicoreproxy -f     # tail logs
 ```
 sap-ai-core-proxy/
 ├── main.go                          # Server startup, config wiring
+├── cmd/aicore-tui/                   # Read-only terminal dashboard
+│   ├── main.go
+│   ├── stats/                        # Observation endpoint client
+│   └── format/                       # Pure display formatting helpers
 ├── internal/
 │   ├── config/config.go             # Load ~/.aicoreproxy/config.json + env overrides
+│   ├── usage/                       # Token accounting, /stats and Prometheus metrics
+│   ├── diagnostics/                 # Cache attribution and /stats/cache
+│   ├── compress/                    # Deterministic tool_result log compression and /stats/compress
 │   ├── sapclient/
 │   │   ├── auth.go                  # OAuth2 client-credentials + singleflight token cache
 │   │   ├── client.go                # Signed HTTP client (injects Bearer + AI-Resource-Group)
