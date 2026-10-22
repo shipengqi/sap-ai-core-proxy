@@ -6,6 +6,7 @@ import (
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/stats"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/version"
 )
 
 func TestWrapLogLinesPreservesCompleteRecord(t *testing.T) {
@@ -40,6 +41,20 @@ func TestFormatLogRecordMakesUpstreamErrorReadable(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Errorf("formatted log missing %q: %s", want, joined)
 		}
+	}
+}
+
+// TestRenderShowsBuildVersion keeps the header honest: whoever reads these
+// numbers must be able to tell which build produced them, including when the
+// panel is showing OFFLINE.
+func TestRenderShowsBuildVersion(t *testing.T) {
+	out := render("http://localhost:3001", stats.Snapshot{}, nil, 120, 40)
+	want := "SAP AI CORE PROXY" + reset + "  " + dim + version.Get().Version
+	if !strings.Contains(out, want) {
+		t.Fatalf("header missing build version %q:\n%s", version.Get().Version, out)
+	}
+	if !strings.Contains(out, version.Get().Version+"  /  OBSERVABILITY") {
+		t.Fatalf("version must sit between the title and the section label:\n%s", out)
 	}
 }
 
@@ -103,7 +118,7 @@ func TestWrappedDiagnosticRowsPreserveLevel(t *testing.T) {
 }
 
 func TestFormatLogRecordHidesDashboardPolling(t *testing.T) {
-	for _, path := range []string{"/health", "/stats", "/stats/cache", "/stats/compress"} {
+	for _, path := range []string{"/health", "/version", "/stats", "/stats/cache", "/stats/compress"} {
 		line := `{"level":"INFO","msg":"request","method":"GET","path":"` + path + `","status":200}`
 		if got, visible := formatLogRecord(line); visible || got != nil {
 			t.Fatalf("poll %s should be hidden, got %q", path, got)

@@ -23,6 +23,9 @@ builds:
         goarch: arm64
     ldflags:
       - -s -w
+      - -X github.com/shipengqi/sap-ai-core-proxy/internal/version.version={{ .Version }}
+      - -X github.com/shipengqi/sap-ai-core-proxy/internal/version.commit={{ .ShortCommit }}
+      - -X github.com/shipengqi/sap-ai-core-proxy/internal/version.buildDate={{ .Date }}
 
 archives:
   - formats: [tar.gz]

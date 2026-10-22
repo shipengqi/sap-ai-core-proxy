@@ -9,6 +9,7 @@ import (
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/format"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/stats"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/version"
 )
 
 const (
@@ -67,7 +68,11 @@ func render(base string, s stats.Snapshot, logs *LogBuffer, width, height int) s
 	} else if !s.OK() {
 		status, statusColor = "DEGRADED", yellow
 	}
-	b.WriteString("\n  " + bold + white + "SAP AI CORE PROXY" + reset + "  " + dim + "/  OBSERVABILITY" + reset + "\n")
+	// The version is read in-process rather than polled from GET /version: this
+	// dashboard shares a process with the server it describes, so the build
+	// identity is known before the first poll and stays visible even when the
+	// proxy is OFFLINE.
+	b.WriteString("\n  " + bold + white + "SAP AI CORE PROXY" + reset + "  " + dim + version.Get().Version + "  /  OBSERVABILITY" + reset + "\n")
 	b.WriteString("  " + dim + base + reset + "                                      " + statusColor + "● " + status + reset + "\n\n")
 	if width >= 72 {
 		b.WriteString(cardRow(card("REQUESTS", format.HumanCount(s.Stats.Totals.Requests), "total requests", cyan), card("FAILURES", format.HumanCount(s.Stats.Totals.Failures), "upstream failures", sColor(s.Stats.Totals.Failures)), card("CACHE HIT RATE", format.Percent(s.Stats.Totals.CacheHitRatio), "prompt cache", green)))

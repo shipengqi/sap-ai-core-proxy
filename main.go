@@ -16,11 +16,23 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/config"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/router"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/version"
 )
 
 func main() {
 	noTUI := flag.Bool("no-tui", false, "run only the Gin server")
+	showVersion := flag.Bool("version", false, "print version information and exit")
 	flag.Parse()
+
+	// -version is answered before the terminal probe and, more importantly,
+	// before config.Load. This flag is most useful on a host that has no
+	// config.json yet — a fresh install or a container health check — and
+	// loading config there would exit non-zero instead of printing the version.
+	if *showVersion {
+		fmt.Println(version.String())
+		return
+	}
+
 	interactiveTUI := !*noTUI && tui.Interactive()
 	var logBuffer *tui.LogBuffer
 	if interactiveTUI {
@@ -49,7 +61,10 @@ func main() {
 	r := router.New(client, deployments, cfg.Server.LogLevel == "debug", cfg.Server.Metrics, cfg.Server.AnthropicAutoCache)
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
-	slog.Info("server starting", "addr", addr)
+	// The version belongs in the first log line: matching a behaviour report to
+	// a release usually starts by reading the logs of a machine nobody can log
+	// into interactively.
+	slog.Info("server starting", "addr", addr, "version", version.Get().Version)
 	if interactiveTUI {
 		go tui.Run(context.Background(), "http://localhost"+addr, 2*time.Second, logBuffer)
 	}

@@ -23,6 +23,13 @@ cd sap-ai-core-proxy
 make build
 ```
 
+Confirm what you built. The version is stamped from `VERSION`, the git commit, and the build timestamp, and it does not require a config file:
+
+```bash
+./aicoreproxy -version
+# sap-ai-core-proxy 1.2.0 (commit 445d1d2, built 2026-10-22T03:10:12Z, go1.26.0 darwin/arm64)
+```
+
 ### 2. Configure
 
 Copy the example config and fill in your credentials:
@@ -135,6 +142,17 @@ All config values can be overridden by environment variables (higher priority th
 | POST | `/litellm/v1/chat/completions` | Chat via SAP Orchestration |
 | POST | `/litellm/v1/completions` | Completions via SAP Orchestration |
 | POST | `/litellm/v1/embeddings` | Embeddings (direct deployment) |
+
+### Service Endpoints
+
+Always registered, regardless of `server.metrics`.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/health` | Liveness probe: `{"status":"ok","service":"sap-ai-core-proxy"}` |
+| GET | `/version` | Build identity: version, commit, build date, Go version, platform |
+
+`/version` exists because the release image is distroless — no shell, no files to read — so it is the only way to ask a running instance which build it is. Both routes are GETs, so they never reach the usage counters.
 
 ### Usage Metrics
 
@@ -377,7 +395,7 @@ make tui
 go run ./cmd/aicore-tui --url http://localhost:3001 --interval 5s
 ```
 
-The dashboard polls `/stats`, `/stats/cache`, and `/stats/compress`, and shows request totals, failures, token/cache counters, cache hit ratio, per-surface totals, compression counters, and endpoint health. It defaults to `http://localhost:3001`; `--plain` prints one snapshot and exits, which is useful for scripts:
+The dashboard polls `/stats`, `/stats/cache`, `/stats/compress`, and `/version`, and shows request totals, failures, token/cache counters, cache hit ratio, per-surface totals, compression counters, and endpoint health. The build version sits in the header: the in-process dashboard reads it directly, while `make tui` fetches it from the remote instance and prints `unknown` when that proxy predates the route. It defaults to `http://localhost:3001`; `--plain` prints one snapshot and exits, which is useful for scripts:
 
 ```bash
 go run ./cmd/aicore-tui --plain
@@ -402,6 +420,8 @@ When launched through `make run` or `./aicoreproxy` in an interactive terminal, 
 | `make docker.build` | Build Docker image (set `TAG=` to override) |
 | `make clean` | Remove build artifacts |
 
+`make build` and `make docker.build` both stamp the build identity from `VERSION`, the current git commit, and the build timestamp. Override `VERSION=`, `COMMIT=`, or `BUILD_DATE=` to reproduce a specific build.
+
 ## Project Structure
 
 ```
@@ -413,6 +433,7 @@ sap-ai-core-proxy/
 │   └── format/                       # Pure display formatting helpers
 ├── internal/
 │   ├── config/config.go             # Load ~/.aicoreproxy/config.json + env overrides
+│   ├── version/version.go           # Build identity for -version, /version and both dashboards
 │   ├── usage/                       # Token accounting, /stats and Prometheus metrics
 │   ├── diagnostics/                 # Cache attribution and /stats/cache
 │   ├── compress/                    # Deterministic tool_result log compression and /stats/compress

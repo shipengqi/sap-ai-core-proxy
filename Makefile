@@ -7,11 +7,26 @@ INSTALL_BIN  := /usr/local/bin/aicoreproxy
 INSTALL_CFG  := /etc/aicoreproxy
 SERVICE_FILE := /etc/systemd/system/aicoreproxy.service
 
+# Build identity, stamped into internal/version so that `aicoreproxy -version`,
+# GET /version, the dashboards and the startup log all report the same thing as
+# the tag that was released. VERSION is the file the bump-version workflow
+# writes; COMMIT and BUILD_DATE describe the tree the binary came from, which is
+# what actually distinguishes two builds of the same version.
+MODULE     := github.com/shipengqi/sap-ai-core-proxy
+VERSION    ?= $(shell cat VERSION 2>/dev/null || echo dev)
+COMMIT     ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
+BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+LDFLAGS := -s -w \
+	-X $(MODULE)/internal/version.version=$(VERSION) \
+	-X $(MODULE)/internal/version.commit=$(COMMIT) \
+	-X $(MODULE)/internal/version.buildDate=$(BUILD_DATE)
+
 help: ## Show this help
 	@grep -E '^[a-zA-Z_.]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-22s\033[0m %s\n", $$1, $$2}'
 
 build: ## Build the binary
-	go build -o aicoreproxy .
+	go build -ldflags "$(LDFLAGS)" -o aicoreproxy .
 
 run: ## Run proxy and TUI (use WITH_TUI=0 for proxy only)
 	go run . $(if $(filter 0,$(WITH_TUI)),-no-tui,)
@@ -36,7 +51,7 @@ lint: ## Run golangci-lint
 
 docker.build: ## Build Docker images for ghcr.io and Alibaba Cloud ACR (usage: make docker.build TAG=v1.0.0)
 	$(eval ARCH := $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/'))
-	go build -o sap-ai-core-proxy .
+	go build -ldflags "$(LDFLAGS)" -o sap-ai-core-proxy .
 	docker build --platform linux/$(ARCH) \
 		-t ghcr.io/shipengqi/sap-ai-core-proxy:$(or $(TAG),dev)-$(ARCH) \
 		-t registry.cn-hangzhou.aliyuncs.com/myaii/sap-ai-core-proxy:$(or $(TAG),dev)-$(ARCH) \
