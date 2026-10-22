@@ -139,7 +139,15 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 		return
 	}
 
-	bedrockBody := openAIToBedrockBody(raw, dep.ID)
+	// Snapshot the client's own cache markers before any transformation runs:
+	// when the client already controls the cache breakpoints, the proxy must not
+	// add one of its own.
+	clientProvidedCacheControl := transform.HasCacheControl(raw)
+	bedrockBody, markerResult := openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
+	if markerResult != "" {
+		// Reported once per request; the rebuild paths below reuse this value.
+		diagnostics.ObserveAutoMarker(usage.SurfaceOpenAI, dep.EffectiveModelName(), markerResult)
+	}
 
 	if streaming {
 		// Auto-detect thinking support before streaming if needed
@@ -162,7 +170,7 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 				MarkThinkingUnsupported(dep.ID)
 
 				// Rebuild body without thinking
-				bedrockBody = openAIToBedrockBody(raw, dep.ID)
+				bedrockBody, _ = openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
 			} else if probeResp.StatusCode != http.StatusOK {
 				// Probe failed for other reasons, return error
 				c.Data(probeResp.StatusCode, "application/json", probeBody)
@@ -215,7 +223,7 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 		MarkThinkingUnsupported(dep.ID)
 
 		// Retry with thinking disabled (cache will skip thinking now)
-		bedrockBody = openAIToBedrockBody(raw, dep.ID)
+		bedrockBody, _ = openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
 		resp, err = h.client.Do(c.Request.Context(), http.MethodPost,
 			dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
 		if err != nil {
@@ -305,7 +313,9 @@ var reasoningBudgets = map[string]int{
 }
 
 // openAIToBedrockBody converts an OpenAI chat request to SAP AI Core Bedrock format.
-func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string) []byte {
+// The second return value is the auto cache-marker outcome for this build, or ""
+// when the feature is off; callers report it once per request, not per rebuild.
+func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string, anthropicAutoCache, clientProvidedCacheControl bool) ([]byte, string) {
 	filtered := make(map[string]json.RawMessage)
 	for k, v := range raw {
 		if transform.BedrockAllowedFields[k] {
@@ -374,9 +384,10 @@ func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string) []
 	filtered = transform.PromoteSystemMessages(filtered)
 	filtered = transform.ConvertImagePartsToAnthropic(filtered)
 	filtered = transform.FlattenSystem(filtered)
+	_, markerResult := transform.ApplyAnthropicToolCacheMarker(filtered, anthropicAutoCache, clientProvidedCacheControl)
 
 	out, _ := json.Marshal(filtered)
-	return out
+	return out, markerResult
 }
 
 // bedrockToOpenAIResponse converts a Bedrock /invoke response to OpenAI chat completion format.

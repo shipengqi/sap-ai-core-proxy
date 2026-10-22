@@ -9,15 +9,16 @@ import (
 // statsResponse is the JSON body of GET /stats/cache. It is declared explicitly
 // so the wire shape stays stable when the internal snapshot grows.
 type statsResponse struct {
-	Since           string           `json:"since"`
-	UptimeSeconds   float64          `json:"uptime_seconds"`
-	TrackedSessions int              `json:"tracked_sessions"`
-	ByResult        []ResultSeries   `json:"by_result"`
-	ByOutcome       []OutcomeSeries  `json:"by_outcome"`
-	Volatile        []VolatileSeries `json:"volatile"`
-	Skipped         []SkippedSeries  `json:"skipped"`
-	NoMarker        []NoMarkerSeries `json:"no_marker"`
-	TopSessions     []SessionSeries  `json:"top_sessions"`
+	Since           string             `json:"since"`
+	UptimeSeconds   float64            `json:"uptime_seconds"`
+	TrackedSessions int                `json:"tracked_sessions"`
+	ByResult        []ResultSeries     `json:"by_result"`
+	ByOutcome       []OutcomeSeries    `json:"by_outcome"`
+	Volatile        []VolatileSeries   `json:"volatile"`
+	Skipped         []SkippedSeries    `json:"skipped"`
+	NoMarker        []NoMarkerSeries   `json:"no_marker"`
+	AutoMarker      []AutoMarkerSeries `json:"auto_marker"`
+	TopSessions     []SessionSeries    `json:"top_sessions"`
 }
 
 // CacheStatsHandler serves GET /stats/cache.
@@ -40,6 +41,13 @@ func (c *Collector) CacheStatsHandler(ctx *gin.Context) {
 	if snap.NoMarker == nil {
 		snap.NoMarker = []NoMarkerSeries{}
 	}
+	// The auto-marker counters live in their own process-wide collector: they
+	// describe a transformation the proxy applied, not a property of the cache
+	// fingerprint, so they are merged in here rather than folded into Snapshot.
+	autoMarker := AutoMarkerSnapshot()
+	if autoMarker == nil {
+		autoMarker = []AutoMarkerSeries{}
+	}
 	if snap.TopSessions == nil {
 		snap.TopSessions = []SessionSeries{}
 	}
@@ -53,6 +61,7 @@ func (c *Collector) CacheStatsHandler(ctx *gin.Context) {
 		Volatile:        snap.Volatile,
 		Skipped:         snap.Skipped,
 		NoMarker:        snap.NoMarker,
+		AutoMarker:      autoMarker,
 		TopSessions:     snap.TopSessions,
 	})
 }

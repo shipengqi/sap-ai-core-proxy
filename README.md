@@ -45,7 +45,8 @@ Edit `~/.aicoreproxy/config.json`:
   },
   "server": {
     "port": 3001,
-    "log_level": "info"
+    "log_level": "info",
+    "anthropic_auto_cache": false
   }
 }
 ```
@@ -76,6 +77,7 @@ The proxy starts on `http://localhost:3001` (default).
 | `server.port` | No | `3001` | Listen port |
 | `server.log_level` | No | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
 | `server.metrics` | No | `true` | Register `GET /metrics` and `GET /stats` |
+| `server.anthropic_auto_cache` | No | `false` | Add `{"type":"ephemeral"}` to the last tool sent to Claude Bedrock, but only when the client set no `cache_control` anywhere in its request |
 
 ### Environment Variable Overrides
 
@@ -92,6 +94,7 @@ All config values can be overridden by environment variables (higher priority th
 | `PORT` | `server.port` |
 | `LOG_LEVEL` | `server.log_level` |
 | `METRICS_ENABLED` | `server.metrics` |
+| `ANTHROPIC_AUTO_CACHE` | `server.anthropic_auto_cache` |
 
 ## API Endpoints
 

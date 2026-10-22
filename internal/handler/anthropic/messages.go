@@ -63,12 +63,21 @@ func (h *Handler) Messages(c *gin.Context) {
 
 // messagesBedrock handles Claude models via SAP AI Core Bedrock /invoke endpoints.
 func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[string]json.RawMessage, streaming bool) {
+	// Snapshot the client's own cache markers before any transformation runs.
+	// When the client already controls the cache breakpoints, the proxy must not
+	// add one of its own.
+	clientProvidedCacheControl := transform.HasCacheControl(raw)
+
 	// Get deployment first for thinking cache check
 	dep, err := h.deployments.GetDeployment(c.Request.Context(), modelName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, errorBody(err.Error()))
 		return
 	}
+
+	// The auto marker is reported once per request rather than once per body
+	// build: the thinking retry path rebuilds the body and would double count.
+	markerRecorded := false
 
 	// Live-zone compression runs once, before the body builder, so a retry
 	// rebuilds the same bytes instead of compressing twice. Only the last user
@@ -120,6 +129,11 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 		filtered = transform.PromoteSystemMessages(filtered)
 		filtered = transform.ConvertImagePartsToAnthropic(filtered)
 		filtered = transform.FlattenSystem(filtered)
+		_, markerResult := transform.ApplyAnthropicToolCacheMarker(filtered, h.anthropicAutoCache, clientProvidedCacheControl)
+		if !markerRecorded && markerResult != "" {
+			markerRecorded = true
+			diagnostics.ObserveAutoMarker(usage.SurfaceAnthropic, dep.EffectiveModelName(), markerResult)
+		}
 
 		return json.Marshal(filtered)
 	}

@@ -296,7 +296,7 @@ func newQAProxy(upstreamURL string, metrics bool) (*httptest.Server, error) {
 	auth := sapclient.NewAuthManager(upstreamURL, "qa-client", "qa-secret")
 	client := sapclient.NewClient(upstreamURL, "qa-group", auth)
 	deployments := sapclient.NewDeploymentManager(client)
-	return httptest.NewServer(router.New(client, deployments, false, metrics)), nil
+	return httptest.NewServer(router.New(client, deployments, false, metrics, false)), nil
 }
 
 // qaStatsDoc mirrors the JSON shape of GET /stats.

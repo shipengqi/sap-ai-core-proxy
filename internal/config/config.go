@@ -31,6 +31,9 @@ type Server struct {
 	// text really is a log, and a wrong guess changes what the model sees, so
 	// it stays opt-in until the measurements say otherwise.
 	CompressLogs bool `json:"compress_logs"`
+	// AnthropicAutoCache adds an ephemeral cache marker to the final tool sent to
+	// Claude Bedrock deployments when the client did not set cache_control.
+	AnthropicAutoCache bool `json:"anthropic_auto_cache"`
 }
 
 type Config struct {
@@ -93,6 +96,9 @@ func overrideFromEnv(cfg *Config) {
 	}
 	if v := os.Getenv("COMPRESS_LOGS"); v != "" {
 		cfg.Server.CompressLogs = parseBool(v, cfg.Server.CompressLogs)
+	}
+	if v := os.Getenv("ANTHROPIC_AUTO_CACHE"); v != "" {
+		cfg.Server.AnthropicAutoCache = parseBool(v, cfg.Server.AnthropicAutoCache)
 	}
 }
 

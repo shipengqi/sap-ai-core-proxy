@@ -25,7 +25,7 @@ const metricsContentType = "text/plain; version=0.0.4; charset=utf-8"
 // New creates and returns a configured *gin.Engine with all routes registered.
 // When debug is true, diagnostic endpoints are registered. When metrics is true,
 // the /metrics and /stats usage endpoints are registered.
-func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, debug, metrics bool) *gin.Engine {
+func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, debug, metrics, anthropicAutoCache bool) *gin.Engine {
 	r := gin.New()
 	r.Use(middleware.Logger())
 	r.Use(middleware.CORS())
@@ -42,8 +42,8 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 	r.Use(diagnostics.Middleware(diag))
 	r.Use(usage.Middleware(collector))
 
-	oa := openaihandler.NewHandler(client, deployments)
-	an := anthropic.NewHandler(client, deployments)
+	oa := openaihandler.NewHandler(client, deployments, anthropicAutoCache)
+	an := anthropic.NewHandler(client, deployments, anthropicAutoCache)
 	ge := gemini.NewHandler(client, deployments)
 	ll := litellm.NewHandler(client, deployments)
 
@@ -98,7 +98,8 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 		// all three. Splitting it would force every scraper to know about three
 		// targets.
 		r.GET("/metrics", func(c *gin.Context) {
-			body := collector.Snapshot().Prometheus() + diag.MetricsText() + compress.MetricsText()
+			body := collector.Snapshot().Prometheus() + diag.MetricsText() + compress.MetricsText() +
+				diagnostics.AutoMarkerMetricsText()
 			c.Data(http.StatusOK, metricsContentType, []byte(body))
 		})
 		r.GET("/stats", collector.StatsHandler)
