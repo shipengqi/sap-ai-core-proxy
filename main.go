@@ -1,9 +1,14 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
+
+	"github.com/shipengqi/sap-ai-core-proxy/internal/tui"
 
 	"github.com/gin-gonic/gin"
 
@@ -14,13 +19,20 @@ import (
 )
 
 func main() {
+	noTUI := flag.Bool("no-tui", false, "run only the Gin server")
+	flag.Parse()
+	interactiveTUI := !*noTUI && tui.Interactive()
+	var logBuffer *tui.LogBuffer
+	if interactiveTUI {
+		logBuffer = tui.NewLogBuffer(500)
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "config error: %v\n", err)
 		os.Exit(1)
 	}
 
-	setupLogger(cfg.Server.LogLevel)
+	setupLogger(cfg.Server.LogLevel, logBuffer)
 
 	if cfg.Server.LogLevel != "debug" {
 		gin.SetMode(gin.ReleaseMode)
@@ -38,13 +50,16 @@ func main() {
 
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	slog.Info("server starting", "addr", addr)
+	if interactiveTUI {
+		go tui.Run(context.Background(), "http://localhost"+addr, 2*time.Second, logBuffer)
+	}
 	if err := r.Run(addr); err != nil {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
 }
 
-func setupLogger(level string) {
+func setupLogger(level string, output *tui.LogBuffer) {
 	var l slog.Level
 	switch level {
 	case "debug":
@@ -56,5 +71,10 @@ func setupLogger(level string) {
 	default:
 		l = slog.LevelInfo
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: l})))
+	var writer = os.Stdout
+	if output != nil {
+		slog.SetDefault(slog.New(slog.NewJSONHandler(output, &slog.HandlerOptions{Level: l})))
+		return
+	}
+	slog.SetDefault(slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{Level: l})))
 }
