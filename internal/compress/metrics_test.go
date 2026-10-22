@@ -21,7 +21,10 @@ func TestCollector_Render(t *testing.T) {
 	})
 	// A second request whose block was left alone.
 	c.Observe("anthropic", Report{BlocksConsidered: 1, Skipped: skipNotLog})
-	// No eligible block at all: must not publish a series.
+	// A request rejected before a block is eligible must still expose its reason;
+	// otherwise an empty dashboard is indistinguishable from a disabled path.
+	c.Observe("anthropic", Report{Skipped: skipPlainContent})
+	// No observation and no reason stays invisible.
 	c.Observe("anthropic", Report{})
 
 	text := c.MetricsText()
@@ -37,6 +40,7 @@ func TestCollector_Render(t *testing.T) {
 		"# TYPE sap_proxy_compress_bytes_after_total counter",
 		`sap_proxy_compress_bytes_after_total{surface="anthropic"} 800`,
 		`{surface="anthropic",reason="not_log"} 1`,
+		`{surface="anthropic",reason="plain_content"} 1`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in:\n%s", want, text)

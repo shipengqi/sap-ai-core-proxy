@@ -579,7 +579,7 @@ func TestCompressLiveZone_SkipReasons(t *testing.T) {
 				"messages": []any{map[string]any{"role": "user",
 					"content": []any{map[string]any{"type": "text", "text": logText}}}},
 			},
-			want: "",
+			want: skipNoToolResult,
 		},
 	}
 

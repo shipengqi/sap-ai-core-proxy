@@ -84,7 +84,7 @@ func StatsHandler(c *gin.Context) {
 
 // Observe records one request's report.
 func (c *Collector) Observe(surface string, r Report) {
-	if surface == "" || r.BlocksConsidered == 0 {
+	if surface == "" || (r.BlocksConsidered == 0 && r.Skipped == "") {
 		return
 	}
 	c.mu.Lock()

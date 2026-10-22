@@ -41,6 +41,7 @@ const (
 	skipNoContent    = "no_content"
 	skipBadContent   = "bad_content"
 	skipPlainContent = "plain_content"
+	skipNoToolResult = "no_tool_result"
 	skipCacheControl = "cache_control"
 	skipTooSmall     = "too_small"
 	skipNotLog       = "not_log"
@@ -127,8 +128,9 @@ func CompressLiveZone(m map[string]json.RawMessage) (out map[string]json.RawMess
 	reason := ""
 
 	var (
-		newContent json.RawMessage
-		changed    bool
+		newContent    json.RawMessage
+		changed       bool
+		sawToolResult bool
 	)
 
 	// Only an array can carry a tool_result. A plain-string content is the
@@ -150,6 +152,7 @@ func CompressLiveZone(m map[string]json.RawMessage) (out map[string]json.RawMess
 		if blockType(obj) != blockToolResult {
 			continue
 		}
+		sawToolResult = true
 		// A cached block is billed at 1.25x per byte rewritten. Leave it.
 		if _, cached := obj["cache_control"]; cached {
 			if reason == "" {
@@ -256,7 +259,11 @@ func CompressLiveZone(m map[string]json.RawMessage) (out map[string]json.RawMess
 	}
 
 	if !changed {
-		rep.Skipped = reason
+		if reason != "" {
+			rep.Skipped = reason
+		} else if !sawToolResult {
+			rep.Skipped = skipNoToolResult
+		}
 		return m, rep
 	}
 
