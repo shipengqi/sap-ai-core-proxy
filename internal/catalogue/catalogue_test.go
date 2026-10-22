@@ -40,12 +40,23 @@ func TestNormalize(t *testing.T) {
 		{"3 opus latest", "claude-3-opus-latest", "anthropic--claude-3-opus"},
 		{"3 sonnet snapshot", "claude-3-sonnet-20240229", "anthropic--claude-3-sonnet"},
 
+		// Claude Code context-window suffixes like [1m] are stripped before
+		// resolution so they do not break deployment discovery.
+		{"sonnet 4.6 with [1m]", "claude-sonnet-4-6[1m]", "anthropic--claude-4.6-sonnet"},
+		{"sonnet 4.6 with [200k]", "claude-sonnet-4-6[200k]", "anthropic--claude-4.6-sonnet"},
+		{"3.5 sonnet latest with [1m]", "claude-3-5-sonnet-latest[1m]", "anthropic--claude-3.5-sonnet"},
+		{"opus latest with [1m]", "claude-opus-latest[1m]", "claude-opus-latest"},
+
 		// Already in SAP form, and non-Claude names, pass through untouched.
 		{"sap form untouched", "anthropic--claude-4.6-sonnet", "anthropic--claude-4.6-sonnet"},
 		{"gpt untouched", "gpt-4o", "gpt-4o"},
 		{"gemini untouched", "gemini-1.5-pro", "gemini-1.5-pro"},
 		{"unknown claude untouched", "claude-something-weird", "claude-something-weird"},
 		{"empty", "", ""},
+
+		// Non-Claude names with suffixes have the suffix removed.
+		{"gpt-4o with suffix", "gpt-4o[1m]", "gpt-4o"},
+		{"gemini with suffix", "gemini-1.5-pro[1m]", "gemini-1.5-pro"},
 	}
 
 	for _, tc := range cases {
@@ -67,11 +78,14 @@ func TestNormalize_CaseAndWhitespace(t *testing.T) {
 
 func TestLatestFamily(t *testing.T) {
 	want := map[string]string{
-		"claude-opus-latest":    "opus",
-		"claude-sonnet-latest":  "sonnet",
-		"claude-haiku-latest":   "haiku",
-		"Claude-Opus-Latest":    "opus",
-		"  claude-opus-latest ": "opus",
+		"claude-opus-latest":       "opus",
+		"claude-sonnet-latest":     "sonnet",
+		"claude-haiku-latest":      "haiku",
+		"Claude-Opus-Latest":       "opus",
+		"  claude-opus-latest ":    "opus",
+		"claude-opus-latest[1m]":   "opus",
+		"claude-sonnet-latest[1m]": "sonnet",
+		"claude-haiku-latest[1m]":  "haiku",
 	}
 	for in, family := range want {
 		got, ok := LatestFamily(in)

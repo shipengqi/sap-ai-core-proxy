@@ -51,20 +51,32 @@ var aliases = map[string]string{
 // Normalize translates a user-facing model name to its SAP AI Core deployment
 // model name. Resolution order:
 //
-//  1. the explicit alias table above
-//  2. a generated SAP-style name (see sapStyleName) for Claude models that are
+//  1. strip context-window suffixes like [1m] or [200k]
+//  2. the explicit alias table above
+//  3. a generated SAP-style name (see sapStyleName) for Claude models that are
 //     not in the table yet
-//  3. the original name, unchanged
+//  4. the original name (with suffix removed for non-Claude names)
 func Normalize(model string) string {
 	lower := strings.ToLower(strings.TrimSpace(model))
-	if v, ok := aliases[lower]; ok {
+	stripped := contextSuffixPattern.ReplaceAllString(lower, "")
+
+	if v, ok := aliases[stripped]; ok {
 		return v
 	}
-	if v := sapStyleName(lower); v != "" {
+	if v := sapStyleName(stripped); v != "" {
 		return v
+	}
+	// For non-Claude models, strip the suffix anyway — it is meaningless
+	// to upstream providers and would prevent deployment matching.
+	if stripped != lower {
+		return stripped
 	}
 	return model
 }
+
+// contextSuffixPattern matches bracket suffixes like [1m], [200k] used by
+// Claude Code to request specific context window sizes.
+var contextSuffixPattern = regexp.MustCompile(`\[[^\]]+\]$`)
 
 // sapStylePatterns recognise Anthropic's user-facing Claude naming and capture
 // the pieces needed to rebuild SAP AI Core's "<major>.<minor>-<family>" form.
@@ -116,7 +128,9 @@ func sapStyleName(name string) string {
 // target. Bare family-level aliases have no entry in the table above at all —
 // this is the only path that resolves them, against the live deployment list.
 func LatestFamily(model string) (string, bool) {
-	m := reLatestFamily.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model)))
+	lower := strings.ToLower(strings.TrimSpace(model))
+	stripped := contextSuffixPattern.ReplaceAllString(lower, "")
+	m := reLatestFamily.FindStringSubmatch(stripped)
 	if m == nil {
 		return "", false
 	}
