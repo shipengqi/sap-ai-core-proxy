@@ -8,8 +8,12 @@ import (
 	"time"
 )
 
+// hiddenPollingPaths are the routes the dashboards and probes hit on a timer.
+// They are filtered out of the log region so a two-second refresh loop cannot
+// bury the inference requests the panel exists to show.
 var hiddenPollingPaths = map[string]bool{
 	"/health":         true,
+	"/version":        true,
 	"/stats":          true,
 	"/stats/cache":    true,
 	"/stats/compress": true,

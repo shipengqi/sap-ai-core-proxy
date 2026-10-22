@@ -41,6 +41,9 @@ func main() {
 	}
 }
 
+// render draws one frame. build is the proxy's self-reported version; it is
+// empty when the proxy predates GET /version, so it is labelled rather than
+// silently dropped — "unknown" tells the reader the remote build is old.
 func render(base string, s stats.Snapshot) string {
 	t := s.Stats.Totals.Tokens
 	status := "OK"
@@ -49,7 +52,11 @@ func render(base string, s stats.Snapshot) string {
 	} else if !s.OK() {
 		status = "DEGRADED"
 	}
-	out := fmt.Sprintf("SAP AI Core Proxy  [%s]  %s\n", status, base)
+	build := s.Version.Version
+	if build == "" {
+		build = "unknown"
+	}
+	out := fmt.Sprintf("SAP AI Core Proxy %s  [%s]  %s\n", build, status, base)
 	out += fmt.Sprintf("Uptime %s  |  Requests %s  Failures %s  Cache hit %s\n\n", format.Duration(s.Stats.UptimeSeconds), format.HumanCount(s.Stats.Totals.Requests), format.HumanCount(s.Stats.Totals.Failures), format.Percent(s.Stats.Totals.CacheHitRatio))
 	out += fmt.Sprintf("Tokens: input %s  output %s  cache-read %s  cache-write %s\n", format.HumanCount(t.Input), format.HumanCount(t.Output), format.HumanCount(t.CacheRead), format.HumanCount(t.CacheWrite))
 	out += fmt.Sprintf("Missing usage %s  Uninstrumented %s  Capture dropped %s\n\n", format.HumanCount(s.Stats.Totals.UsageMissing), format.HumanCount(s.Stats.Totals.Uninstrumented), format.HumanCount(s.Stats.Totals.UsageCaptureDropped))

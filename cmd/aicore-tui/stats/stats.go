@@ -1,5 +1,6 @@
-// Package stats polls the proxy's three read-only observation endpoints and
-// turns the counters into the handful of conclusions the dashboard shows.
+// Package stats polls the proxy's read-only observation endpoints and its
+// build identity, and turns the counters into the handful of conclusions the
+// dashboard shows.
 //
 // The response payload types are the ones the server marshals (internal/usage,
 // internal/diagnostics, internal/compress), so this panel cannot drift from the
@@ -20,6 +21,7 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/version"
 )
 
 // Endpoint paths. Exported so the UI can merge a partial failure without
@@ -28,10 +30,13 @@ const (
 	EndpointStats    = "/stats"
 	EndpointCache    = "/stats/cache"
 	EndpointCompress = "/stats/compress"
+	EndpointVersion  = "/version"
 )
 
-// EndpointAll is every endpoint a poll touches. The UI uses its length to tell
-// "one endpoint is flaky" apart from "the proxy is gone".
+// EndpointAll is every endpoint whose failure counts towards health. The UI
+// uses its length to tell "one endpoint is flaky" apart from "the proxy is
+// gone". EndpointVersion is polled as well but stays out of this list: a proxy
+// that predates the route must not be reported as degraded.
 var EndpointAll = []string{EndpointStats, EndpointCache, EndpointCompress}
 
 const (
@@ -90,7 +95,7 @@ func (e EndpointError) Error() string { return e.Endpoint + ": " + e.Err.Error()
 // Unwrap exposes the underlying error to errors.Is.
 func (e EndpointError) Unwrap() error { return e.Err }
 
-// Snapshot is the result of one poll of all three endpoints.
+// Snapshot is the result of one poll of every endpoint.
 //
 // A Snapshot is always returned, even when everything failed: the panel keeps
 // rendering (with the last good numbers) instead of branching on an error.
@@ -99,6 +104,9 @@ type Snapshot struct {
 	Stats     StatsResponse
 	Cache     CacheResponse
 	Compress  CompressResponse
+	// Version is the build identity reported by the proxy. It stays zero when
+	// the proxy predates GET /version, which is why it is not part of Errors.
+	Version version.Info
 	// Errors holds one entry per endpoint that failed. Empty means all three
 	// answered.
 	Errors []EndpointError
@@ -152,8 +160,8 @@ func New(base string) *Fetcher {
 // Base returns the configured base URL.
 func (f *Fetcher) Base() string { return f.base }
 
-// Fetch polls all three endpoints. It never returns an error: partial results
-// are a normal outcome and belong in Snapshot.Errors so the UI can degrade
+// Fetch polls every endpoint. It never returns an error: partial results are a
+// normal outcome and belong in Snapshot.Errors so the UI can degrade
 // per-endpoint instead of blanking the whole panel.
 func (f *Fetcher) Fetch(ctx context.Context) Snapshot {
 	snap := Snapshot{FetchedAt: time.Now()}
@@ -172,6 +180,11 @@ func (f *Fetcher) Fetch(ctx context.Context) Snapshot {
 	if err := f.get(ctx, EndpointCompress, &snap.Compress); err != nil {
 		snap.Errors = append(snap.Errors, EndpointError{Endpoint: EndpointCompress, Err: err})
 	}
+	// Best effort, and deliberately not recorded in Errors: the build identity
+	// is decoration, not health. A proxy built before /version existed must
+	// still render as healthy rather than DEGRADED, so a failure here is
+	// dropped and the header simply omits the version.
+	_ = f.get(ctx, EndpointVersion, &snap.Version)
 	return snap
 }
 

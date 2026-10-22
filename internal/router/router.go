@@ -19,6 +19,7 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/middleware"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/version"
 )
 
 // metricsContentType is the Prometheus text exposition format.
@@ -90,6 +91,14 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok", "service": "sap-ai-core-proxy"})
+	})
+
+	// Build identity, always on. The release image is distroless — no shell, no
+	// files to read — so this route is the only way to ask a running instance
+	// which build it is. It exposes nothing beyond what the binary already is
+	// and is a GET, so it never reaches the usage counters.
+	r.GET("/version", func(c *gin.Context) {
+		c.JSON(http.StatusOK, version.Get())
 	})
 
 	if metrics {
