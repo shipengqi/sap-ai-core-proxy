@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 const maxAudioSize = 25 * 1024 * 1024 // 25 MB
@@ -40,6 +42,10 @@ func (h *Handler) Whisper(c *gin.Context) {
 		return
 	}
 	c.Set("model", modelStr)
+
+	// Audio transcription is billed per second of audio; the response has no token
+	// usage block, so this endpoint is neither missing usage nor uninstrumented.
+	usage.MarkNoUsageExpected(c)
 
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {

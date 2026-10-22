@@ -1,0 +1,127 @@
+package catalogue
+
+import "testing"
+
+func TestNormalize(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// Requested Claude 4.x models (dash and dot forms).
+		{"sonnet 4.6 dash", "claude-sonnet-4-6", "anthropic--claude-4.6-sonnet"},
+		{"sonnet 4.6 dot", "claude-sonnet-4.6", "anthropic--claude-4.6-sonnet"},
+		{"opus 4.8 dash", "claude-opus-4-8", "anthropic--claude-4.8-opus"},
+		{"opus 4.8 dot", "claude-opus-4.8", "anthropic--claude-4.8-opus"},
+		{"haiku 4.5 dash", "claude-haiku-4-5", "anthropic--claude-4.5-haiku"},
+		{"haiku 4.5 dot", "claude-haiku-4.5", "anthropic--claude-4.5-haiku"},
+
+		// Previously aliased models must keep working.
+		{"sonnet 4.5 dash", "claude-sonnet-4-5", "anthropic--claude-4.5-sonnet"},
+		{"sonnet 4.5 snapshot", "claude-sonnet-4-5-20251022", "anthropic--claude-4.5-sonnet"},
+		{"opus 4.5", "claude-opus-4.5", "anthropic--claude-4.5-opus"},
+
+		// Bare family-level "-latest" aliases must NOT be pinned in the table:
+		// DeploymentManager resolves them against the live deployment list so they
+		// track the newest running version. Normalize leaves them untouched.
+		{"sonnet latest not pinned", "claude-sonnet-latest", "claude-sonnet-latest"},
+		{"opus latest not pinned", "claude-opus-latest", "claude-opus-latest"},
+		{"haiku latest not pinned", "claude-haiku-latest", "claude-haiku-latest"},
+
+		// Newly released versions resolve without an alias entry.
+		{"sonnet 4.9 no alias", "claude-sonnet-4-9", "anthropic--claude-4.9-sonnet"},
+		{"sonnet 4.6 snapshot", "claude-sonnet-4-6-20260115", "anthropic--claude-4.6-sonnet"},
+
+		// Legacy 3.x naming conventions.
+		{"3.7 sonnet latest", "claude-3-7-sonnet-latest", "anthropic--claude-3.7-sonnet"},
+		{"3.7 sonnet snapshot", "claude-3-7-sonnet-20250219", "anthropic--claude-3.7-sonnet"},
+		{"3.5 sonnet latest", "claude-3-5-sonnet-latest", "anthropic--claude-3.5-sonnet"},
+		{"3.5 haiku latest", "claude-3-5-haiku-latest", "anthropic--claude-3.5-haiku"},
+		{"3 opus latest", "claude-3-opus-latest", "anthropic--claude-3-opus"},
+		{"3 sonnet snapshot", "claude-3-sonnet-20240229", "anthropic--claude-3-sonnet"},
+
+		// Claude Code context-window suffixes like [1m] are stripped before
+		// resolution so they do not break deployment discovery.
+		{"sonnet 4.6 with [1m]", "claude-sonnet-4-6[1m]", "anthropic--claude-4.6-sonnet"},
+		{"sonnet 4.6 with [200k]", "claude-sonnet-4-6[200k]", "anthropic--claude-4.6-sonnet"},
+		{"3.5 sonnet latest with [1m]", "claude-3-5-sonnet-latest[1m]", "anthropic--claude-3.5-sonnet"},
+		{"opus latest with [1m]", "claude-opus-latest[1m]", "claude-opus-latest"},
+
+		// Already in SAP form, and non-Claude names, pass through untouched.
+		{"sap form untouched", "anthropic--claude-4.6-sonnet", "anthropic--claude-4.6-sonnet"},
+		{"gpt untouched", "gpt-4o", "gpt-4o"},
+		{"gemini untouched", "gemini-1.5-pro", "gemini-1.5-pro"},
+		{"unknown claude untouched", "claude-something-weird", "claude-something-weird"},
+		{"empty", "", ""},
+
+		// Non-Claude names with suffixes have the suffix removed.
+		{"gpt-4o with suffix", "gpt-4o[1m]", "gpt-4o"},
+		{"gemini with suffix", "gemini-1.5-pro[1m]", "gemini-1.5-pro"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Normalize(tc.in); got != tc.want {
+				t.Errorf("Normalize(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNormalize_CaseAndWhitespace(t *testing.T) {
+	for _, in := range []string{"  Claude-Sonnet-4-6  ", "CLAUDE-SONNET-4-6", "claude-sonnet-4-6"} {
+		if got := Normalize(in); got != "anthropic--claude-4.6-sonnet" {
+			t.Errorf("Normalize(%q) = %q, want anthropic--claude-4.6-sonnet", in, got)
+		}
+	}
+}
+
+func TestLatestFamily(t *testing.T) {
+	want := map[string]string{
+		"claude-opus-latest":       "opus",
+		"claude-sonnet-latest":     "sonnet",
+		"claude-haiku-latest":      "haiku",
+		"Claude-Opus-Latest":       "opus",
+		"  claude-opus-latest ":    "opus",
+		"claude-opus-latest[1m]":   "opus",
+		"claude-sonnet-latest[1m]": "sonnet",
+		"claude-haiku-latest[1m]":  "haiku",
+	}
+	for in, family := range want {
+		got, ok := LatestFamily(in)
+		if !ok {
+			t.Errorf("LatestFamily(%q) ok = false, want true", in)
+			continue
+		}
+		if got != family {
+			t.Errorf("LatestFamily(%q) = %q, want %q", in, got, family)
+		}
+	}
+
+	// Version-pinned legacy aliases name a specific version, not a moving
+	// target, so they must not be treated as family-latest.
+	for _, in := range []string{
+		"claude-3-5-sonnet-latest", "claude-3-opus-latest", "claude-3-7-sonnet-latest",
+		"claude-sonnet-4-6", "claude-opus-4-8", "gpt-4o", "",
+	} {
+		if family, ok := LatestFamily(in); ok {
+			t.Errorf("LatestFamily(%q) = (%q, true), want (\"\", false)", in, family)
+		}
+	}
+}
+
+func TestIsAnthropic(t *testing.T) {
+	for _, in := range []string{
+		"claude-sonnet-4-6", "claude-opus-4-8", "claude-haiku-4-5",
+		"anthropic--claude-4.6-sonnet", "CLAUDE-3-5-SONNET-LATEST",
+	} {
+		if !IsAnthropic(in) {
+			t.Errorf("IsAnthropic(%q) = false, want true", in)
+		}
+	}
+	for _, in := range []string{"gpt-4o", "gemini-1.5-pro", "sonar", "qwen-max"} {
+		if IsAnthropic(in) {
+			t.Errorf("IsAnthropic(%q) = true, want false", in)
+		}
+	}
+}

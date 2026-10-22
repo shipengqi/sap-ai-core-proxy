@@ -17,6 +17,11 @@ func init() {
 // NewTestProxy starts the real Gin proxy pointed at mockURL.
 // If mockURL is empty, it reads SAP_AI_CORE_* env vars (real SAP mode).
 func NewTestProxy(mockURL string) (*httptest.Server, error) {
+	return NewTestProxyWithAnthropicAutoCache(mockURL, false)
+}
+
+// NewTestProxyWithAnthropicAutoCache starts a proxy with explicit Claude cache-marker configuration.
+func NewTestProxyWithAnthropicAutoCache(mockURL string, anthropicAutoCache bool) (*httptest.Server, error) {
 	var cfg *config.Config
 
 	if mockURL != "" {
@@ -28,7 +33,7 @@ func NewTestProxy(mockURL string) (*httptest.Server, error) {
 				ClientSecret:  "test-secret",
 				ResourceGroup: "test-group",
 			},
-			Server: config.Server{Port: 0, LogLevel: "error"},
+			Server: config.Server{Port: 0, LogLevel: "error", Metrics: true, AnthropicAutoCache: anthropicAutoCache},
 		}
 	} else {
 		var err error
@@ -36,13 +41,16 @@ func NewTestProxy(mockURL string) (*httptest.Server, error) {
 		if err != nil {
 			return nil, err
 		}
+		cfg.Server.AnthropicAutoCache = anthropicAutoCache
 	}
 
 	auth := sapclient.NewAuthManager(cfg.SAPAICore.TokenURL, cfg.SAPAICore.ClientID, cfg.SAPAICore.ClientSecret)
 	client := sapclient.NewClient(cfg.SAPAICore.BaseURL, cfg.SAPAICore.ResourceGroup, auth)
 	deployments := sapclient.NewDeploymentManager(client)
 
-	r := router.New(client, deployments, false)
+	// The usage endpoints are always enabled in tests so the observation path is
+	// exercised by the integration suite.
+	r := router.New(client, deployments, false, true, cfg.Server.AnthropicAutoCache)
 	return httptest.NewServer(r), nil
 }
 

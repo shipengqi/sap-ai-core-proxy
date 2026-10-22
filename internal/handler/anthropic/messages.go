@@ -10,10 +10,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // Messages proxies POST /anthropic/v1/messages to SAP AI Core.
@@ -42,6 +45,10 @@ func (h *Handler) Messages(c *gin.Context) {
 
 	c.Set("model", modelStr)
 
+	// Cache attribution: fingerprint the hot zone before any transformation runs,
+	// so the comparison reflects what the client sent. Read-only.
+	diagnostics.ObserveRequest(c, body)
+
 	var streaming bool
 	if s, ok := raw["stream"]; ok {
 		_ = json.Unmarshal(s, &streaming)
@@ -56,12 +63,40 @@ func (h *Handler) Messages(c *gin.Context) {
 
 // messagesBedrock handles Claude models via SAP AI Core Bedrock /invoke endpoints.
 func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[string]json.RawMessage, streaming bool) {
+	clientProvidedCacheControl := transform.HasCacheControl(raw)
+
 	// Get deployment first for thinking cache check
 	dep, err := h.deployments.GetDeployment(c.Request.Context(), modelName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, errorBody(err.Error()))
 		return
 	}
+
+	// Compression runs once, before the body builder, so a retry rebuilds the
+	// same bytes instead of compressing twice. It covers every tool_result in
+	// the request, history included: the transform is deterministic, so the
+	// compressed history is byte-identical on every turn and the provider cache
+	// still hits. Compressing only the live zone would leave the next turn's
+	// history uncompressed and bust the prefix at that point.
+	if compress.Enabled() {
+		var report compress.Report
+		raw, report = compress.CompressRequest(raw)
+		compress.Observe(usage.SurfaceAnthropic, report)
+		if report.BlocksCompressed > 0 {
+			slog.Debug("compressed tool results", "model", modelName,
+				"blocks", report.BlocksCompressed,
+				"bytes_before", report.OriginalBytes,
+				"bytes_after", report.CompressedBytes,
+				"strategy", report.Strategy)
+		}
+	}
+
+	// The auto-marker counter is per request, not per body build: buildBody runs
+	// again when a thinking retry rebuilds the payload, and the same request must
+	// not be counted twice. The model label is the resolved deployment model name
+	// so it joins /stats by_model instead of fragmenting on the requested alias.
+	markerRecorded := false
+	markerModel := dep.EffectiveModelName()
 
 	// Build request body with thinking parameter handling
 	buildBody := func() ([]byte, error) {
@@ -96,6 +131,11 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 		filtered = transform.PromoteSystemMessages(filtered)
 		filtered = transform.ConvertImagePartsToAnthropic(filtered)
 		filtered = transform.FlattenSystem(filtered)
+		_, markerResult := transform.ApplyAnthropicToolCacheMarker(filtered, h.anthropicAutoCache, clientProvidedCacheControl)
+		if !markerRecorded && markerResult != "" {
+			markerRecorded = true
+			diagnostics.ObserveAutoMarker(usage.SurfaceAnthropic, markerModel, markerResult)
+		}
 
 		return json.Marshal(filtered)
 	}
@@ -107,39 +147,6 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 	}
 
 	if streaming {
-		// Auto-detect thinking support before streaming if needed
-		if _, hasThinking := raw["thinking"]; hasThinking && !openai.IsThinkingUnsupported(dep.ID) {
-			slog.Info("probing thinking support before streaming", "model", modelName, "deployment_id", dep.ID)
-
-			// Build minimal probe request (same body as actual request)
-			probeResp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				dep.DeployedURL+"/invoke", bytes.NewReader(filteredBody), nil)
-			if err != nil {
-				c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-				return
-			}
-			probeBody, _ := io.ReadAll(probeResp.Body)
-			_ = probeResp.Body.Close()
-
-			// Check if thinking is unsupported
-			if probeResp.StatusCode == http.StatusBadRequest && openai.IsAdaptiveThinkingError(probeBody) {
-				slog.Info("detected thinking not supported, caching result", "deployment_id", dep.ID)
-				openai.MarkThinkingUnsupported(dep.ID)
-
-				// Rebuild body without thinking
-				filteredBody, err = buildBody()
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, errorBody("rebuild body: "+err.Error()))
-					return
-				}
-			} else if probeResp.StatusCode != http.StatusOK {
-				// Probe failed for other reasons, return error
-				c.Data(probeResp.StatusCode, "application/json", probeBody)
-				return
-			}
-			// Probe succeeded (200 OK), thinking is supported - proceed with streaming
-		}
-
 		slog.Info("calling anthropic model", "model", modelName, "streaming", true, "deployment_id", dep.ID)
 		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
 			dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(filteredBody), nil)
@@ -147,6 +154,39 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+
+		// Do not probe thinking support with a full non-streaming generation before
+		// opening the stream. Claude Code cancels while waiting for that hidden
+		// request to finish. A rejected streaming request has not emitted SSE yet,
+		// so it is safe to strip thinking and retry here.
+		_, sentThinking := raw["thinking"]
+		if upstream.StatusCode == http.StatusBadRequest && sentThinking && !openai.IsThinkingUnsupported(dep.ID) {
+			errBody, _ := io.ReadAll(upstream.Body)
+			_ = upstream.Body.Close()
+			if openai.IsAdaptiveThinkingError(errBody) {
+				openai.MarkThinkingUnsupported(dep.ID)
+				filteredBody, err = buildBody()
+				if err != nil {
+					c.JSON(http.StatusInternalServerError, errorBody("rebuild body: "+err.Error()))
+					return
+				}
+				upstream, err = h.client.DoStreaming(c.Request.Context(), http.MethodPost,
+					dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(filteredBody), nil)
+				if err != nil {
+					c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+					return
+				}
+			} else {
+				usage.MarkUpstreamStatus(c, http.StatusBadRequest)
+				c.Data(http.StatusBadRequest, "application/json", errBody)
+				return
+			}
+		}
+
+		// Preserve the native Anthropic streaming contract: the client-facing status
+		// is 200 once stream handling begins, while metrics retain the real upstream
+		// status for failures.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeAnthropic(c, upstream)
 		return
@@ -190,6 +230,10 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 		status = resp.StatusCode
 	}
 
+	// Token accounting: the upstream usage block is read out of the response we
+	// are about to forward. Observation only — respBody is passed through byte
+	// for byte.
+	usage.ObserveJSONBody(c, respBody)
 	c.Data(status, "application/json", respBody)
 }
 
@@ -230,5 +274,8 @@ func (h *Handler) messagesOpenAI(c *gin.Context, modelName string, raw map[strin
 	}
 
 	anthropicResp := transform.OpenAIToAnthropicResponse(respBody, modelName)
+	// The converted body is what the client receives and it carries the same
+	// token counts as the upstream OpenAI answer.
+	usage.ObserveJSONBody(c, anthropicResp)
 	c.Data(http.StatusOK, "application/json", anthropicResp)
 }

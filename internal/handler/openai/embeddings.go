@@ -8,6 +8,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // Embeddings proxies POST /openai/v1/embeddings to SAP AI Core.
@@ -46,5 +48,7 @@ func (h *Handler) Embeddings(c *gin.Context) {
 	}
 	defer func() { _ = upstream.Body.Close() }()
 	respBody, _ := io.ReadAll(upstream.Body)
+	// Embeddings bill prompt tokens, and they report them as usage.prompt_tokens.
+	usage.ObserveJSONBody(c, respBody)
 	c.Data(upstream.StatusCode, "application/json", respBody)
 }

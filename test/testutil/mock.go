@@ -5,9 +5,11 @@ package testutil
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -24,6 +26,35 @@ type MockSAPServer struct {
 
 	// LastThinkingParam tracks whether the last request contained a thinking parameter.
 	LastThinkingParam bool
+
+	// LastInvokeBody captures the most recent body posted to the Anthropic /invoke endpoint.
+	LastInvokeBody map[string]json.RawMessage
+
+	// LastInvokeStreamBody captures the most recent body posted to
+	// /invoke-with-response-stream.
+	LastInvokeStreamBody map[string]json.RawMessage
+
+	// ToolCallResponse makes the Anthropic mock answer with a tool_use block
+	// (or tool_use SSE events) instead of plain text.
+	ToolCallResponse bool
+
+	// StreamingErrorStatus, when non-zero, makes the Anthropic streaming endpoint
+	// fail with that HTTP status and a JSON error body.
+	StreamingErrorStatus int
+
+	// LastOpenAIChatBody captures the most recent body posted to the OpenAI
+	// compatible /chat/completions endpoint.
+	LastOpenAIChatBody map[string]json.RawMessage
+
+	// OpenAIToolCallResponse makes the OpenAI-compatible mock answer with tool_calls
+	// instead of plain text.
+	OpenAIToolCallResponse bool
+
+	// mu guards the bookkeeping fields below. The mock is driven by concurrent
+	// integration tests — the cache-diagnostics suite fires fifty parallel
+	// requests at it — and -race flags the unsynchronised appends, so every
+	// mutation of Last*/RequestLog goes through this mutex.
+	mu sync.Mutex
 }
 
 // NewMockSAPServer starts a mock SAP AI Core server. Call Close() when done.
@@ -73,6 +104,27 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
 				},
 				{
+					"id":            "dep-anthropic-46-001",
+					"status":        "RUNNING",
+					"modelName":     "anthropic--claude-4.6-sonnet",
+					"scenarioId":    "foundation-models",
+					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
+				},
+				{
+					"id":            "dep-anthropic-48-001",
+					"status":        "RUNNING",
+					"modelName":     "anthropic--claude-4.8-opus",
+					"scenarioId":    "foundation-models",
+					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
+				},
+				{
+					"id":            "dep-anthropic-45-haiku-001",
+					"status":        "RUNNING",
+					"modelName":     "anthropic--claude-4.5-haiku",
+					"scenarioId":    "foundation-models",
+					"deploymentUrl": base + "/v2/inference/deployments/dep-anthropic-001",
+				},
+				{
 					"id":            "dep-gemini-001",
 					"status":        "RUNNING",
 					"modelName":     "gemini-1.5-pro",
@@ -96,8 +148,14 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		m.validateAuth(t, w, r)
 		m.validateResourceGroup(t, w, r)
 
+		bodyBytes, _ := io.ReadAll(r.Body)
 		var reqBody map[string]interface{}
-		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		_ = json.Unmarshal(bodyBytes, &reqBody)
+		var rawBody map[string]json.RawMessage
+		_ = json.Unmarshal(bodyBytes, &rawBody)
+		m.mu.Lock()
+		m.LastOpenAIChatBody = rawBody
+		m.mu.Unlock()
 		streaming, _ := reqBody["stream"].(bool)
 
 		if streaming {
@@ -106,6 +164,36 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 			_, _ = fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"index\":0}]}\n\n")
 			_, _ = fmt.Fprintf(w, "data: {\"id\":\"chatcmpl-mock\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"delta\":{\"content\":\"!\"},\"index\":0}]}\n\n")
 			_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+			return
+		}
+
+		if m.OpenAIToolCallResponse {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":     "chatcmpl-mock-tool",
+				"object": "chat.completion",
+				"choices": []map[string]interface{}{
+					{
+						"index": 0,
+						"message": map[string]interface{}{
+							"role":    "assistant",
+							"content": nil,
+							"tool_calls": []map[string]interface{}{
+								{
+									"id":   "call_mock_1",
+									"type": "function",
+									"function": map[string]string{
+										"name":      "get_weather",
+										"arguments": `{"city":"Berlin"}`,
+									},
+								},
+							},
+						},
+						"finish_reason": "tool_calls",
+					},
+				},
+				"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+			})
 			return
 		}
 
@@ -135,6 +223,19 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 				{"object": "embedding", "embedding": []float64{0.1, 0.2, 0.3}, "index": 0},
 			},
 			"model": "gpt-4o",
+			"usage": map[string]int{"prompt_tokens": 7, "total_tokens": 7},
+		})
+	})
+
+	// OpenAI image generation. Like the real endpoint it reports no token usage:
+	// image models are billed per image.
+	mux.HandleFunc("/v2/inference/deployments/dep-openai-001/images/generations", func(w http.ResponseWriter, r *http.Request) {
+		m.log(r)
+		m.validateAuth(t, w, r)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"created": 1,
+			"data":    []map[string]string{{"url": "https://example.invalid/image.png"}},
 		})
 	})
 
@@ -144,10 +245,18 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		m.validateAuth(t, w, r)
 		if r.Method == http.MethodPost {
 			w.Header().Set("Content-Type", "application/json")
+			// The Responses API reports usage as input_tokens/output_tokens, with
+			// the cached part under input_tokens_details.
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"id":     "resp-mock-001",
 				"object": "response",
 				"status": "completed",
+				"usage": map[string]interface{}{
+					"input_tokens":         30,
+					"output_tokens":        7,
+					"total_tokens":         37,
+					"input_tokens_details": map[string]int{"cached_tokens": 5},
+				},
 			})
 			return
 		}
@@ -184,7 +293,10 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 
 		// Track whether thinking parameter is present
 		_, hasThinking := reqBody["thinking"]
+		m.mu.Lock()
+		m.LastInvokeBody = reqBody
 		m.LastThinkingParam = hasThinking
+		m.mu.Unlock()
 
 		// If RejectThinking is true and thinking param exists, return 400
 		if m.RejectThinking && hasThinking {
@@ -192,6 +304,22 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 			w.WriteHeader(http.StatusBadRequest)
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"message": "adaptive thinking is not supported on this model",
+			})
+			return
+		}
+
+		if m.ToolCallResponse {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"id":   "msg-mock-tool-001",
+				"type": "message",
+				"role": "assistant",
+				"content": []map[string]interface{}{
+					{"type": "tool_use", "id": "toolu_mock_1", "name": "get_weather", "input": map[string]string{"city": "Berlin"}},
+				},
+				"model":       "anthropic--claude-3.5-sonnet",
+				"stop_reason": "tool_use",
+				"usage":       map[string]int{"input_tokens": 10, "output_tokens": 8},
 			})
 			return
 		}
@@ -206,7 +334,14 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 			},
 			"model":       "anthropic--claude-3.5-sonnet",
 			"stop_reason": "end_turn",
-			"usage":       map[string]int{"input_tokens": 10, "output_tokens": 8},
+			// Cache counters are reported separately from input_tokens by
+			// Anthropic; the usage tests rely on these exact numbers.
+			"usage": map[string]int{
+				"input_tokens":                10,
+				"output_tokens":               8,
+				"cache_read_input_tokens":     4,
+				"cache_creation_input_tokens": 2,
+			},
 		})
 	})
 
@@ -214,11 +349,50 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 	mux.HandleFunc("/v2/inference/deployments/dep-anthropic-001/invoke-with-response-stream", func(w http.ResponseWriter, r *http.Request) {
 		m.log(r)
 		m.validateAuth(t, w, r)
+
+		var reqBody map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		_, hasThinking := reqBody["thinking"]
+		m.mu.Lock()
+		m.LastInvokeStreamBody = reqBody
+		m.LastThinkingParam = hasThinking
+		m.mu.Unlock()
+
+		if m.RejectThinking && hasThinking {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message": "adaptive thinking is not supported on this model",
+			})
+			return
+		}
+
+		if m.StreamingErrorStatus != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(m.StreamingErrorStatus)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"message": "mock upstream streaming failure",
+			})
+			return
+		}
+
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
-		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"anthropic--claude-3.5-sonnet\",\"usage\":{\"input_tokens\":10}}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-mock\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"anthropic--claude-3.5-sonnet\",\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":4,\"cache_creation_input_tokens\":2}}}\n\n")
+
+		if m.ToolCallResponse {
+			_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_mock_1\",\"name\":\"get_weather\",\"input\":{}}}\n\n")
+			_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"city\\\":\"}}\n\n")
+			_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"Berlin\\\"}\"}}\n\n")
+			_, _ = fmt.Fprintf(w, "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n")
+			_, _ = fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":15}}\n\n")
+			_, _ = fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+			return
+		}
+
 		_, _ = fmt.Fprintf(w, "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n")
 		_, _ = fmt.Fprintf(w, "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello!\"}}\n\n")
+		_, _ = fmt.Fprintf(w, "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":3}}\n\n")
 		_, _ = fmt.Fprintf(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	})
 
@@ -231,7 +405,7 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		if isStream {
 			w.Header().Set("Transfer-Encoding", "chunked")
-			_, _ = fmt.Fprintf(w, `[{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello from mock Gemini streaming!"}]},"finishReason":"STOP"}]}]`)
+			_, _ = fmt.Fprintf(w, `[{"candidates":[{"content":{"role":"model","parts":[{"text":"Hello from mock Gemini streaming!"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":6,"totalTokenCount":18}}]`)
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
@@ -243,6 +417,12 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 					},
 					"finishReason": "STOP",
 				},
+			},
+			// Gemini reports prompt/candidate token counts under usageMetadata.
+			"usageMetadata": map[string]int{
+				"promptTokenCount":     12,
+				"candidatesTokenCount": 6,
+				"totalTokenCount":      18,
 			},
 		})
 	})
@@ -277,6 +457,8 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 }
 
 func (m *MockSAPServer) log(r *http.Request) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.RequestLog = append(m.RequestLog, r.Method+" "+r.URL.Path)
 }
 

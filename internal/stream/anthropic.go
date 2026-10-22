@@ -8,6 +8,8 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // PipeAnthropic forwards an Anthropic-format SSE response from upstream.
@@ -15,6 +17,8 @@ import (
 // Bedrock-style responses sometimes drop the event: prefix).
 func PipeAnthropic(c *gin.Context, upstream *http.Response) {
 	defer func() { _ = upstream.Body.Close() }()
+
+	usage.MarkStream(c)
 
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -49,11 +53,11 @@ func PipeAnthropic(c *gin.Context, upstream *http.Response) {
 		}
 
 		if strings.HasPrefix(line, "data:") {
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+
 			// If no preceding event: line was sent for this chunk, infer it from
 			// the "type" field in the JSON payload.
 			if !lastWasEvent {
-				payload := strings.TrimPrefix(line, "data:")
-				payload = strings.TrimSpace(payload)
 				if eventType := extractEventType(payload); eventType != "" {
 					_, _ = fmt.Fprintf(c.Writer, "event: %s\n", eventType)
 				}
@@ -61,6 +65,10 @@ func PipeAnthropic(c *gin.Context, upstream *http.Response) {
 			_, _ = fmt.Fprintf(c.Writer, "%s\n", line)
 			flusher.Flush()
 			lastWasEvent = false
+
+			// Observe only after the bytes are on the wire: accounting must never
+			// delay or alter what the client receives.
+			usage.ObserveAnthropicEvent(c, payload)
 			continue
 		}
 
@@ -68,6 +76,19 @@ func PipeAnthropic(c *gin.Context, upstream *http.Response) {
 		_, _ = fmt.Fprintf(c.Writer, "%s\n", line)
 		flusher.Flush()
 		lastWasEvent = false
+
+		// An upstream that answers 200 with a bare JSON error body (no SSE framing)
+		// would otherwise be forwarded without ever being inspected, so a failed
+		// stream would be counted as a success.
+		//
+		// This heuristic assumes a single-line (compact) JSON error body; a
+		// pretty-printed body would not be detected and the request would be
+		// counted as uninstrumented. Real SAP AI Core responses are compact, so
+		// the exposure is small; buffering to brace-balance is deliberately left
+		// out until the P1 numbers say it matters.
+		if strings.HasPrefix(line, "{") {
+			usage.ObserveAnthropicEvent(c, line)
+		}
 	}
 }
 

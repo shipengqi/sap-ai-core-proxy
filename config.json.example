@@ -8,6 +8,8 @@
   },
   "server": {
     "port": 3001,
-    "log_level": "info"
+    "log_level": "info",
+    "compress_logs": false,
+    "anthropic_auto_cache": false
   }
 }

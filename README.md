@@ -10,6 +10,7 @@ A Go reverse proxy that exposes SAP AI Core LLM deployments through standard API
 - **Automatic auth** — OAuth 2.0 client-credentials token exchange with in-memory caching
 - **Deployment discovery** — queries SAP AI Core for RUNNING deployments; 12-hour cache; 3-tier model matching (exact → fuzzy → family prefix fallback)
 - **Model aliases** — translates standard model names (e.g. `claude-3-5-sonnet-latest`) to SAP AI Core deployment names automatically
+- **Tool calling** — OpenAI `tools` / `tool_calls` / `role: "tool"` and Anthropic `tool_use` / `tool_result` blocks are translated into each other, so a tool-calling loop works across either surface regardless of which model family backs it
 - **Claude Code / VSCode / IDE compatible** — works with any client that speaks OpenAI or Anthropic APIs
 
 ## Quick Start
@@ -44,7 +45,8 @@ Edit `~/.aicoreproxy/config.json`:
   },
   "server": {
     "port": 3001,
-    "log_level": "info"
+    "log_level": "info",
+    "anthropic_auto_cache": false
   }
 }
 ```
@@ -74,6 +76,9 @@ The proxy starts on `http://localhost:3001` (default).
 | `sap_ai_core.resource_group` | No | `"default"` | SAP AI Core resource group |
 | `server.port` | No | `3001` | Listen port |
 | `server.log_level` | No | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
+| `server.metrics` | No | `true` | Register `GET /metrics`, `GET /stats`, and the OTLP receiver `POST /otel/v1/metrics` |
+| `server.compress_logs` | No | `false` | Deterministically compress every recognisable `tool_result` log in the request, history included. The transform is a pure function of the input text, so a rewritten history is byte-identical from turn to turn and the prompt cache keeps hitting; the model therefore sees compressed history logs in long sessions. Leave disabled unless validated |
+| `server.anthropic_auto_cache` | No | `false` | Add `{"type":"ephemeral"}` cache control to the final tool sent to Claude Bedrock only when the client provided no `cache_control` anywhere in its request |
 
 ### Environment Variable Overrides
 
@@ -89,6 +94,10 @@ All config values can be overridden by environment variables (higher priority th
 | `SAP_AI_CORE_RESOURCE_GROUP` | `sap_ai_core.resource_group` |
 | `PORT` | `server.port` |
 | `LOG_LEVEL` | `server.log_level` |
+| `METRICS_ENABLED` | `server.metrics` |
+| `COMPRESS_LOGS` | `server.compress_logs` |
+| `ANTHROPIC_AUTO_CACHE` | `server.anthropic_auto_cache` |
+| `COMPRESS_LOGS_SKIP` | Compression skip strategies (comma-separated, for example `log,json`) |
 
 ## API Endpoints
 
@@ -127,12 +136,31 @@ All config values can be overridden by environment variables (higher priority th
 | POST | `/litellm/v1/completions` | Completions via SAP Orchestration |
 | POST | `/litellm/v1/embeddings` | Embeddings (direct deployment) |
 
+### Usage Metrics
+
+Token accounting is on by default; set `server.metrics: false` (or `METRICS_ENABLED=false`) to stop registering these routes. The OTLP endpoint is an acknowledge-only compatibility sink for clients such as agent CLIs: it does not forward telemetry to SAP AI Core or mix arbitrary client metrics and labels into the proxy's Prometheus registry.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/stats` | JSON: totals, per-surface and per-model tokens, cache hit ratio |
+| GET | `/metrics` | Prometheus text exposition (hand-written, no extra dependency) |
+| POST | `/otel/v1/metrics` | Standard OTLP/HTTP Protobuf compatibility sink; validates and acknowledges client telemetry without storing or exposing it |
+| GET | `/stats/cache` | Cache attribution: hit/rewrite/no-cache/no-usage, drift, volatile patterns, and tracked sessions |
+| GET | `/stats/compress` | Compression block counts, before/after bytes, and skip reasons |
+
+Three things to know before reading the numbers:
+
+- `sap_proxy_requests_total{status}` is the **upstream-effective** status, not what the client received. A streaming request whose upstream failed is recorded with the upstream error code (or `502`) even though the client got `200`, because the SSE headers are written before the upstream answer is known.
+- `usage_missing` means "the response was inspected but the upstream reported no usage". It never counts failed requests or endpoints that are not instrumented.
+- `uninstrumented` means "the request succeeded but no observation path read the response". A non-zero value points at a proxy code path missing accounting, not at a silent upstream.
+
 ## Model Routing & Fallback
 
 ### Deployment Discovery
 
-On every request, the proxy resolves the upstream SAP AI Core deployment URL in three passes:
+On every request, the proxy resolves the upstream SAP AI Core deployment URL in these passes:
 
+0. **`-latest` family resolution** — a bare `claude-<family>-latest` alias is matched against the live deployment list and bound to the highest version of that family (see below)
 1. **Exact match** — `deployment.modelName == normalizedModel`
 2. **Fuzzy substring match** — either name contains the other
 3. **Family prefix fallback** — strips the version suffix and matches the family (e.g. `claude-opus-4.8` → `claude-opus` matches any `*claude-opus*` deployment)
@@ -145,16 +173,33 @@ The proxy automatically translates standard Anthropic model names to SAP AI Core
 
 | User-Facing Name | SAP AI Core Deployment Name |
 |---|---|
-| `claude-opus-latest` | `anthropic--claude-4.7-opus` |
+| `claude-opus-latest` | newest running `opus` deployment — resolved dynamically |
 | `claude-opus-4.8` / `claude-opus-4-8` | `anthropic--claude-4.8-opus` |
 | `claude-opus-4.5` / `claude-opus-4-5` | `anthropic--claude-4.5-opus` |
-| `claude-sonnet-latest` | `anthropic--claude-4.5-sonnet` |
+| `claude-sonnet-latest` | newest running `sonnet` deployment — resolved dynamically |
+| `claude-sonnet-4.6` / `claude-sonnet-4-6` | `anthropic--claude-4.6-sonnet` |
 | `claude-sonnet-4.5` / `claude-sonnet-4-5` | `anthropic--claude-4.5-sonnet` |
-| `claude-haiku-latest` | `anthropic--claude-4.5-haiku` |
+| `claude-haiku-latest` | newest running `haiku` deployment — resolved dynamically |
+| `claude-haiku-4.5` / `claude-haiku-4-5` | `anthropic--claude-4.5-haiku` |
 | `claude-3-7-sonnet-latest` | `anthropic--claude-3.7-sonnet` |
 | `claude-3-5-sonnet-latest` | `anthropic--claude-3.5-sonnet` |
 | `claude-3-5-haiku-latest` | `anthropic--claude-3.5-haiku` |
 | `claude-3-opus-latest` | `anthropic--claude-3-opus` |
+
+`claude-<family>-latest` is resolved against the live deployment list, so it always means the
+newest running version of that family — no table edit is needed when a new release appears, and
+these aliases are deliberately absent from the table so they cannot be frozen by accident.
+Version-pinned legacy aliases such as `claude-3-5-sonnet-latest` stay fixed, because they name
+one specific version rather than a moving target. If no deployment of the family is running,
+the request fails with a 404 naming the requested model.
+
+Names not in the table are translated by shape rather than by lookup, so newly released
+Claude versions work without a code change: `claude-<family>-<major>-<minor>` becomes
+`anthropic--claude-<major>.<minor>-<family>` (e.g. `claude-sonnet-4-9` →
+`anthropic--claude-4.9-sonnet`), and the legacy `claude-<major>-<minor>-<family>` /
+`claude-<major>-<family>` shapes are handled too. This is necessary because SAP puts the
+version first while Anthropic puts the family first — a reordering the fuzzy and
+family-prefix matchers cannot bridge on their own.
 
 ## Streaming
 
@@ -306,12 +351,49 @@ sudo systemctl restart aicoreproxy    # restart
 sudo journalctl -u aicoreproxy -f     # tail logs
 ```
 
+## Terminal Dashboard
+
+The repository includes a read-only terminal dashboard in the same Go module. `make run` starts the Gin proxy and dashboard together by default:
+
+```bash
+make run
+```
+
+The dashboard starts in the same process as the proxy and refreshes metrics automatically. To run only the proxy, disable it explicitly:
+
+```bash
+make run WITH_TUI=0
+# or run the binary directly:
+./aicoreproxy -no-tui
+# equivalent target:
+make server
+```
+
+To run the dashboard against an already-running proxy:
+
+```bash
+make tui
+# or
+go run ./cmd/aicore-tui --url http://localhost:3001 --interval 5s
+```
+
+The dashboard polls `/stats`, `/stats/cache`, and `/stats/compress`, and shows request totals, failures, token/cache counters, cache hit ratio, per-surface totals, compression counters, and endpoint health. It defaults to `http://localhost:3001`; `--plain` prints one snapshot and exits, which is useful for scripts:
+
+```bash
+go run ./cmd/aicore-tui --plain
+```
+
+When launched through `make run` or `./aicoreproxy` in an interactive terminal, the dashboard and proxy run together in one process. The dashboard is automatically skipped when stdout is redirected or captured (for example by WorkBuddy, systemd, Docker, or another process), preventing ANSI terminal control sequences from corrupting the caller's output. The `-no-tui` flag disables the dashboard explicitly. The standalone `make tui` target remains available for connecting to an already-running proxy.
+
 ## Makefile Targets
 
 | Target | Description |
 |---|---|
 | `make build` | Build the binary (`./aicoreproxy`) |
-| `make run` | Run with `go run ./...` |
+| `make run` | Run the Gin proxy and TUI together (default) |
+| `make run WITH_TUI=0` | Run only the Gin proxy |
+| `make server` | Run only the Gin proxy |
+| `make tui` | Run the read-only terminal dashboard against an existing proxy |
 | `make test` | Run unit tests |
 | `make test.integration` | Run integration tests (mock mode if no env vars set) |
 | `make vet` | Run `go vet` |
@@ -325,8 +407,15 @@ sudo journalctl -u aicoreproxy -f     # tail logs
 ```
 sap-ai-core-proxy/
 ├── main.go                          # Server startup, config wiring
+├── cmd/aicore-tui/                   # Read-only terminal dashboard
+│   ├── main.go
+│   ├── stats/                        # Observation endpoint client
+│   └── format/                       # Pure display formatting helpers
 ├── internal/
 │   ├── config/config.go             # Load ~/.aicoreproxy/config.json + env overrides
+│   ├── usage/                       # Token accounting, /stats and Prometheus metrics
+│   ├── diagnostics/                 # Cache attribution and /stats/cache
+│   ├── compress/                    # Deterministic tool_result log compression and /stats/compress
 │   ├── sapclient/
 │   │   ├── auth.go                  # OAuth2 client-credentials + singleflight token cache
 │   │   ├── client.go                # Signed HTTP client (injects Bearer + AI-Resource-Group)

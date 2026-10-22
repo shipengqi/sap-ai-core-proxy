@@ -10,12 +10,13 @@ import (
 
 // Handler groups the shared SAP client dependencies for OpenAI-surface endpoints.
 type Handler struct {
-	client      *sapclient.Client
-	deployments *sapclient.DeploymentManager
+	client             *sapclient.Client
+	deployments        *sapclient.DeploymentManager
+	anthropicAutoCache bool
 }
 
-func NewHandler(client *sapclient.Client, deployments *sapclient.DeploymentManager) *Handler {
-	return &Handler{client: client, deployments: deployments}
+func NewHandler(client *sapclient.Client, deployments *sapclient.DeploymentManager, anthropicAutoCache bool) *Handler {
+	return &Handler{client: client, deployments: deployments, anthropicAutoCache: anthropicAutoCache}
 }
 
 type modelObject struct {

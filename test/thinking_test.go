@@ -194,8 +194,8 @@ func TestThinking_SupportedModel(t *testing.T) {
 	}
 }
 
-// TestThinking_Streaming_AutoProbe tests that streaming requests automatically probe
-// thinking support before starting the stream.
+// TestThinking_Streaming_AutoProbe verifies that streaming capability detection
+// happens on the streaming endpoint itself, without a hidden full /invoke call.
 func TestThinking_Streaming_AutoProbe(t *testing.T) {
 	// Clear cache from previous tests
 	openai.ClearThinkingCache()
@@ -213,9 +213,9 @@ func TestThinking_Streaming_AutoProbe(t *testing.T) {
 	defer proxy.Close()
 
 	// First streaming request with thinking parameter should:
-	// 1. Send probe request (non-streaming) → fail with 400
+	// 1. Call the streaming endpoint → fail with 400 before any SSE bytes
 	// 2. Cache the result
-	// 3. Start streaming without thinking → succeed
+	// 3. Retry the streaming endpoint without thinking → succeed
 	reqBody := `{
 		"model": "claude-3-5-sonnet-latest",
 		"max_tokens": 100,
@@ -246,10 +246,15 @@ func TestThinking_Streaming_AutoProbe(t *testing.T) {
 
 	// Verify thinking is now cached as unsupported
 	if !openai.IsThinkingUnsupported("dep-anthropic-001") {
-		t.Error("expected deployment to be cached as unsupported after probe")
+		t.Error("expected deployment to be cached as unsupported after streaming rejection")
+	}
+	for _, request := range mock.RequestLog {
+		if strings.HasSuffix(request, "/invoke") {
+			t.Fatalf("streaming thinking detection must not call non-streaming /invoke: %q", request)
+		}
 	}
 
-	// Second streaming request should succeed immediately without probe
+	// Second streaming request should succeed immediately without a rejected attempt.
 	resp2, err := http.Post(proxy.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(reqBody))
 	if err != nil {
 		t.Fatalf("POST /anthropic/v1/messages (2nd streaming): %v", err)

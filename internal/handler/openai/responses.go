@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 var (
@@ -34,6 +35,9 @@ func (h *Handler) CreateResponse(c *gin.Context) {
 	}
 
 	modelName := req.Model
+	// Without this the request is counted under model="unknown": this endpoint
+	// never set the label, so its tokens were unattributable.
+	c.Set("model", modelName)
 	dep, err := h.deployments.GetDeployment(c.Request.Context(), modelName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, errorBody(err.Error()))
@@ -61,6 +65,9 @@ func (h *Handler) CreateResponse(c *gin.Context) {
 		}
 	}
 
+	// The Responses API reports usage as input_tokens/output_tokens (with the
+	// cached part under input_tokens_details). Observation only.
+	usage.ObserveJSONBody(c, respBody)
 	c.Data(upstream.StatusCode, "application/json", respBody)
 }
 

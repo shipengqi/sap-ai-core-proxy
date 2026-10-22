@@ -12,6 +12,7 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // chatCompletionsGlm handles Z.ai GLM models (zai--* prefix).
@@ -39,6 +40,8 @@ func (h *Handler) chatCompletionsGlm(c *gin.Context, modelStr string, raw map[st
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeAnthropicToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
 		return
@@ -69,6 +72,8 @@ func (h *Handler) chatCompletionsGlm(c *gin.Context, modelStr string, raw map[st
 
 	// GLM returns Anthropic Messages format; convert back to OpenAI format.
 	openAIResp := glmAnthropicToOpenAIResponse(respBody, modelStr)
+	// The converted body carries GLM's usage restated as OpenAI counters.
+	usage.ObserveJSONBody(c, openAIResp)
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
@@ -85,13 +90,16 @@ func openAIToGLMBody(raw map[string]json.RawMessage, modelStr string, streaming 
 		out["model"] = v
 	}
 
-	// Promote system messages from the messages array to the top-level system field.
-	promoted := transform.PromoteSystemMessages(raw)
+	// Promote system messages from the messages array to the top-level system field,
+	// then translate OpenAI tool-calling shapes into Anthropic content blocks.
+	converted := transform.PromoteSystemMessages(raw)
+	converted = transform.ConvertOpenAIToolMessagesToAnthropic(converted)
+	converted = transform.ConvertOpenAIToolsToAnthropic(converted)
 
-	if v, ok := promoted["messages"]; ok {
+	if v, ok := converted["messages"]; ok {
 		out["messages"] = v
 	}
-	if v, ok := promoted["system"]; ok {
+	if v, ok := converted["system"]; ok {
 		out["system"] = v
 	}
 
@@ -129,8 +137,11 @@ func glmAnthropicToOpenAIResponse(data []byte, model string) []byte {
 	var resp struct {
 		ID      string `json:"id"`
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
 		Usage      struct {
@@ -143,9 +154,24 @@ func glmAnthropicToOpenAIResponse(data []byte, model string) []byte {
 	}
 
 	text := ""
+	var toolCalls []map[string]interface{}
 	for _, block := range resp.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			text += block.Text
+		case "tool_use":
+			args := "{}"
+			if len(block.Input) > 0 && string(block.Input) != "null" {
+				args = string(block.Input)
+			}
+			toolCalls = append(toolCalls, map[string]interface{}{
+				"id":   block.ID,
+				"type": "function",
+				"function": map[string]string{
+					"name":      block.Name,
+					"arguments": args,
+				},
+			})
 		}
 	}
 
@@ -156,6 +182,20 @@ func glmAnthropicToOpenAIResponse(data []byte, model string) []byte {
 	case "tool_use":
 		finishReason = "tool_calls"
 	}
+	if finishReason == "stop" && len(toolCalls) > 0 {
+		finishReason = "tool_calls"
+	}
+
+	message := map[string]interface{}{
+		"role":    "assistant",
+		"content": text,
+	}
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = toolCalls
+		if text == "" {
+			message["content"] = nil
+		}
+	}
 
 	openAI := map[string]interface{}{
 		"id":     "chatcmpl-" + resp.ID,
@@ -164,7 +204,7 @@ func glmAnthropicToOpenAIResponse(data []byte, model string) []byte {
 		"choices": []map[string]interface{}{
 			{
 				"index":         0,
-				"message":       map[string]string{"role": "assistant", "content": text},
+				"message":       message,
 				"finish_reason": finishReason,
 			},
 		},

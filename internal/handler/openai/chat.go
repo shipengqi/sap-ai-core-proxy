@@ -10,9 +10,11 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // ChatCompletions proxies POST /openai/v1/chat/completions to SAP AI Core.
@@ -39,6 +41,13 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 	c.Set("model", modelStr)
+
+	// Cache attribution. On this surface the system prompt is a message rather
+	// than a top-level field, so the system fingerprint stays empty and the
+	// system prompt is hashed as part of the message prefix. That is less
+	// precise than the Anthropic surface but still catches the drift that
+	// matters.
+	diagnostics.ObserveRequest(c, body)
 
 	if _, ok := raw["messages"]; !ok {
 		c.JSON(http.StatusBadRequest, errorBody("missing required field: messages"))
@@ -88,6 +97,23 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// SAP can reject a streaming request before emitting any SSE bytes (for
+		// example, 429 token-rate limiting). Preserve that HTTP error instead of
+		// turning it into a misleading 200 empty stream that clients report as
+		// "user cancelled".
+		usage.MarkStream(c)
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
+		if upstream.StatusCode < http.StatusOK || upstream.StatusCode >= http.StatusMultipleChoices {
+			defer func() { _ = upstream.Body.Close() }()
+			copyUpstreamErrorHeaders(c, upstream)
+			errBody, _ := io.ReadAll(upstream.Body)
+			contentType := upstream.Header.Get("Content-Type")
+			if contentType == "" {
+				contentType = "application/json"
+			}
+			c.Data(upstream.StatusCode, contentType, errBody)
+			return
+		}
 		c.Status(http.StatusOK)
 		stream.PipeOpenAI(c, upstream)
 		return
@@ -112,7 +138,17 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
 	}
+	// Observation only: respBody is forwarded unchanged.
+	usage.ObserveJSONBody(c, respBody)
 	c.Data(status, "application/json", respBody)
+}
+
+func copyUpstreamErrorHeaders(c *gin.Context, upstream *http.Response) {
+	for _, name := range []string{"Retry-After", "RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Request-Id", "X-Request-Id"} {
+		for _, value := range upstream.Header.Values(name) {
+			c.Writer.Header().Add(name, value)
+		}
+	}
 }
 
 // chatCompletionsAnthropic handles Claude models via Bedrock /invoke (non-streaming)
@@ -126,43 +162,58 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 		return
 	}
 
-	bedrockBody := openAIToBedrockBody(raw, dep.ID)
+	clientProvidedCacheControl := transform.HasCacheControl(raw)
+	bedrockBody, markerResult := openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
+
+	// Counted once per request, from the first build: the thinking retries below
+	// rebuild the same body and would otherwise inflate the counter. The model
+	// label is the resolved deployment model name so it joins /stats by_model.
+	if markerResult != "" {
+		diagnostics.ObserveAutoMarker(usage.SurfaceOpenAI, dep.EffectiveModelName(), markerResult)
+	}
 
 	if streaming {
-		// Auto-detect thinking support before streaming if needed
-		if _, hasEffort := raw["reasoning_effort"]; hasEffort && !IsThinkingUnsupported(dep.ID) {
-			slog.Info("probing thinking support before streaming", "model", modelStr, "deployment_id", dep.ID)
-
-			// Build minimal probe request (same body as actual request)
-			probeResp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
-			if err != nil {
-				c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-				return
-			}
-			probeBody, _ := io.ReadAll(probeResp.Body)
-			_ = probeResp.Body.Close()
-
-			// Check if thinking is unsupported
-			if probeResp.StatusCode == http.StatusBadRequest && IsAdaptiveThinkingError(probeBody) {
-				slog.Info("detected thinking not supported, caching result", "deployment_id", dep.ID)
-				MarkThinkingUnsupported(dep.ID)
-
-				// Rebuild body without thinking
-				bedrockBody = openAIToBedrockBody(raw, dep.ID)
-			} else if probeResp.StatusCode != http.StatusOK {
-				// Probe failed for other reasons, return error
-				c.Data(probeResp.StatusCode, "application/json", probeBody)
-				return
-			}
-			// Probe succeeded (200 OK), thinking is supported - proceed with streaming
-		}
-
 		slog.Info("calling anthropic model via openai surface", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
 		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
 			dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(bedrockBody), nil)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+			return
+		}
+
+		// Avoid a hidden full non-streaming generation as a capability probe. If
+		// the stream endpoint rejects adaptive thinking before emitting SSE, retry
+		// the same endpoint once without thinking instead.
+		_, sentEffort := raw["reasoning_effort"]
+		if upstream.StatusCode == http.StatusBadRequest && sentEffort && !IsThinkingUnsupported(dep.ID) {
+			errBody, _ := io.ReadAll(upstream.Body)
+			_ = upstream.Body.Close()
+			if IsAdaptiveThinkingError(errBody) {
+				MarkThinkingUnsupported(dep.ID)
+				// Retry only: the auto-marker outcome was already counted above.
+				bedrockBody, _ = openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
+				upstream, err = h.client.DoStreaming(c.Request.Context(), http.MethodPost,
+					dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(bedrockBody), nil)
+				if err != nil {
+					c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+					return
+				}
+			} else {
+				usage.MarkUpstreamStatus(c, http.StatusBadRequest)
+				c.Data(http.StatusBadRequest, "application/json", errBody)
+				return
+			}
+		}
+
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
+		// Surface upstream failures as real HTTP errors. Once the SSE headers are
+		// written the status is locked at 200 and the client would only ever see an
+		// empty stream, hiding the actual upstream error.
+		if upstream.StatusCode != http.StatusOK {
+			defer func() { _ = upstream.Body.Close() }()
+			errBody, _ := io.ReadAll(upstream.Body)
+			c.Data(upstream.StatusCode, "application/json", errBody)
 			return
 		}
 		c.Status(http.StatusOK)
@@ -190,8 +241,9 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 
 		MarkThinkingUnsupported(dep.ID)
 
-		// Retry with thinking disabled (cache will skip thinking now)
-		bedrockBody = openAIToBedrockBody(raw, dep.ID)
+		// Retry with thinking disabled (cache will skip thinking now). The
+		// auto-marker outcome was already counted from the first build.
+		bedrockBody, _ = openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
 		resp, err = h.client.Do(c.Request.Context(), http.MethodPost,
 			dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
 		if err != nil {
@@ -209,6 +261,9 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 	}
 
 	openAIResp := bedrockToOpenAIResponse(respBody, modelStr)
+	// The converted body carries the Bedrock usage block restated as
+	// prompt_tokens / completion_tokens.
+	usage.ObserveJSONBody(c, openAIResp)
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
@@ -230,6 +285,8 @@ func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
+		// Recorded before c.Status(200) locks the client-visible status.
+		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeGeminiToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
 		return
@@ -260,6 +317,9 @@ func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map
 	}
 
 	openAIResp := geminiToOpenAIResponse(respBody, modelStr)
+	// The converted body carries Gemini's usageMetadata restated as
+	// prompt_tokens / completion_tokens.
+	usage.ObserveJSONBody(c, openAIResp)
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
@@ -273,7 +333,9 @@ var reasoningBudgets = map[string]int{
 }
 
 // openAIToBedrockBody converts an OpenAI chat request to SAP AI Core Bedrock format.
-func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string) []byte {
+// It also returns the auto cache-marker outcome for the caller to count once per
+// request, since this function runs again on every thinking retry.
+func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string, anthropicAutoCache bool, clientProvidedCacheControl bool) ([]byte, string) {
 	filtered := make(map[string]json.RawMessage)
 	for k, v := range raw {
 		if transform.BedrockAllowedFields[k] {
@@ -327,12 +389,25 @@ func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string) []
 		}
 	}
 
+	// parallel_tool_calls is OpenAI-only and not in BedrockAllowedFields; carry it
+	// through so the tool conversion can fold it into tool_choice.
+	if v, ok := raw["parallel_tool_calls"]; ok {
+		filtered["parallel_tool_calls"] = v
+	}
+
+	// Translate OpenAI tool-calling shapes into Anthropic content blocks. Without
+	// this, a "tool" role or an OpenAI-shaped tools array is forwarded verbatim and
+	// rejected upstream.
+	filtered = transform.ConvertOpenAIToolMessagesToAnthropic(filtered)
+	filtered = transform.ConvertOpenAIToolsToAnthropic(filtered)
+
 	filtered = transform.PromoteSystemMessages(filtered)
 	filtered = transform.ConvertImagePartsToAnthropic(filtered)
 	filtered = transform.FlattenSystem(filtered)
+	_, markerResult := transform.ApplyAnthropicToolCacheMarker(filtered, anthropicAutoCache, clientProvidedCacheControl)
 
 	out, _ := json.Marshal(filtered)
-	return out
+	return out, markerResult
 }
 
 // bedrockToOpenAIResponse converts a Bedrock /invoke response to OpenAI chat completion format.
@@ -340,8 +415,11 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 	var bedrock struct {
 		ID      string `json:"id"`
 		Content []struct {
-			Type string `json:"type"`
-			Text string `json:"text"`
+			Type  string          `json:"type"`
+			Text  string          `json:"text"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
 		Usage      struct {
@@ -354,13 +432,28 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 		return data
 	}
 
-	// Concatenate all text blocks; skip thinking blocks.
+	// Concatenate all text blocks; skip thinking blocks. tool_use blocks become
+	// OpenAI tool_calls so a tool-calling loop can continue.
 	content := ""
+	var toolCalls []map[string]interface{}
 	for _, block := range bedrock.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			content += block.Text
+		case "tool_use":
+			args := "{}"
+			if len(block.Input) > 0 && string(block.Input) != "null" {
+				args = string(block.Input)
+			}
+			toolCalls = append(toolCalls, map[string]interface{}{
+				"id":   block.ID,
+				"type": "function",
+				"function": map[string]string{
+					"name":      block.Name,
+					"arguments": args,
+				},
+			})
 		}
-		// thinking blocks are intentionally skipped
 	}
 
 	var finishReason string
@@ -372,6 +465,21 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 	default:
 		finishReason = "stop"
 	}
+	if finishReason == "stop" && len(toolCalls) > 0 {
+		finishReason = "tool_calls"
+	}
+
+	message := map[string]interface{}{
+		"role":    "assistant",
+		"content": content,
+	}
+	if len(toolCalls) > 0 {
+		message["tool_calls"] = toolCalls
+		// OpenAI reports null content when the turn is purely tool calls.
+		if content == "" {
+			message["content"] = nil
+		}
+	}
 
 	openAI := map[string]interface{}{
 		"id":     "chatcmpl-" + bedrock.ID,
@@ -379,11 +487,8 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 		"model":  model,
 		"choices": []map[string]interface{}{
 			{
-				"index": 0,
-				"message": map[string]string{
-					"role":    "assistant",
-					"content": content,
-				},
+				"index":         0,
+				"message":       message,
 				"finish_reason": finishReason,
 			},
 		},

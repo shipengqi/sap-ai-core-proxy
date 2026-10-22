@@ -9,12 +9,13 @@ import (
 )
 
 type Handler struct {
-	client      *sapclient.Client
-	deployments *sapclient.DeploymentManager
+	client             *sapclient.Client
+	deployments        *sapclient.DeploymentManager
+	anthropicAutoCache bool
 }
 
-func NewHandler(client *sapclient.Client, deployments *sapclient.DeploymentManager) *Handler {
-	return &Handler{client: client, deployments: deployments}
+func NewHandler(client *sapclient.Client, deployments *sapclient.DeploymentManager, anthropicAutoCache bool) *Handler {
+	return &Handler{client: client, deployments: deployments, anthropicAutoCache: anthropicAutoCache}
 }
 
 func (h *Handler) ListModels(c *gin.Context) {
@@ -42,4 +43,3 @@ func (h *Handler) ListModels(c *gin.Context) {
 func errorBody(msg string) gin.H {
 	return gin.H{"error": gin.H{"message": msg, "type": "proxy_error"}}
 }
-

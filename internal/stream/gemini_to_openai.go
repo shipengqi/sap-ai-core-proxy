@@ -9,6 +9,8 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // PipeGeminiToOpenAI converts a Gemini streamGenerateContent SSE response to
@@ -17,6 +19,8 @@ import (
 // JSON parsing.
 func PipeGeminiToOpenAI(c *gin.Context, upstream *http.Response, id, model string) {
 	defer func() { _ = upstream.Body.Close() }()
+
+	usage.MarkStream(c)
 
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
@@ -61,6 +65,10 @@ func PipeGeminiToOpenAI(c *gin.Context, upstream *http.Response, id, model strin
 		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 			continue
 		}
+
+		// Each chunk carries a cumulative usageMetadata block; the observer keeps
+		// the largest values, so the last chunk wins.
+		usage.ObserveGeminiChunk(c, payload)
 
 		var gr struct {
 			Candidates []struct {
