@@ -77,6 +77,7 @@ The proxy starts on `http://localhost:3001` (default).
 | `server.port` | No | `3001` | Listen port |
 | `server.log_level` | No | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
 | `server.metrics` | No | `true` | Register `GET /metrics` and `GET /stats` |
+| `server.compress_logs` | No | `false` | Deterministically compress every recognisable `tool_result` log in the request, history included. The transform is a pure function of the input text, so a rewritten history is byte-identical from turn to turn and the prompt cache keeps hitting; the model therefore sees compressed history logs in long sessions. Leave disabled unless validated |
 | `server.anthropic_auto_cache` | No | `false` | Add `{"type":"ephemeral"}` to the last tool sent to Claude Bedrock, but only when the client set no `cache_control` anywhere in its request |
 
 ### Environment Variable Overrides
@@ -94,6 +95,8 @@ All config values can be overridden by environment variables (higher priority th
 | `PORT` | `server.port` |
 | `LOG_LEVEL` | `server.log_level` |
 | `METRICS_ENABLED` | `server.metrics` |
+| `COMPRESS_LOGS` | `server.compress_logs` |
+| `COMPRESS_LOGS_SKIP` | Compression skip strategies (comma-separated, for example `log,json`) |
 | `ANTHROPIC_AUTO_CACHE` | `server.anthropic_auto_cache` |
 
 ## API Endpoints

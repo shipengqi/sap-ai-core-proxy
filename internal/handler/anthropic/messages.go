@@ -79,16 +79,18 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 	// build: the thinking retry path rebuilds the body and would double count.
 	markerRecorded := false
 
-	// Live-zone compression runs once, before the body builder, so a retry
-	// rebuilds the same bytes instead of compressing twice. Only the last user
-	// message can change: everything before it is the cache prefix, which costs
-	// 1.25x to rewrite and would cost more than the tokens saved.
+	// Compression runs once, before the body builder, so a retry rebuilds the
+	// same bytes instead of compressing twice. It covers every tool_result in
+	// the request, history included: the transform is deterministic, so the
+	// compressed history is byte-identical on every turn and the provider cache
+	// still hits. Compressing only the live zone would leave the next turn's
+	// history uncompressed and bust the prefix at that point.
 	if compress.Enabled() {
 		var report compress.Report
-		raw, report = compress.CompressLiveZone(raw)
+		raw, report = compress.CompressRequest(raw)
 		compress.Observe(usage.SurfaceAnthropic, report)
 		if report.BlocksCompressed > 0 {
-			slog.Debug("compressed live zone", "model", modelName,
+			slog.Debug("compressed tool results", "model", modelName,
 				"blocks", report.BlocksCompressed,
 				"bytes_before", report.OriginalBytes,
 				"bytes_after", report.CompressedBytes,

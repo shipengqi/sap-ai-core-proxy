@@ -34,7 +34,7 @@ func Configure(on bool, skipStrategies []string) {
 	}
 }
 
-// Enabled reports whether live-zone compression runs at all. When it is false
+// Enabled reports whether request compression runs at all. When it is false
 // the whole path is skipped: no parsing, no counters, no log line.
 func Enabled() bool {
 	settingsMu.RLock()

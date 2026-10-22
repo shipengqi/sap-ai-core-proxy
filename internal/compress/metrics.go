@@ -236,7 +236,7 @@ func (c *Collector) MetricsText() string {
 	}
 
 	writeHeader("sap_proxy_compress_blocks_total",
-		"Live-zone content blocks the compressor looked at, by outcome. compressed counts blocks that shrank; skipped counts eligible blocks that were left alone. Only blocks inside the last user message are ever counted.")
+		"tool_result content blocks the compressor looked at, by outcome. compressed counts blocks that shrank; skipped counts eligible blocks that were left alone. Every tool_result block in the request is considered, including the ones already in the message history.")
 	for _, r := range s.Blocks {
 		writeSeries("sap_proxy_compress_blocks_total", [][2]string{
 			{"surface", r.Surface}, {"result", r.Result},
@@ -244,19 +244,19 @@ func (c *Collector) MetricsText() string {
 	}
 
 	writeHeader("sap_proxy_compress_bytes_before_total",
-		"Bytes of live-zone content handed to the compressor. Bytes, not tokens: this proxy has no tokenizer, so these are the raw byte counts of the text that was compressed.")
+		"Bytes of tool_result content handed to the compressor. Bytes, not tokens: this proxy has no tokenizer, so these are the raw byte counts of the text that was compressed.")
 	for _, r := range s.Bytes {
 		writeSeries("sap_proxy_compress_bytes_before_total", [][2]string{{"surface", r.Surface}}, r.BytesBefore)
 	}
 
 	writeHeader("sap_proxy_compress_bytes_after_total",
-		"Bytes of live-zone content sent upstream after compression. Bytes, not tokens. Compare with sap_proxy_compress_bytes_before_total for the reduction ratio.")
+		"Bytes of tool_result content sent upstream after compression. Bytes, not tokens. Compare with sap_proxy_compress_bytes_before_total for the reduction ratio.")
 	for _, r := range s.Bytes {
 		writeSeries("sap_proxy_compress_bytes_after_total", [][2]string{{"surface", r.Surface}}, r.BytesAfter)
 	}
 
 	writeHeader("sap_proxy_compress_skipped_total",
-		"Requests in which no live-zone block was compressed, by reason. Skipping is not an error: the request was proxied with its original bytes.")
+		"Requests in which no tool_result block was compressed, by reason. Skipping is not an error: the request was proxied with its original bytes.")
 	for _, r := range s.Skipped {
 		writeSeries("sap_proxy_compress_skipped_total", [][2]string{
 			{"surface", r.Surface}, {"reason", r.Reason},

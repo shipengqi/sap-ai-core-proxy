@@ -24,8 +24,9 @@ type Server struct {
 	// to true: token accounting is the point of P0, and the endpoints expose no
 	// request content — only counters.
 	Metrics bool `json:"metrics"`
-	// CompressLogs enables live-zone log compression: the tool output in the
-	// last user message is shrunk before the request goes upstream.
+	// CompressLogs enables request-wide log compression: every recognisable
+	// tool_result log in the request — the live zone and the history alike — is
+	// shrunk by one deterministic rule before the request goes upstream.
 	//
 	// It defaults to false on purpose. The saving only materialises when the
 	// text really is a log, and a wrong guess changes what the model sees, so

@@ -12,14 +12,17 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 )
 
-// This file is the end-to-end guard for live-zone compression: it drives real
+// This file is the end-to-end guard for request compression: it drives real
 // requests through the real router and compares the bytes the upstream received
 // with the feature off against the bytes it received with the feature on.
 //
-// The claim under test is narrow and absolute: the only bytes that may differ
-// are inside the tool_result of the last user message. Everything else — system,
-// tools, the message history — is the prompt-cache prefix, and rewriting it is
-// billed at 1.25x per byte while the saving is a 0.1x read.
+// The claim under test has two halves. First, every tool_result log in the
+// request is compressed — the live zone and the history alike — because
+// compressing only the live zone leaves the client's original text in the
+// prefix and breaks the provider's cache on the next turn. Second, because the
+// transform is a pure function of the input text, the compressed history of turn
+// N+1 is byte-identical to the compressed live zone of turn N, so the prefix the
+// provider cached is the prefix it is asked to read.
 
 // compressPytestLog builds a deterministic pytest -v run: 120 tests, two
 // failures, one summary. Built rather than pasted so the noise section is big
@@ -48,9 +51,53 @@ func compressPytestLog() string {
 	return b.String()
 }
 
-// compressClaudeCodeRequest is a request in the shape Claude Code sends: system
-// blocks, tool definitions, several turns, and one large tool result at the end.
-func compressClaudeCodeRequest(t *testing.T, log string) string {
+// compressClaudeCodeMessages is the history every fixture starts from: a plain
+// user turn, a tool_use, a big tool_result in the history, a second tool_use and
+// the live tool_result. A fresh slice is returned on every call, so callers may
+// append a further turn to it.
+func compressClaudeCodeMessages(log string) []any {
+	return []any{
+		map[string]any{"role": "user", "content": "the build is failing, please fix it"},
+		map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": "Let me look at the repo first."},
+				map[string]any{"type": "tool_use", "id": "toolu_01", "name": "Read",
+					"input": map[string]any{"file_path": "/app/tests/test_api.py"}},
+			},
+		},
+		// An earlier turn whose tool result is also big. It is compressed like
+		// every other tool_result, which is what keeps the prefix stable.
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "toolu_01",
+					"content": strings.ReplaceAll(compressPytestLog(), "test_api.py", "test_db.py")},
+			},
+		},
+		map[string]any{
+			"role": "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": "Now let me run the tests."},
+				map[string]any{"type": "tool_use", "id": "toolu_02", "name": "Bash",
+					"input": map[string]any{"command": "pytest -v"}},
+			},
+		},
+		// The live zone.
+		map[string]any{
+			"role": "user",
+			"content": []any{
+				map[string]any{"type": "text", "text": "here is the pytest output"},
+				map[string]any{"type": "tool_result", "tool_use_id": "toolu_02", "content": log},
+			},
+		},
+	}
+}
+
+// compressClaudeCodeRequestWith builds the full request around a message
+// history. Two calls that share a message prefix produce byte-identical
+// prefixes, which is what lets the tests compare turns.
+func compressClaudeCodeRequestWith(t *testing.T, messages []any) string {
 	t.Helper()
 	req := map[string]any{
 		"model":      "claude-3-5-sonnet-latest",
@@ -83,48 +130,20 @@ func compressClaudeCodeRequest(t *testing.T, log string) string {
 				},
 			},
 		},
-		"messages": []any{
-			map[string]any{"role": "user", "content": "the build is failing, please fix it"},
-			map[string]any{
-				"role": "assistant",
-				"content": []any{
-					map[string]any{"type": "text", "text": "Let me look at the repo first."},
-					map[string]any{"type": "tool_use", "id": "toolu_01", "name": "Read",
-						"input": map[string]any{"file_path": "/app/tests/test_api.py"}},
-				},
-			},
-			// An earlier turn whose tool result is also big. It sits in the
-			// cache prefix and must not be touched.
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "tool_result", "tool_use_id": "toolu_01",
-						"content": strings.ReplaceAll(compressPytestLog(), "test_api.py", "test_db.py")},
-				},
-			},
-			map[string]any{
-				"role": "assistant",
-				"content": []any{
-					map[string]any{"type": "text", "text": "Now let me run the tests."},
-					map[string]any{"type": "tool_use", "id": "toolu_02", "name": "Bash",
-						"input": map[string]any{"command": "pytest -v"}},
-				},
-			},
-			// The live zone.
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "text", "text": "here is the pytest output"},
-					map[string]any{"type": "tool_result", "tool_use_id": "toolu_02", "content": log},
-				},
-			},
-		},
+		"messages": messages,
 	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		t.Fatalf("marshal request: %v", err)
 	}
 	return string(body)
+}
+
+// compressClaudeCodeRequest is a request in the shape Claude Code sends: system
+// blocks, tool definitions, several turns, and one large tool result at the end.
+func compressClaudeCodeRequest(t *testing.T, log string) string {
+	t.Helper()
+	return compressClaudeCodeRequestWith(t, compressClaudeCodeMessages(log))
 }
 
 // TestCompress_OffMatchesBaseline pins the default: with the switch off, the
@@ -156,9 +175,11 @@ func TestCompress_OffMatchesBaseline(t *testing.T) {
 	}
 }
 
-// TestCompress_OnlyTheLastToolResultChanges is the central guarantee: turn the
-// feature on and compare the upstream bytes field by field.
-func TestCompress_OnlyTheLastToolResultChanges(t *testing.T) {
+// TestCompress_EveryToolResultChanges is the central guarantee: turn the
+// feature on and compare the upstream bytes field by field. Both tool_results —
+// the one in the history and the one in the live zone — must shrink, while
+// system, tools and every non-tool_result message keep their exact bytes.
+func TestCompress_EveryToolResultChanges(t *testing.T) {
 	up := newQAUpstream(t)
 	defer up.Close()
 	proxy := qaProxy(t, up.URL)
@@ -209,54 +230,61 @@ func TestCompress_OnlyTheLastToolResultChanges(t *testing.T) {
 	if len(beforeMsgs) != len(afterMsgs) {
 		t.Fatalf("messages length %d, want %d", len(afterMsgs), len(beforeMsgs))
 	}
-	// The whole history: identical bytes.
-	for i := 0; i < len(beforeMsgs)-1; i++ {
+
+	// Messages 0, 1 and 3 carry no tool_result: identical bytes.
+	for _, i := range []int{0, 1, 3} {
 		if !bytes.Equal(beforeMsgs[i], afterMsgs[i]) {
-			t.Errorf("messages[%d] changed:\nbefore: %s\nafter:  %s", i, beforeMsgs[i], afterMsgs[i])
+			t.Errorf("messages[%d] changed although it carries no tool_result:\nbefore: %s\nafter:  %s",
+				i, beforeMsgs[i], afterMsgs[i])
 		}
 	}
 
-	// The last message: every field but content is identical.
-	beforeLast := decodeObject(t, beforeMsgs[len(beforeMsgs)-1])
-	afterLast := decodeObject(t, afterMsgs[len(afterMsgs)-1])
-	for k, v := range beforeLast {
-		if k == "content" {
-			continue
+	// Messages 2 (history) and 4 (live zone) each carry a log tool_result.
+	for _, i := range []int{2, 4} {
+		beforeBlocks := decodeArray(t, decodeObject(t, beforeMsgs[i])["content"])
+		afterBlocks := decodeArray(t, decodeObject(t, afterMsgs[i])["content"])
+		if len(beforeBlocks) != len(afterBlocks) {
+			t.Fatalf("messages[%d]: content blocks %d, want %d", i, len(afterBlocks), len(beforeBlocks))
 		}
-		if !bytes.Equal(v, afterLast[k]) {
-			t.Errorf("last message field %q changed: %s -> %s", k, v, afterLast[k])
+		beforeTool := decodeObject(t, beforeBlocks[len(beforeBlocks)-1])
+		afterTool := decodeObject(t, afterBlocks[len(afterBlocks)-1])
+		for k, v := range beforeTool {
+			if k == "content" {
+				continue
+			}
+			if !bytes.Equal(v, afterTool[k]) {
+				t.Errorf("messages[%d]: tool_result field %q changed: %s -> %s", i, k, v, afterTool[k])
+			}
 		}
+		var beforeText, afterText string
+		if err := json.Unmarshal(beforeTool["content"], &beforeText); err != nil {
+			t.Fatalf("messages[%d]: decode baseline text: %v", i, err)
+		}
+		if err := json.Unmarshal(afterTool["content"], &afterText); err != nil {
+			t.Fatalf("messages[%d]: decode compressed text: %v", i, err)
+		}
+		if len(afterText) >= len(beforeText) {
+			t.Fatalf("messages[%d]: tool_result %d -> %d bytes, want strictly smaller", i, len(beforeText), len(afterText))
+		}
+		if !strings.Contains(afterText, "lines omitted") {
+			t.Errorf("messages[%d]: no omission marker, so nothing was dropped", i)
+		}
+		t.Logf("messages[%d] tool_result: %d -> %d bytes (%.1fx)", i, len(beforeText), len(afterText),
+			float64(len(beforeText))/float64(len(afterText)))
 	}
 
-	beforeBlocks := decodeArray(t, beforeLast["content"])
-	afterBlocks := decodeArray(t, afterLast["content"])
-	if len(beforeBlocks) != len(afterBlocks) {
-		t.Fatalf("content blocks %d, want %d", len(afterBlocks), len(beforeBlocks))
-	}
-	// The text block is not a tool_result, so it must be untouched.
+	// The live-zone text block is not a tool_result and must be untouched.
+	beforeBlocks := decodeArray(t, decodeObject(t, beforeMsgs[4])["content"])
+	afterBlocks := decodeArray(t, decodeObject(t, afterMsgs[4])["content"])
 	if !bytes.Equal(beforeBlocks[0], afterBlocks[0]) {
-		t.Errorf("the text block changed:\nbefore: %s\nafter:  %s", beforeBlocks[0], afterBlocks[0])
-	}
-	beforeTool := decodeObject(t, beforeBlocks[1])
-	afterTool := decodeObject(t, afterBlocks[1])
-	for k, v := range beforeTool {
-		if k == "content" {
-			continue
-		}
-		if !bytes.Equal(v, afterTool[k]) {
-			t.Errorf("tool_result field %q changed: %s -> %s", k, v, afterTool[k])
-		}
+		t.Errorf("the live-zone text block changed:\nbefore: %s\nafter:  %s", beforeBlocks[0], afterBlocks[0])
 	}
 
-	var beforeText, afterText string
-	if err := json.Unmarshal(beforeTool["content"], &beforeText); err != nil {
-		t.Fatalf("decode baseline text: %v", err)
-	}
-	if err := json.Unmarshal(afterTool["content"], &afterText); err != nil {
-		t.Fatalf("decode compressed text: %v", err)
-	}
-	if len(afterText) >= len(beforeText) {
-		t.Fatalf("tool_result %d -> %d bytes, want strictly smaller", len(beforeText), len(afterText))
+	// The errors and the summary survive the rewrite.
+	liveTool := decodeObject(t, afterBlocks[len(afterBlocks)-1])
+	var liveText string
+	if err := json.Unmarshal(liveTool["content"], &liveText); err != nil {
+		t.Fatalf("decode live tool_result: %v", err)
 	}
 	for _, want := range []string{
 		"FAILED tests/test_api.py::test_update_user",
@@ -264,12 +292,100 @@ func TestCompress_OnlyTheLastToolResultChanges(t *testing.T) {
 		"2 failed, 118 passed in 4.53s",
 		"E       AssertionError: assert 404 == 200",
 	} {
-		if !strings.Contains(afterText, want) {
-			t.Errorf("compressed tool_result lost %q:\n%s", want, afterText)
+		if !strings.Contains(liveText, want) {
+			t.Errorf("compressed tool_result lost %q:\n%s", want, liveText)
 		}
 	}
-	t.Logf("tool_result: %d -> %d bytes (%.1fx)", len(beforeText), len(afterText),
-		float64(len(beforeText))/float64(len(afterText)))
+}
+
+// TestCompress_PrefixStableAcrossTurns is the integration form of the cache
+// guarantee: turn N+1 sends the turn-N history with the compressed tool_result
+// in it, and the bytes the upstream receives for that history must be identical
+// to the bytes it received for turn N. One byte of drift and the provider
+// re-writes the whole prefix.
+func TestCompress_PrefixStableAcrossTurns(t *testing.T) {
+	up := newQAUpstream(t)
+	defer up.Close()
+	proxy := qaProxy(t, up.URL)
+	defer proxy.Close()
+
+	compress.Configure(true, nil)
+	defer compress.Configure(false, nil)
+
+	turnOne := compressClaudeCodeRequest(t, compressPytestLog())
+
+	// Turn two: the same conversation, one more assistant/user pair. The client
+	// sends its own original bytes for the earlier tool_result; the proxy must
+	// rewrite them into the same bytes it sent last turn.
+	turnTwoMsgs := compressClaudeCodeMessages(compressPytestLog())
+	turnTwoMsgs = append(turnTwoMsgs,
+		map[string]any{"role": "assistant", "content": []any{
+			map[string]any{"type": "text", "text": "Now the linter."},
+			map[string]any{"type": "tool_use", "id": "toolu_03", "name": "Bash",
+				"input": map[string]any{"command": "ruff check ."}},
+		}},
+		map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "tool_result", "tool_use_id": "toolu_03",
+				"content": strings.ReplaceAll(compressPytestLog(), "test_api.py", "test_web.py")},
+		}},
+	)
+	turnTwo := compressClaudeCodeRequestWith(t, turnTwoMsgs)
+
+	for i, req := range []string{turnOne, turnTwo} {
+		if status, body := qaPost(t, proxy.URL+"/anthropic/v1/messages", req); status != 200 {
+			t.Fatalf("turn %d: status %d: %s", i+1, status, body)
+		}
+	}
+
+	bodies := up.bodiesSnapshot()
+	if len(bodies) != 2 {
+		t.Fatalf("upstream received %d requests, want 2", len(bodies))
+	}
+	var first, second map[string]json.RawMessage
+	if err := json.Unmarshal(bodies[0], &first); err != nil {
+		t.Fatalf("decode turn 1: %v", err)
+	}
+	if err := json.Unmarshal(bodies[1], &second); err != nil {
+		t.Fatalf("decode turn 2: %v", err)
+	}
+
+	for _, key := range []string{"system", "tools"} {
+		if !bytes.Equal(first[key], second[key]) {
+			t.Errorf("%s differs between turns", key)
+		}
+	}
+
+	firstMsgs := decodeMessages(t, first["messages"])
+	secondMsgs := decodeMessages(t, second["messages"])
+	if len(firstMsgs) != 5 || len(secondMsgs) != 7 {
+		t.Fatalf("message counts = %d and %d, want 5 and 7", len(firstMsgs), len(secondMsgs))
+	}
+	for i := range firstMsgs {
+		if !bytes.Equal(firstMsgs[i], secondMsgs[i]) {
+			t.Fatalf("turn 2 rewrote the prefix at messages[%d]\nturn 1: %s\nturn 2: %s",
+				i, firstMsgs[i], secondMsgs[i])
+		}
+	}
+
+	// And the prefix really is compressed, so the test is not passing on
+	// untouched bytes.
+	historyTool := decodeObject(t, decodeArray(t, decodeObject(t, secondMsgs[2])["content"])[0])
+	var historyText string
+	if err := json.Unmarshal(historyTool["content"], &historyText); err != nil {
+		t.Fatalf("decode history tool_result: %v", err)
+	}
+	if !strings.Contains(historyText, "lines omitted") {
+		t.Fatalf("the history tool_result was not compressed, so prefix stability proves nothing:\n%s", historyText)
+	}
+	// The new turn's tool_result is compressed too.
+	newTool := decodeObject(t, decodeArray(t, decodeObject(t, secondMsgs[6])["content"])[0])
+	var newText string
+	if err := json.Unmarshal(newTool["content"], &newText); err != nil {
+		t.Fatalf("decode new tool_result: %v", err)
+	}
+	if !strings.Contains(newText, "lines omitted") {
+		t.Errorf("the newest tool_result was not compressed:\n%s", newText)
+	}
 }
 
 // TestCompress_DeterministicWhenEnabled: two identical requests with the feature
@@ -301,7 +417,8 @@ func TestCompress_DeterministicWhenEnabled(t *testing.T) {
 }
 
 // TestCompress_NoChangeWhenNothingToCompress: a tool result that is not a log
-// must pass through untouched even with the switch on.
+// must pass through untouched even with the switch on. Only the history block,
+// which really is a log, may shrink.
 func TestCompress_NoChangeWhenNothingToCompress(t *testing.T) {
 	up := newQAUpstream(t)
 	defer up.Close()
@@ -325,8 +442,43 @@ func TestCompress_NoChangeWhenNothingToCompress(t *testing.T) {
 	if len(bodies) != 2 {
 		t.Fatalf("upstream received %d requests, want 2", len(bodies))
 	}
-	if !bytes.Equal(bodies[0], bodies[1]) {
-		t.Fatalf("a non-log tool result was modified:\nbefore: %s\nafter:  %s", bodies[0], bodies[1])
+	var before, after map[string]json.RawMessage
+	if err := json.Unmarshal(bodies[0], &before); err != nil {
+		t.Fatalf("decode baseline: %v", err)
+	}
+	if err := json.Unmarshal(bodies[1], &after); err != nil {
+		t.Fatalf("decode compressed: %v", err)
+	}
+
+	// The live-zone tool_result is prose, not a log: identical bytes.
+	beforeMsgs := decodeMessages(t, before["messages"])
+	afterMsgs := decodeMessages(t, after["messages"])
+	if len(beforeMsgs) != len(afterMsgs) {
+		t.Fatalf("messages length %d, want %d", len(afterMsgs), len(beforeMsgs))
+	}
+	liveIndex := len(beforeMsgs) - 1
+	beforeBlocks := decodeArray(t, decodeObject(t, beforeMsgs[liveIndex])["content"])
+	afterBlocks := decodeArray(t, decodeObject(t, afterMsgs[liveIndex])["content"])
+	if !bytes.Equal(beforeBlocks[len(beforeBlocks)-1], afterBlocks[len(afterBlocks)-1]) {
+		t.Fatalf("a non-log tool result was modified:\nbefore: %s\nafter:  %s",
+			beforeBlocks[len(beforeBlocks)-1], afterBlocks[len(afterBlocks)-1])
+	}
+
+	// Everything except the history tool_result is identical too: the prose
+	// block must not drag any neighbour into a rewrite.
+	for i := range beforeMsgs {
+		if i == 2 {
+			continue
+		}
+		if !bytes.Equal(beforeMsgs[i], afterMsgs[i]) {
+			t.Errorf("messages[%d] changed although it carries no log:\nbefore: %s\nafter:  %s",
+				i, beforeMsgs[i], afterMsgs[i])
+		}
+	}
+	for _, key := range []string{"system", "tools"} {
+		if !bytes.Equal(before[key], after[key]) {
+			t.Errorf("%s changed", key)
+		}
 	}
 }
 

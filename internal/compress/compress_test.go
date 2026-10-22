@@ -346,149 +346,187 @@ func TestCompressLog_ErrorsNeverDropped(t *testing.T) {
 	}
 }
 
-// TestCompressLiveZone_OnlyLastUserMessageIsTouched builds a full Anthropic
-// request — system, tools, a previous turn whose tool_result is also a log — and
-// asserts that only the last user message's tool_result changed.
-func TestCompressLiveZone_OnlyLastUserMessageIsTouched(t *testing.T) {
-	historyLog := fixtureGoTest
-	req := map[string]any{
-		"model": "claude-3-5-sonnet-latest",
+// ---------------------------------------------------------------------------
+// CompressRequest
+// ---------------------------------------------------------------------------
+
+// prefixLogs are five distinct real logs. Distinct on purpose: if every turn
+// carried the same text, a caching bug could hide behind a correct result.
+var prefixLogs = []string{fixturePytest, fixtureNPM, fixtureCargo, fixtureGoTest, fixtureJest}
+
+// conversationMessages builds the first `turns` user/assistant pairs of a
+// scripted Claude Code session. Every user message carries one tool_result whose
+// content is a real log, and every second one carries cache_control, which is
+// what a real session looks like in the wild.
+func conversationMessages(turns int) []any {
+	msgs := make([]any, 0, turns*2)
+	for i := 0; i < turns; i++ {
+		block := map[string]any{
+			"type":        "tool_result",
+			"tool_use_id": fmt.Sprintf("toolu_%02d", i),
+			"content":     prefixLogs[i%len(prefixLogs)],
+		}
+		if i%2 == 1 {
+			block["cache_control"] = map[string]any{"type": "ephemeral"}
+		}
+		msgs = append(msgs,
+			map[string]any{"role": "user", "content": []any{block}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{
+					"type":  "tool_use",
+					"id":    fmt.Sprintf("toolu_%02d", i),
+					"name":  "Bash",
+					"input": map[string]any{"command": "go test ./..."},
+				},
+			}},
+		)
+	}
+	return msgs
+}
+
+// conversationRequest wraps a message prefix in a full Anthropic request.
+func conversationRequest(msgs []any) map[string]any {
+	return map[string]any{
+		"model":      "claude-3-5-sonnet-latest",
+		"max_tokens": 4096,
 		"system": []any{
-			map[string]any{"type": "text", "text": "You are Claude Code."},
+			map[string]any{"type": "text", "text": "You are Claude Code, an assistant for software engineering."},
 		},
 		"tools": []any{
 			map[string]any{
 				"name":        "Bash",
 				"description": "Run a command",
 				"input_schema": map[string]any{
-					"type": "object",
-					"properties": map[string]any{
-						"command": map[string]any{"type": "string"},
-					},
+					"type":       "object",
+					"properties": map[string]any{"command": map[string]any{"type": "string"}},
 				},
 			},
 		},
-		"messages": []any{
-			map[string]any{"role": "user", "content": "run the tests"},
-			map[string]any{
-				"role": "assistant",
-				"content": []any{
-					map[string]any{"type": "tool_use", "id": "toolu_1", "name": "Bash",
-						"input": map[string]any{"command": "go test ./... -run TestParse"}},
-				},
-			},
-			// A previous turn whose tool result is a log too. It sits in the
-			// cache prefix, so it must survive untouched.
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": historyLog},
-				},
-			},
-			map[string]any{
-				"role": "assistant",
-				"content": []any{
-					map[string]any{"type": "text", "text": "now run pytest"},
-				},
-			},
-			// The live zone.
-			map[string]any{
-				"role": "user",
-				"content": []any{
-					map[string]any{"type": "text", "text": "here is the pytest output"},
-					map[string]any{"type": "tool_result", "tool_use_id": "toolu_2", "content": fixturePytest},
-				},
-			},
-		},
-		"max_tokens": 1024,
+		"messages": msgs,
 	}
+}
 
-	in := mustRawMap(t, req)
-	out, rep := CompressLiveZone(in)
+// TestCompressRequest_PrefixStability is the test the whole change stands or
+// falls on.
+//
+// Turn N sends messages [m0..mk]; turn N+1 sends [m0..mk, assistant, user].
+// Both go through CompressRequest, and the first k+1 messages of turn N+1's
+// output must be byte-identical to turn N's output. That is exactly what the
+// provider's prompt cache compares: if one byte of the prefix moves, the cache
+// misses and the whole conversation is billed as a fresh write.
+//
+// The scripted conversation carries cache_control blocks in its history, which
+// is the case that used to be skipped and is now compressed like everything
+// else — and the case where a single-byte drift would be most expensive.
+func TestCompressRequest_PrefixStability(t *testing.T) {
+	const turns = 5
+	full := conversationMessages(turns)
 
-	if rep.BlocksCompressed != 1 {
-		t.Fatalf("BlocksCompressed = %d, want 1 (%+v)", rep.BlocksCompressed, rep)
-	}
-	if rep.Skipped != "" {
-		t.Fatalf("Skipped = %q, want empty", rep.Skipped)
-	}
-	if rep.OriginalBytes <= rep.CompressedBytes {
-		t.Fatalf("bytes %d -> %d, want strictly smaller", rep.OriginalBytes, rep.CompressedBytes)
-	}
+	var previous []json.RawMessage
+	var previousRequest map[string]json.RawMessage
 
-	// system and tools: identical bytes.
-	for _, key := range []string{"system", "tools"} {
-		if !bytes.Equal(in[key], out[key]) {
-			t.Errorf("%s changed:\nbefore: %s\nafter:  %s", key, in[key], out[key])
+	for k := 1; k <= turns; k++ {
+		in := mustRawMap(t, conversationRequest(full[:k*2]))
+		out, rep := CompressRequest(in)
+
+		if rep.BlocksCompressed != k {
+			t.Fatalf("turn %d: BlocksCompressed = %d, want %d (%+v)", k, rep.BlocksCompressed, k, rep)
 		}
-	}
-
-	inMsgs := mustMessages(t, in)
-	outMsgs := mustMessages(t, out)
-	if len(inMsgs) != len(outMsgs) {
-		t.Fatalf("messages length %d, want %d", len(outMsgs), len(inMsgs))
-	}
-	// Everything but the last message: identical bytes.
-	for i := 0; i < len(inMsgs)-1; i++ {
-		if !bytes.Equal(inMsgs[i], outMsgs[i]) {
-			t.Errorf("messages[%d] changed:\nbefore: %s\nafter:  %s", i, inMsgs[i], outMsgs[i])
+		msgs := mustMessages(t, out)
+		if len(msgs) != k*2 {
+			t.Fatalf("turn %d: messages length %d, want %d", k, len(msgs), k*2)
 		}
+		// The prefix of this turn must be the prefix of the previous turn.
+		for i := range previous {
+			if !bytes.Equal(previous[i], msgs[i]) {
+				t.Fatalf("turn %d: messages[%d] drifted from the previous turn\nprevious: %s\ncurrent:  %s",
+					k, i, previous[i], msgs[i])
+			}
+		}
+		// system and tools are the head of the cache prefix: never touched.
+		if previousRequest != nil {
+			for _, key := range []string{"system", "tools"} {
+				if !bytes.Equal(previousRequest[key], out[key]) {
+					t.Fatalf("turn %d: %s changed between turns", k, key)
+				}
+			}
+		}
+		for _, key := range []string{"system", "tools"} {
+			if !bytes.Equal(in[key], out[key]) {
+				t.Fatalf("turn %d: %s changed by compression", k, key)
+			}
+		}
+
+		previous = msgs
+		previousRequest = out
 	}
 
-	// The last message: every field except content is identical.
-	inLast := mustObject(t, inMsgs[len(inMsgs)-1])
-	outLast := mustObject(t, outMsgs[len(outMsgs)-1])
-	for k, v := range inLast {
-		if k == "content" {
+	// The last turn's history must really be compressed: a marker in the
+	// history block proves the test is not passing because nothing happened.
+	last := mustObject(t, previous[len(previous)-2])
+	blocks := mustArray(t, last["content"])
+	var text string
+	if err := json.Unmarshal(mustObject(t, blocks[0])["content"], &text); err != nil {
+		t.Fatalf("decode last tool_result: %v", err)
+	}
+	if !strings.Contains(text, "lines omitted") {
+		t.Fatalf("the last tool_result was not compressed, so prefix stability proves nothing:\n%s", text)
+	}
+	lastLog := prefixLogs[(turns-1)%len(prefixLogs)]
+	if got, want := countErrorLines(text), countErrorLines(lastLog); got != want {
+		t.Errorf("error+fail lines kept = %d, want %d\n%s", got, want, text)
+	}
+}
+
+// TestCompressRequest_PrefixStabilityAcrossTurnsWithColdCache repeats the
+// stability walk with the memo cleared between turns. Determinism must come from
+// the transform, never from a warm cache.
+func TestCompressRequest_PrefixStabilityAcrossTurnsWithColdCache(t *testing.T) {
+	const turns = 4
+	full := conversationMessages(turns)
+
+	var cold, warm [][]json.RawMessage
+	for k := 1; k <= turns; k++ {
+		in := mustRawMap(t, conversationRequest(full[:k*2]))
+
+		resetTextCache()
+		coldOut, coldRep := CompressRequest(in)
+		cold = append(cold, mustMessages(t, coldOut))
+
+		warmOut, warmRep := CompressRequest(in) // warm
+		warm = append(warm, mustMessages(t, warmOut))
+
+		if coldRep != warmRep {
+			t.Fatalf("turn %d: cold cache report %+v, warm %+v", k, coldRep, warmRep)
+		}
+		for i := range cold[k-1] {
+			if !bytes.Equal(cold[k-1][i], warm[k-1][i]) {
+				t.Fatalf("turn %d: messages[%d] differs between a cold and a warm cache\ncold: %s\nwarm: %s",
+					k, i, cold[k-1][i], warm[k-1][i])
+			}
+		}
+		if k == 1 {
 			continue
 		}
-		if !bytes.Equal(v, outLast[k]) {
-			t.Errorf("last message field %q changed: %s -> %s", k, v, outLast[k])
-		}
-	}
-
-	inBlocks := mustArray(t, inLast["content"])
-	outBlocks := mustArray(t, outLast["content"])
-	if len(inBlocks) != len(outBlocks) {
-		t.Fatalf("content blocks %d, want %d", len(outBlocks), len(inBlocks))
-	}
-	// The text block is untouched: only tool_result text is eligible.
-	if !bytes.Equal(inBlocks[0], outBlocks[0]) {
-		t.Errorf("text block changed:\nbefore: %s\nafter:  %s", inBlocks[0], outBlocks[0])
-	}
-	inBody := mustObject(t, inBlocks[1])
-	outBody := mustObject(t, outBlocks[1])
-	for k, v := range inBody {
-		if k == "content" {
-			continue
-		}
-		if !bytes.Equal(v, outBody[k]) {
-			t.Errorf("tool_result field %q changed: %s -> %s", k, v, outBody[k])
-		}
-	}
-
-	var before, after string
-	if err := json.Unmarshal(inBody["content"], &before); err != nil {
-		t.Fatalf("decode original content: %v", err)
-	}
-	if err := json.Unmarshal(outBody["content"], &after); err != nil {
-		t.Fatalf("decode compressed content: %v", err)
-	}
-	if len(after) >= len(before) {
-		t.Fatalf("tool_result text %d -> %d, want strictly smaller", len(before), len(after))
-	}
-	for _, want := range []string{"FAILED tests/test_api.py::test_update_user", "2 failed, 126 passed"} {
-		if !strings.Contains(after, want) {
-			t.Errorf("compressed tool_result lost %q", want)
+		// The history of this turn must be byte-identical to the whole of the
+		// previous turn, which is the property the provider's cache checks.
+		for i := range cold[k-2] {
+			if !bytes.Equal(cold[k-2][i], cold[k-1][i]) {
+				t.Fatalf("turn %d: messages[%d] drifted with a cold cache\nprevious: %s\ncurrent:  %s",
+					k, i, cold[k-2][i], cold[k-1][i])
+			}
 		}
 	}
 }
 
-// TestCompressLiveZone_CacheControlIsUntouched pins the rule that pays for the
-// whole feature: rewriting a cached block is billed as a cache write, so a block
-// carrying cache_control is not touched at all.
-func TestCompressLiveZone_CacheControlIsUntouched(t *testing.T) {
-	req := map[string]any{
+// TestCompressRequest_CacheControlIsCompressed inverts the old rule on purpose.
+//
+// A cache_control block used to be skipped because rewriting it looked like a
+// cache write. It is now compressed like any other block: the compressed form is
+// stable, so the write happens once and every later turn reads it — whereas
+// leaving it out of the transform is what broke the prefix in the first place.
+func TestCompressRequest_CacheControlIsCompressed(t *testing.T) {
+	in := mustRawMap(t, map[string]any{
 		"model": "claude-3-5-sonnet-latest",
 		"messages": []any{
 			map[string]any{
@@ -503,24 +541,158 @@ func TestCompressLiveZone_CacheControlIsUntouched(t *testing.T) {
 				},
 			},
 		},
-	}
-	in := mustRawMap(t, req)
-	out, rep := CompressLiveZone(in)
+	})
+	out, rep := CompressRequest(in)
 
-	if !bytes.Equal(in["messages"], out["messages"]) {
-		t.Errorf("a cache_control block was modified")
+	if rep.BlocksCompressed != 1 {
+		t.Fatalf("BlocksCompressed = %d, want 1 (%+v)", rep.BlocksCompressed, rep)
 	}
-	if rep.BlocksCompressed != 0 {
-		t.Errorf("BlocksCompressed = %d, want 0", rep.BlocksCompressed)
+	if rep.Skipped != "" {
+		t.Fatalf("Skipped = %q, want empty", rep.Skipped)
 	}
-	if rep.Skipped != skipCacheControl {
-		t.Errorf("Skipped = %q, want %q", rep.Skipped, skipCacheControl)
+
+	before := mustObject(t, mustArray(t, mustObject(t, mustMessages(t, in)[0])["content"])[0])
+	after := mustObject(t, mustArray(t, mustObject(t, mustMessages(t, out)[0])["content"])[0])
+
+	if !bytes.Equal(before["cache_control"], after["cache_control"]) {
+		t.Errorf("cache_control changed: %s -> %s", before["cache_control"], after["cache_control"])
+	}
+	if !bytes.Equal(before["tool_use_id"], after["tool_use_id"]) {
+		t.Errorf("tool_use_id changed: %s -> %s", before["tool_use_id"], after["tool_use_id"])
+	}
+
+	var beforeText, afterText string
+	if err := json.Unmarshal(before["content"], &beforeText); err != nil {
+		t.Fatalf("decode original content: %v", err)
+	}
+	if err := json.Unmarshal(after["content"], &afterText); err != nil {
+		t.Fatalf("decode compressed content: %v", err)
+	}
+	if len(afterText) >= len(beforeText) {
+		t.Fatalf("tool_result text %d -> %d, want strictly smaller", len(beforeText), len(afterText))
+	}
+	if !strings.Contains(afterText, "lines omitted") {
+		t.Errorf("no omission marker, so nothing was dropped:\n%s", afterText)
+	}
+	for _, want := range []string{
+		"FAILED tests/test_api.py::test_update_user",
+		"E       AssertionError: assert 404 == 200",
+		"2 failed, 126 passed in 4.53s",
+	} {
+		if !strings.Contains(afterText, want) {
+			t.Errorf("compressed tool_result lost %q", want)
+		}
 	}
 }
 
-// TestCompressLiveZone_SkipReasons covers the paths that leave a request alone.
-func TestCompressLiveZone_SkipReasons(t *testing.T) {
-	logText := fixturePytest
+// TestCompressRequest_EveryMessageIsCompressed pins the scope: history blocks,
+// including the ones in assistant-authored turns and cache_control blocks, are
+// all compressed by the same rule.
+func TestCompressRequest_EveryMessageIsCompressed(t *testing.T) {
+	in := mustRawMap(t, map[string]any{
+		"model": "claude-3-5-sonnet-latest",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "run the tests"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "text", "text": "running them now"},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": fixturePytest,
+					"cache_control": map[string]any{"type": "ephemeral"}},
+			}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "t2", "name": "Bash", "input": map[string]any{"command": "npm run build"}},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "t2", "content": fixtureNPM},
+			}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "t3", "name": "Bash", "input": map[string]any{"command": "cargo build"}},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "t3", "content": []any{
+					map[string]any{"type": "text", "text": fixtureCargo},
+				}},
+			}},
+		},
+	})
+	out, rep := CompressRequest(in)
+
+	if rep.BlocksCompressed != 3 {
+		t.Fatalf("BlocksCompressed = %d, want 3 (%+v)", rep.BlocksCompressed, rep)
+	}
+	if rep.OriginalBytes <= rep.CompressedBytes {
+		t.Fatalf("bytes %d -> %d, want strictly smaller", rep.OriginalBytes, rep.CompressedBytes)
+	}
+	if rep.Skipped != "" {
+		t.Errorf("Skipped = %q, want empty", rep.Skipped)
+	}
+
+	// The plain-string user message and the text-only assistant message keep
+	// their original bytes.
+	inMsgs := mustMessages(t, in)
+	outMsgs := mustMessages(t, out)
+	for _, i := range []int{0, 1} {
+		if !bytes.Equal(inMsgs[i], outMsgs[i]) {
+			t.Errorf("messages[%d] changed although it carries no tool_result:\nbefore: %s\nafter:  %s",
+				i, inMsgs[i], outMsgs[i])
+		}
+	}
+	for _, i := range []int{2, 4, 6} {
+		if bytes.Equal(inMsgs[i], outMsgs[i]) {
+			t.Errorf("messages[%d] was not compressed", i)
+		}
+	}
+}
+
+// TestCompressRequest_RoleIsIrrelevant: the transform is not a live-zone
+// transform any more, so a tool_result in an assistant-role message is still
+// eligible. Roles do not select blocks; block type does.
+func TestCompressRequest_RoleIsIrrelevant(t *testing.T) {
+	in := mustRawMap(t, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": fixtureGoTest},
+			}},
+		},
+	})
+	_, rep := CompressRequest(in)
+	if rep.BlocksCompressed != 1 {
+		t.Fatalf("BlocksCompressed = %d, want 1 (%+v)", rep.BlocksCompressed, rep)
+	}
+}
+
+// TestCompressRequest_SameTextSameBytes: the same log in two different messages
+// must compress to the same bytes, which is what makes a history rewrite safe.
+func TestCompressRequest_SameTextSameBytes(t *testing.T) {
+	in := mustRawMap(t, map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": fixtureJest},
+			}},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "text", "text": "again"},
+			}},
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "t2", "content": fixtureJest},
+			}},
+		},
+	})
+	out, rep := CompressRequest(in)
+	if rep.BlocksCompressed != 2 {
+		t.Fatalf("BlocksCompressed = %d, want 2 (%+v)", rep.BlocksCompressed, rep)
+	}
+	msgs := mustMessages(t, out)
+	first := mustObject(t, mustArray(t, mustObject(t, msgs[0])["content"])[0])
+	second := mustObject(t, mustArray(t, mustObject(t, msgs[2])["content"])[0])
+	if !bytes.Equal(first["content"], second["content"]) {
+		t.Errorf("the same input text produced two different outputs:\n%s\n%s",
+			first["content"], second["content"])
+	}
+}
+
+// TestCompressRequest_SkipReasons covers the paths that leave a request alone.
+func TestCompressRequest_SkipReasons(t *testing.T) {
 	small := "ERROR: boom\n" + strings.Repeat("x", 200) + "\n"
 
 	cases := []struct {
@@ -534,11 +706,9 @@ func TestCompressLiveZone_SkipReasons(t *testing.T) {
 			want: skipNoMessages,
 		},
 		{
-			name: "no user message",
-			req: map[string]any{
-				"messages": []any{map[string]any{"role": "assistant", "content": "hi"}},
-			},
-			want: skipNoUserMsg,
+			name: "messages is not an array",
+			req:  map[string]any{"messages": "nope"},
+			want: skipBadMessages,
 		},
 		{
 			name: "text below the size threshold",
@@ -560,7 +730,7 @@ func TestCompressLiveZone_SkipReasons(t *testing.T) {
 		{
 			name: "plain string content is not eligible",
 			req: map[string]any{
-				"messages": []any{map[string]any{"role": "user", "content": logText}},
+				"messages": []any{map[string]any{"role": "user", "content": fixturePytest}},
 			},
 			want: skipPlainContent,
 		},
@@ -572,12 +742,12 @@ func TestCompressLiveZone_SkipReasons(t *testing.T) {
 			want: skipNoContent,
 		},
 		{
-			// Only tool_result blocks are eligible: a text block in the live
-			// zone is the caller's own words and is left alone.
+			// Only tool_result blocks are eligible: a text block is the
+			// caller's own words and is left alone, wherever it sits.
 			name: "text block is not eligible",
 			req: map[string]any{
 				"messages": []any{map[string]any{"role": "user",
-					"content": []any{map[string]any{"type": "text", "text": logText}}}},
+					"content": []any{map[string]any{"type": "text", "text": fixturePytest}}}},
 			},
 			want: skipNoToolResult,
 		},
@@ -586,9 +756,12 @@ func TestCompressLiveZone_SkipReasons(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			in := mustRawMap(t, tc.req)
-			out, rep := CompressLiveZone(in)
+			out, rep := CompressRequest(in)
 			if rep.Skipped != tc.want {
 				t.Fatalf("Skipped = %q, want %q (%+v)", rep.Skipped, tc.want, rep)
+			}
+			if rep.BlocksCompressed != 0 {
+				t.Errorf("BlocksCompressed = %d, want 0", rep.BlocksCompressed)
 			}
 			if !bytes.Equal(in["messages"], out["messages"]) {
 				t.Errorf("messages changed although nothing was compressed")
@@ -597,10 +770,10 @@ func TestCompressLiveZone_SkipReasons(t *testing.T) {
 	}
 }
 
-// TestCompressLiveZone_NoGainFallsBackToOriginal pins the hard gate: when every
+// TestCompressRequest_NoGainFallsBackToOriginal pins the hard gate: when every
 // line is an error there is nothing to drop, and a compression that grew the
 // payload must never ship.
-func TestCompressLiveZone_NoGainFallsBackToOriginal(t *testing.T) {
+func TestCompressRequest_NoGainFallsBackToOriginal(t *testing.T) {
 	var b strings.Builder
 	for i := 0; i < 12; i++ {
 		fmt.Fprintf(&b, "2024-01-15T09:12:%02d.000Z ERROR handler: request %04d failed with a very long message body\n", i, i)
@@ -614,7 +787,7 @@ func TestCompressLiveZone_NoGainFallsBackToOriginal(t *testing.T) {
 		"messages": []any{map[string]any{"role": "user",
 			"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "t", "content": allErrors}}}},
 	})
-	out, rep := CompressLiveZone(in)
+	out, rep := CompressRequest(in)
 	if rep.Skipped != skipNoGain {
 		t.Fatalf("Skipped = %q, want %q (%+v)", rep.Skipped, skipNoGain, rep)
 	}
@@ -623,24 +796,26 @@ func TestCompressLiveZone_NoGainFallsBackToOriginal(t *testing.T) {
 	}
 }
 
-// TestCompressLiveZone_Deterministic is the cache-prefix guarantee: the same
-// input must produce the same bytes every time, or the prefix changes on every
-// turn and the cache never hits.
-func TestCompressLiveZone_Deterministic(t *testing.T) {
-	in := mustRawMap(t, map[string]any{
-		"messages": []any{map[string]any{"role": "user",
-			"content": []any{map[string]any{"type": "tool_result", "tool_use_id": "t", "content": fixturePytest}}}},
-	})
+// TestCompressRequest_Deterministic is the cache-prefix guarantee at the API
+// level: the same input must produce the same bytes every time, or the prefix
+// changes on every turn and the cache never hits.
+func TestCompressRequest_Deterministic(t *testing.T) {
+	in := mustRawMap(t, conversationRequest(conversationMessages(3)))
 
 	var want []byte
+	var wantRep Report
 	for i := 0; i < 10; i++ {
-		out, _ := CompressLiveZone(in)
+		out, rep := CompressRequest(in)
 		if i == 0 {
 			want = append([]byte(nil), out["messages"]...)
+			wantRep = rep
 			continue
 		}
 		if !bytes.Equal(want, out["messages"]) {
 			t.Fatalf("run %d produced different bytes:\nfirst: %s\nrun %d: %s", i, want, i, out["messages"])
+		}
+		if rep != wantRep {
+			t.Fatalf("run %d produced a different report: %+v vs %+v", i, rep, wantRep)
 		}
 	}
 	if len(want) == 0 {
@@ -648,9 +823,32 @@ func TestCompressLiveZone_Deterministic(t *testing.T) {
 	}
 }
 
-// TestCompressLiveZone_ContentArrayOfParts covers the tool_result form whose
+// TestCompressRequest_CacheDoesNotChangeOutput proves the LRU is an accelerator
+// and nothing more: the bytes and the report are identical with a cold cache, a
+// warm cache, and a cache that was cleared in between.
+func TestCompressRequest_CacheDoesNotChangeOutput(t *testing.T) {
+	in := mustRawMap(t, conversationRequest(conversationMessages(5)))
+
+	resetTextCache()
+	cold, coldRep := CompressRequest(in)
+	warm, warmRep := CompressRequest(in)
+	resetTextCache()
+	cleared, clearedRep := CompressRequest(in)
+
+	if !bytes.Equal(cold["messages"], warm["messages"]) {
+		t.Fatalf("warm cache changed the output:\ncold: %s\nwarm: %s", cold["messages"], warm["messages"])
+	}
+	if !bytes.Equal(cold["messages"], cleared["messages"]) {
+		t.Fatalf("clearing the cache changed the output:\nbefore: %s\nafter:  %s", cold["messages"], cleared["messages"])
+	}
+	if coldRep != warmRep || coldRep != clearedRep {
+		t.Fatalf("reports differ: cold %+v, warm %+v, cleared %+v", coldRep, warmRep, clearedRep)
+	}
+}
+
+// TestCompressRequest_ContentArrayOfParts covers the tool_result form whose
 // content is an array of typed parts.
-func TestCompressLiveZone_ContentArrayOfParts(t *testing.T) {
+func TestCompressRequest_ContentArrayOfParts(t *testing.T) {
 	in := mustRawMap(t, map[string]any{
 		"messages": []any{map[string]any{"role": "user",
 			"content": []any{map[string]any{
@@ -661,7 +859,7 @@ func TestCompressLiveZone_ContentArrayOfParts(t *testing.T) {
 				},
 			}}}},
 	})
-	out, rep := CompressLiveZone(in)
+	out, rep := CompressRequest(in)
 	if rep.BlocksCompressed != 1 {
 		t.Fatalf("BlocksCompressed = %d, want 1 (%+v)", rep.BlocksCompressed, rep)
 	}
@@ -682,34 +880,47 @@ func TestCompressLiveZone_ContentArrayOfParts(t *testing.T) {
 	}
 }
 
-// TestCompressLiveZone_PlainStringContentIsNeverCompressed pins the trust
-// boundary: the last user message's plain-string content is what the caller
-// typed or pasted, not machine-generated output. It is left alone even when it
-// is a log, because the caller would not know a line went missing.
-func TestCompressLiveZone_PlainStringContentIsNeverCompressed(t *testing.T) {
+// TestCompressRequest_PlainStringContentIsNeverCompressed pins the trust
+// boundary: a message whose content is a plain string is what the caller typed
+// or pasted, not machine-generated output. It is left alone even when it is a
+// log, because the caller would not know a line went missing.
+func TestCompressRequest_PlainStringContentIsNeverCompressed(t *testing.T) {
 	in := mustRawMap(t, map[string]any{
 		"messages": []any{
 			map[string]any{"role": "user", "content": fixtureCargo},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "t1", "name": "Bash", "input": map[string]any{"command": "cargo build"}},
+			}},
+			// A compressible tool_result in a later message: the plain-string
+			// message must be skipped without stopping the walk.
+			map[string]any{"role": "user", "content": []any{
+				map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": fixtureGoTest},
+			}},
 		},
 	})
 	if !LooksLikeLog(fixtureCargo) {
 		t.Fatalf("fixtureCargo is not detected as a log, so the test proves nothing")
 	}
-	out, rep := CompressLiveZone(in)
-	if rep.BlocksCompressed != 0 {
-		t.Fatalf("BlocksCompressed = %d, want 0 (%+v)", rep.BlocksCompressed, rep)
+	out, rep := CompressRequest(in)
+	if rep.BlocksCompressed != 1 {
+		t.Fatalf("BlocksCompressed = %d, want 1 (%+v)", rep.BlocksCompressed, rep)
 	}
-	if rep.Skipped != skipPlainContent {
-		t.Fatalf("Skipped = %q, want %q", rep.Skipped, skipPlainContent)
+	if rep.Skipped != "" {
+		t.Errorf("Skipped = %q, want empty", rep.Skipped)
 	}
-	if !bytes.Equal(in["messages"], out["messages"]) {
-		t.Errorf("a plain-string content was modified:\nbefore: %s\nafter:  %s", in["messages"], out["messages"])
+	inMsgs := mustMessages(t, in)
+	outMsgs := mustMessages(t, out)
+	if !bytes.Equal(inMsgs[0], outMsgs[0]) {
+		t.Errorf("a plain-string content was modified:\nbefore: %s\nafter:  %s", inMsgs[0], outMsgs[0])
+	}
+	if bytes.Equal(inMsgs[2], outMsgs[2]) {
+		t.Errorf("the tool_result of a later message was not compressed")
 	}
 }
 
-// TestCompressLiveZone_MalformedInputIsSafe throws shapes that a fuzzer would
+// TestCompressRequest_MalformedInputIsSafe throws shapes that a fuzzer would
 // find and asserts nothing panics and nothing changes.
-func TestCompressLiveZone_MalformedInputIsSafe(t *testing.T) {
+func TestCompressRequest_MalformedInputIsSafe(t *testing.T) {
 	cases := map[string]string{
 		"messages not an array":  `{"messages":"nope"}`,
 		"message not an object":  `{"messages":[1,2,3]}`,
@@ -717,6 +928,8 @@ func TestCompressLiveZone_MalformedInputIsSafe(t *testing.T) {
 		"content array of ints":  `{"messages":[{"role":"user","content":[1,2,3]}]}`,
 		"empty object":           `{}`,
 		"null messages":          `{"messages":null}`,
+		"tool_result without id": `{"messages":[{"role":"user","content":[{"type":"tool_result","content":"x"}]}]}`,
+		"tool_result bad body":   `{"messages":[{"role":"user","content":[{"type":"tool_result","content":{"a":1}}]}]}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -724,7 +937,7 @@ func TestCompressLiveZone_MalformedInputIsSafe(t *testing.T) {
 			if err := json.Unmarshal([]byte(body), &in); err != nil {
 				t.Fatalf("unmarshal fixture: %v", err)
 			}
-			out, rep := CompressLiveZone(in)
+			out, rep := CompressRequest(in)
 			if rep.BlocksCompressed != 0 {
 				t.Errorf("BlocksCompressed = %d, want 0", rep.BlocksCompressed)
 			}
@@ -734,6 +947,17 @@ func TestCompressLiveZone_MalformedInputIsSafe(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestCompressRequest_NilMapIsSafe: a nil request is not a crash.
+func TestCompressRequest_NilMapIsSafe(t *testing.T) {
+	out, rep := CompressRequest(nil)
+	if out != nil {
+		t.Errorf("out = %v, want nil", out)
+	}
+	if rep.Skipped != skipNoMessages {
+		t.Errorf("Skipped = %q, want %q", rep.Skipped, skipNoMessages)
 	}
 }
 
