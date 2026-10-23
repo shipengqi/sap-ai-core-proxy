@@ -10,6 +10,20 @@ import (
 // AnthropicToOpenAIBody converts an Anthropic messages request to the SAP AI Core
 // OpenAI-compatible chat completions body (sent to /chat/completions?api-version=...).
 func AnthropicToOpenAIBody(raw map[string]json.RawMessage, streaming bool) []byte {
+	// Drop cache_control before anything else. The OpenAI-compatible endpoints
+	// have no such field, and leaving it in breaks this path twice over:
+	//
+	//   - A system array whose blocks carry cache_control cannot be flattened to
+	//     the string form the OpenAI wire format expects, so prependSystemMessage
+	//     gave up and dropped the entire system prompt.
+	//   - A text-only message content array is forwarded verbatim (there are no
+	//     Anthropic-only blocks to translate), so the marker reached the upstream
+	//     body as an unknown field.
+	//
+	// Claude Code sets cache_control on the system block of every request, so the
+	// first case was the normal case for any non-Claude model on this surface.
+	raw = StripCacheControl(raw)
+
 	// Translate Anthropic tool blocks and declarations into the OpenAI wire shape.
 	// Without this, tool_use / tool_result content blocks and input_schema tools are
 	// forwarded verbatim and rejected by the OpenAI-compatible endpoint.
