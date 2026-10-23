@@ -80,7 +80,13 @@ func PromoteSystemMessages(m map[string]json.RawMessage) map[string]json.RawMess
 }
 
 // StripCacheControl removes the cache_control field from system content blocks
-// and from message content arrays. SAP AI Core Bedrock does not support it.
+// and from message content arrays.
+//
+// It exists for the OpenAI-compatible endpoints, which have no cache_control
+// concept at all: caching there is automatic and keyed on the tokenized prefix,
+// so the marker is both meaningless and, depending on the provider's strictness,
+// a schema violation. It must never run on the Bedrock path — SAP AI Core does
+// honour cache_control, and stripping it there would disable prompt caching.
 func StripCacheControl(m map[string]json.RawMessage) map[string]json.RawMessage {
 	if sys, ok := m["system"]; ok {
 		if stripped, changed := removeFieldFromBlocks(sys); changed {
