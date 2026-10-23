@@ -25,8 +25,16 @@ var BedrockAllowedFields = map[string]bool{
 	"thinking":          true,
 }
 
-// PromoteSystemMessages moves any {"role":"system"} entries from messages[]
+// PromoteSystemMessages moves system and developer entries from messages[]
 // to the top-level "system" field (Bedrock/SAP AI Core requirement).
+//
+// The top-level field may already be present in either form: a plain string, or
+// an array of content blocks carrying cache_control. The array form has to
+// survive, because collapsing it to a string discards the cache breakpoint, so
+// promoted text is appended as extra blocks after the existing ones. Appending
+// is also the only position that keeps the cache intact — a breakpoint caches
+// the prefix up to and including itself, so text inserted before it would
+// rewrite everything already cached.
 func PromoteSystemMessages(m map[string]json.RawMessage) map[string]json.RawMessage {
 	msgsRaw, ok := m["messages"]
 	if !ok {
@@ -46,52 +54,112 @@ func PromoteSystemMessages(m map[string]json.RawMessage) map[string]json.RawMess
 	var systemParts []string
 	var remaining []message
 	for _, msg := range msgs {
-		if msg.Role == "system" || msg.Role == "developer" {
-			var s string
-			if json.Unmarshal(msg.Content, &s) != nil {
-				var parts []struct {
-					Type string `json:"type"`
-					Text string `json:"text"`
-				}
-				if json.Unmarshal(msg.Content, &parts) == nil {
-					for _, p := range parts {
-						if p.Type == "text" || p.Type == "input_text" {
-							s += p.Text
-						}
-					}
-				}
-			}
-			if s != "" {
-				systemParts = append(systemParts, s)
-			}
-		} else {
+		if msg.Role != "system" && msg.Role != "developer" {
 			remaining = append(remaining, msg)
+			continue
 		}
+		texts, ok := systemTexts(msg.Content)
+		if !ok {
+			// Content is neither a string nor text blocks. Keep the message:
+			// Bedrock may reject it, but silently dropping instructions is worse
+			// and much harder to notice.
+			remaining = append(remaining, msg)
+			continue
+		}
+		systemParts = append(systemParts, texts...)
 	}
 
 	if len(systemParts) == 0 {
 		return m
 	}
 
-	combined := ""
 	if existing, ok := m["system"]; ok {
-		var s string
-		if err := json.Unmarshal(existing, &s); err == nil && s != "" {
-			combined = s + "\n"
+		merged, ok := appendSystemText(existing, systemParts)
+		if !ok {
+			// The existing field is in a shape we cannot merge into. Leaving it
+			// alone is the safe choice: replacing it with the promoted text would
+			// throw away whatever the client actually sent as its system prompt.
+			return m
 		}
-	}
-	for i, p := range systemParts {
-		if i > 0 {
-			combined += "\n"
-		}
-		combined += p
+		m["system"] = merged
+		newMsgs, _ := json.Marshal(remaining)
+		m["messages"] = newMsgs
+		return m
 	}
 
-	sysJSON, _ := json.Marshal(combined)
+	sysJSON, _ := json.Marshal(strings.Join(systemParts, "\n"))
 	m["system"] = sysJSON
 	newMsgs, _ := json.Marshal(remaining)
 	m["messages"] = newMsgs
 	return m
+}
+
+// systemTexts returns the text carried by a system message's content, which may
+// be a plain string or an array of content blocks. ok is false when the content
+// is in neither shape.
+func systemTexts(content json.RawMessage) (texts []string, ok bool) {
+	var s string
+	if err := json.Unmarshal(content, &s); err == nil {
+		if s == "" {
+			return nil, true
+		}
+		return []string{s}, true
+	}
+
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(content, &blocks); err != nil {
+		return nil, false
+	}
+	for _, b := range blocks {
+		if (b.Type == "text" || b.Type == "input_text") && b.Text != "" {
+			texts = append(texts, b.Text)
+		}
+	}
+	return texts, true
+}
+
+// appendSystemText adds promoted text to an existing top-level system field. A
+// string field is extended in place; an array field gets new text blocks
+// appended so any cache_control breakpoints it carries stay where they are. ok
+// is false when the field is in a shape that cannot be merged into.
+func appendSystemText(existing json.RawMessage, parts []string) (json.RawMessage, bool) {
+	var s string
+	if err := json.Unmarshal(existing, &s); err == nil {
+		joined := strings.Join(parts, "\n")
+		if s != "" {
+			joined = s + "\n" + joined
+		}
+		out, err := json.Marshal(joined)
+		if err != nil {
+			return nil, false
+		}
+		return out, true
+	}
+
+	var blocks []json.RawMessage
+	if err := json.Unmarshal(existing, &blocks); err != nil {
+		return nil, false
+	}
+	for _, p := range parts {
+		// A struct, not a map: the field order then matches what clients send,
+		// which keeps the emitted body stable and readable in logs.
+		b, err := json.Marshal(struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}{Type: "text", Text: p})
+		if err != nil {
+			return nil, false
+		}
+		blocks = append(blocks, b)
+	}
+	merged, err := json.Marshal(blocks)
+	if err != nil {
+		return nil, false
+	}
+	return merged, true
 }
 
 // StripCacheControl removes the cache_control field from system content blocks
