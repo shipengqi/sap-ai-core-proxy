@@ -403,6 +403,19 @@ go run ./cmd/aicore-tui --plain
 
 When launched through `make run` or `./aicoreproxy` in an interactive terminal, the dashboard and proxy run together in one process. The dashboard is automatically skipped when stdout is redirected or captured (for example by WorkBuddy, systemd, Docker, or another process), preventing ANSI terminal control sequences from corrupting the caller's output. The `-no-tui` flag disables the dashboard explicitly. The standalone `make tui` target remains available for connecting to an already-running proxy.
 
+## Cache Capability Probe
+
+Prompt caching is not one mechanism, and whether a given deployment supports it — or supports explicit breakpoints — cannot be read off the model name. `cmd/aicore-cacheprobe` asks the deployment directly:
+
+```bash
+go run ./cmd/aicore-cacheprobe
+go run ./cmd/aicore-cacheprobe -models gpt-5.6-terra,gpt-5.4,gpt-4o
+```
+
+It sends a ~2000 token prefix five times per model and reports what the usage block says: whether implicit caching hits with no marker at all, whether `prompt_cache_options` / `prompt_cache_breakpoint` are accepted and actually cache, and whether `prompt_cache_key` is accepted. It talks to SAP AI Core directly, so the proxy's own field filtering cannot mask the answer.
+
+Two findings worth knowing before writing a client against these deployments: explicit breakpoints are rejected with `400 invalid_parameter` on models before GPT-5.6, and `prompt_cache_key` participates in cache identity, so changing it turns a warm prefix into a miss.
+
 ## Makefile Targets
 
 | Target | Description |
@@ -431,6 +444,7 @@ sap-ai-core-proxy/
 │   ├── main.go
 │   ├── stats/                        # Observation endpoint client
 │   └── format/                       # Pure display formatting helpers
+├── cmd/aicore-cacheprobe/            # Per-deployment prompt-cache capability probe
 ├── internal/
 │   ├── config/config.go             # Load ~/.aicoreproxy/config.json + env overrides
 │   ├── version/version.go           # Build identity for -version, /version and both dashboards
