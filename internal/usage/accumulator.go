@@ -238,11 +238,18 @@ type anthropicUsage struct {
 }
 
 // openAIUsage is the usage block of an OpenAI chat completion chunk or body.
+//
+// prompt_tokens is the whole prompt, cached and written parts included, which is
+// the opposite of Anthropic's input_tokens — that is why CacheHitRatio divides by
+// surface. cache_write_tokens appears from GPT-5.6 on, where writing the cache
+// costs money; older models report only cached_tokens and charge nothing for a
+// write.
 type openAIUsage struct {
 	PromptTokens        flexInt `json:"prompt_tokens"`
 	CompletionTokens    flexInt `json:"completion_tokens"`
 	PromptTokensDetails *struct {
-		CachedTokens flexInt `json:"cached_tokens"`
+		CachedTokens     flexInt `json:"cached_tokens"`
+		CacheWriteTokens flexInt `json:"cache_write_tokens"`
 	} `json:"prompt_tokens_details"`
 }
 
@@ -267,12 +274,14 @@ type genericUsage struct {
 	// the two never collide: Anthropic does not send input_tokens_details and the
 	// Responses API does not send cache_read_input_tokens.
 	InputTokensDetails *struct {
-		CachedTokens flexInt `json:"cached_tokens"`
+		CachedTokens     flexInt `json:"cached_tokens"`
+		CacheWriteTokens flexInt `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 	PromptTokens        flexInt `json:"prompt_tokens"`
 	CompletionTokens    flexInt `json:"completion_tokens"`
 	PromptTokensDetails *struct {
-		CachedTokens flexInt `json:"cached_tokens"`
+		CachedTokens     flexInt `json:"cached_tokens"`
+		CacheWriteTokens flexInt `json:"cache_write_tokens"`
 	} `json:"prompt_tokens_details"`
 }
 
@@ -417,6 +426,13 @@ func (a *Accumulator) applyOpenAIUsage(u *openAIUsage) {
 		u.PromptTokensDetails.CachedTokens.value > a.tokens.CacheRead {
 		a.tokens.CacheRead = u.PromptTokensDetails.CachedTokens.value
 	}
+	// cache_write_tokens is reported from GPT-5.6 on, where a write is billed.
+	// Older models never send it, so this stays zero for them and no cost is
+	// invented.
+	if u.PromptTokensDetails != nil && u.PromptTokensDetails.CacheWriteTokens.ok &&
+		u.PromptTokensDetails.CacheWriteTokens.value > a.tokens.CacheWrite {
+		a.tokens.CacheWrite = u.PromptTokensDetails.CacheWriteTokens.value
+	}
 
 	a.hasUsage = true
 }
@@ -543,11 +559,18 @@ func (a *Accumulator) observeJSON(body []byte) {
 		if !cacheRead.ok && u.InputTokensDetails != nil {
 			cacheRead = u.InputTokensDetails.CachedTokens
 		}
+		// Same split for the write side: Anthropic reports it as
+		// cache_creation_input_tokens, the Responses API as
+		// input_tokens_details.cache_write_tokens.
+		cacheWrite := u.CacheWrite
+		if !cacheWrite.ok && u.InputTokensDetails != nil {
+			cacheWrite = u.InputTokensDetails.CacheWriteTokens
+		}
 		a.applyAnthropicUsage(&anthropicUsage{
 			InputTokens:  u.InputTokens,
 			OutputTokens: u.OutputTokens,
 			CacheRead:    cacheRead,
-			CacheWrite:   u.CacheWrite,
+			CacheWrite:   cacheWrite,
 		}, true)
 	case u.PromptTokens.ok || u.CompletionTokens.ok || u.PromptTokensDetails != nil:
 		a.applyOpenAIUsage(&openAIUsage{

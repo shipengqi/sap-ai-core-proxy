@@ -352,3 +352,64 @@ func TestAccumulatorResponsesShape(t *testing.T) {
 	tokens, _ = anthropicOnly.Tokens()
 	assertTokens(t, "anthropic", tokens, Tokens{Input: 10, Output: 2, CacheRead: 9})
 }
+
+// TestAccumulatorOpenAICacheWrite covers cache_write_tokens, which GPT-5.6 and
+// later report because a cache write is billed there.
+//
+// Measured against SAP AI Core with gpt-5.6-terra: a cold request came back
+// prompt=2007 cached=0 write=2004, and a warm one prompt=2007 cached=1994
+// write=0. Both numbers are subsets of prompt_tokens, which is why the OpenAI
+// surface divides the hit ratio by input alone.
+func TestAccumulatorOpenAICacheWrite(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want Tokens
+	}{
+		{
+			name: "cold request writes the prefix",
+			body: `{"object":"chat.completion","usage":{"prompt_tokens":2007,"completion_tokens":4,"total_tokens":2011,"prompt_tokens_details":{"cached_tokens":0,"cache_write_tokens":2004}}}`,
+			want: Tokens{Input: 2007, Output: 4, CacheWrite: 2004},
+		},
+		{
+			name: "warm request reads instead of writing",
+			body: `{"object":"chat.completion","usage":{"prompt_tokens":2007,"completion_tokens":4,"total_tokens":2011,"prompt_tokens_details":{"cached_tokens":1994,"cache_write_tokens":0}}}`,
+			want: Tokens{Input: 2007, Output: 4, CacheRead: 1994},
+		},
+		{
+			name: "pre-5.6 model reports only cached_tokens",
+			body: `{"object":"chat.completion","usage":{"prompt_tokens":1500,"completion_tokens":4,"total_tokens":1504,"prompt_tokens_details":{"cached_tokens":1408}}}`,
+			want: Tokens{Input: 1500, Output: 4, CacheRead: 1408},
+		},
+		{
+			name: "both present in one response",
+			body: `{"object":"chat.completion","usage":{"prompt_tokens":2007,"completion_tokens":4,"total_tokens":2011,"prompt_tokens_details":{"cached_tokens":1994,"cache_write_tokens":11}}}`,
+			want: Tokens{Input: 2007, Output: 4, CacheRead: 1994, CacheWrite: 11},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			acc := &Accumulator{}
+			acc.observeOpenAIChunk([]byte(tc.body))
+			tokens, hasUsage := acc.Tokens()
+			assertTokens(t, tc.name, tokens, tc.want)
+			if !hasUsage {
+				t.Error("expected hasUsage to be true")
+			}
+		})
+	}
+}
+
+// TestAccumulatorResponsesCacheWrite covers the Responses API spelling of the
+// same field, input_tokens_details.cache_write_tokens.
+func TestAccumulatorResponsesCacheWrite(t *testing.T) {
+	acc := &Accumulator{}
+	acc.observeJSON([]byte(`{"id":"resp_1","object":"response","status":"completed","usage":{"input_tokens":30,"output_tokens":7,"total_tokens":37,"input_tokens_details":{"cached_tokens":5,"cache_write_tokens":18}}}`))
+
+	tokens, hasUsage := acc.Tokens()
+	assertTokens(t, "responses", tokens, Tokens{Input: 30, Output: 7, CacheRead: 5, CacheWrite: 18})
+	if !hasUsage {
+		t.Error("expected hasUsage to be true")
+	}
+}
