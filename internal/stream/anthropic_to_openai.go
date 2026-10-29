@@ -3,11 +3,12 @@ package stream
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // PipeAnthropicToOpenAI preserves tool deltas and reports upstream failure.

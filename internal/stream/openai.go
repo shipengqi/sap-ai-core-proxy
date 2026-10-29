@@ -3,11 +3,12 @@ package stream
 
 import (
 	"encoding/json"
-	"github.com/gin-gonic/gin"
-	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 func PipeOpenAI(c *gin.Context, upstream *http.Response) {

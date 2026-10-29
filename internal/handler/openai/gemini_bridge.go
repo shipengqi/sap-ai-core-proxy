@@ -2,9 +2,10 @@ package openai
 
 import (
 	"encoding/json"
+	"strings"
+
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
-	"strings"
 )
 
 // openAIToGeminiBody validates and converts the complete chat/tool history.

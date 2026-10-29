@@ -4,12 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
-	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
-	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
 	"io"
 	"log/slog"
 	"net/http"
+
+	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
 )
 
 func (h *Handler) completeGPT(ctx context.Context, model string, raw map[string]json.RawMessage) (int, []byte, error) {
