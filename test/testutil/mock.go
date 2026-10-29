@@ -46,6 +46,11 @@ type MockSAPServer struct {
 	// compatible /chat/completions endpoint.
 	LastOpenAIChatBody map[string]json.RawMessage
 
+	// RejectReasoningEffort makes the OpenAI-compatible endpoint answer the way
+	// gpt-4o does when it is sent a reasoning_effort it does not know: 400
+	// "Unrecognized request argument supplied".
+	RejectReasoningEffort bool
+
 	// OpenAIToolCallResponse makes the OpenAI-compatible mock answer with tool_calls
 	// instead of plain text.
 	OpenAIToolCallResponse bool
@@ -155,8 +160,18 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		_ = json.Unmarshal(bodyBytes, &rawBody)
 		m.mu.Lock()
 		m.LastOpenAIChatBody = rawBody
+		rejectEffort := m.RejectReasoningEffort
 		m.mu.Unlock()
 		streaming, _ := reqBody["stream"].(bool)
+
+		if rejectEffort {
+			if _, sent := rawBody["reasoning_effort"]; sent {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"code":null,"message":"Unrecognized request argument supplied: reasoning_effort","param":null,"type":"invalid_request_error"}}`))
+				return
+			}
+		}
 
 		if streaming {
 			w.Header().Set("Content-Type", "text/event-stream")

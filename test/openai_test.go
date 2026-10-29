@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
 	"github.com/shipengqi/sap-ai-core-proxy/test/testutil"
 )
 
@@ -89,6 +90,81 @@ func TestOpenAI_ChatCompletions(t *testing.T) {
 	}
 	if len(result.Choices) == 0 || result.Choices[0].Message.Content == "" {
 		t.Error("expected non-empty choices[0].message.content")
+	}
+}
+
+// reasoning_effort used to be swallowed by the field whitelist. For models that
+// only accept function tools on /responses (gpt-6.x), an explicit "none" is the
+// only way a tool-bearing chat request can succeed, so dropping the field turned
+// every such request into a 400 the client had no way to fix.
+func TestOpenAI_ReasoningEffortIsForwarded(t *testing.T) {
+	mock := testutil.NewMockSAPServer(t)
+	defer mock.Close()
+	// The capability cache is keyed by deployment ID, which the mock reuses
+	// across tests; a stale entry would strip the field before it is sent.
+	openai.ClearEffortCache()
+	defer openai.ClearEffortCache()
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxy.Close()
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Say hi"}],` +
+		`"tools":[{"type":"function","function":{"name":"get_time","parameters":{"type":"object"}}}],` +
+		`"reasoning_effort":"none"}`
+	resp, err := http.Post(proxy.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST /openai/v1/chat/completions: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+
+	// The tools array is what makes upstream demand an explicit effort; assert it
+	// survived too so the test cannot pass on a request that never had tools.
+	if _, ok := mock.LastOpenAIChatBody["tools"]; !ok {
+		t.Fatalf("tools missing from the forwarded body: %v", mock.LastOpenAIChatBody)
+	}
+	if got := string(mock.LastOpenAIChatBody["reasoning_effort"]); got != `"none"` {
+		t.Errorf("reasoning_effort not forwarded to SAP, got %q (body: %v)", got, mock.LastOpenAIChatBody)
+	}
+}
+
+// Models without a reasoning_effort argument (gpt-4o) answer 400 when the field
+// is sent. Forwarding it must not turn those models into failures: the proxy
+// retries without the field and remembers the capability per deployment.
+func TestOpenAI_ReasoningEffortFallbackWhenArgumentUnknown(t *testing.T) {
+	mock := testutil.NewMockSAPServer(t)
+	defer mock.Close()
+	mock.RejectReasoningEffort = true
+	openai.ClearEffortCache()
+	defer openai.ClearEffortCache()
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxy.Close()
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Say hi"}],"reasoning_effort":"low"}`
+	resp, err := http.Post(proxy.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST /openai/v1/chat/completions: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 after dropping reasoning_effort, got %d: %s", resp.StatusCode, body)
+	}
+	if _, still := mock.LastOpenAIChatBody["reasoning_effort"]; still {
+		t.Errorf("retry still carried reasoning_effort: %v", mock.LastOpenAIChatBody)
+	}
+	if !openai.IsEffortUnsupported("dep-openai-001") {
+		t.Error("deployment should be remembered as not supporting reasoning_effort")
 	}
 }
 

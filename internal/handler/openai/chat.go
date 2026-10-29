@@ -2,6 +2,7 @@ package openai
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -91,8 +92,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			return
 		}
 		slog.Info("calling openai model", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
-		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
-			dep.DeployedURL+"/chat/completions?api-version=2024-02-01", bytes.NewReader(sapBody), nil)
+		upstream, err := h.chatStream(c.Request.Context(), dep, raw)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
@@ -124,14 +124,22 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		c.Request.Context(), modelStr, 5,
 		func(dep *sapclient.Deployment) (int, []byte, error) {
 			slog.Debug("trying deployment", "deployment_id", dep.ID, "model", modelStr)
-			resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				dep.DeployedURL+"/chat/completions?api-version=2024-02-01", bytes.NewReader(sapBody), nil)
+			body := sapBody
+			if IsEffortUnsupported(dep.ID) {
+				body = buildSAPChatBody(withoutReasoningEffort(raw), false)
+			}
+			status, respBody, err := h.chatOnce(c.Request.Context(), dep, body)
 			if err != nil {
 				return 0, nil, err
 			}
-			defer func() { _ = resp.Body.Close() }()
-			b, _ := io.ReadAll(resp.Body)
-			return resp.StatusCode, b, nil
+			if status != http.StatusBadRequest || !IsUnsupportedEffortError(respBody) || IsEffortUnsupported(dep.ID) {
+				return status, respBody, nil
+			}
+			// The model has no reasoning_effort argument at all. Remember that and
+			// retry once without it rather than turning a previously working
+			// request into a 400 just because the client now sets the field.
+			MarkEffortUnsupported(dep.ID)
+			return h.chatOnce(c.Request.Context(), dep, buildSAPChatBody(withoutReasoningEffort(raw), false))
 		},
 	)
 	if err != nil {
@@ -141,6 +149,61 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	// Observation only: respBody is forwarded unchanged.
 	usage.ObserveJSONBody(c, respBody)
 	c.Data(status, "application/json", respBody)
+}
+
+// chatPath is the OpenAI-compatible chat endpoint on a deployment URL.
+const chatPath = "/chat/completions?api-version=2024-02-01"
+
+// chatOnce posts one chat request and buffers the response.
+func (h *Handler) chatOnce(ctx context.Context, dep *sapclient.Deployment, body []byte) (int, []byte, error) {
+	resp, err := h.client.Do(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b, nil
+}
+
+// chatStream posts one streaming chat request, retrying once without
+// reasoning_effort when the model does not know the argument at all. The error
+// body is buffered and put back, so the caller's non-2xx handling still sees it.
+func (h *Handler) chatStream(ctx context.Context, dep *sapclient.Deployment, raw map[string]json.RawMessage) (*http.Response, error) {
+	body := buildSAPChatBody(raw, true)
+	if IsEffortUnsupported(dep.ID) {
+		body = buildSAPChatBody(withoutReasoningEffort(raw), true)
+	}
+	resp, err := h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), nil)
+	if err != nil || resp.StatusCode != http.StatusBadRequest || IsEffortUnsupported(dep.ID) {
+		return resp, err
+	}
+	if _, sent := raw["reasoning_effort"]; !sent {
+		return resp, nil
+	}
+	errBody, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if !IsUnsupportedEffortError(errBody) {
+		resp.Body = io.NopCloser(bytes.NewReader(errBody))
+		return resp, nil
+	}
+	MarkEffortUnsupported(dep.ID)
+	body = buildSAPChatBody(withoutReasoningEffort(raw), true)
+	return h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), nil)
+}
+
+// withoutReasoningEffort returns raw minus reasoning_effort. When the field is
+// absent the map is returned as-is instead of being copied.
+func withoutReasoningEffort(raw map[string]json.RawMessage) map[string]json.RawMessage {
+	if _, ok := raw["reasoning_effort"]; !ok {
+		return raw
+	}
+	out := make(map[string]json.RawMessage, len(raw))
+	for k, v := range raw {
+		if k != "reasoning_effort" {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 func copyUpstreamErrorHeaders(c *gin.Context, upstream *http.Response) {
@@ -514,6 +577,12 @@ func buildSAPChatBody(raw map[string]json.RawMessage, streaming bool) []byte {
 		"presence_penalty", "frequency_penalty", "logit_bias",
 		"user", "tools", "tool_choice", "parallel_tool_calls",
 		"response_format", "seed", "logprobs", "top_logprobs",
+		// Forwarded verbatim, never injected. Models that only accept function
+		// tools on /responses (gpt-6.x) reject a tool-bearing chat request
+		// unless the effort is explicitly "none", and the error names this
+		// field in "param". Dropping it made that rejection impossible for the
+		// client to avoid — it could not set the one value upstream asked for.
+		"reasoning_effort",
 	} {
 		if v, ok := raw[k]; ok {
 			sap[k] = v
