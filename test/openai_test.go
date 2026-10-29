@@ -168,6 +168,121 @@ func TestOpenAI_ReasoningEffortFallbackWhenArgumentUnknown(t *testing.T) {
 	}
 }
 
+// gpt-6.x refuses function tools on /chat/completions and accepts them only on
+// /responses. The proxy must bridge the request there and hand the caller back
+// the chat.completion it asked for.
+func TestOpenAI_ToolsBridgeToResponses(t *testing.T) {
+	mock := testutil.NewMockSAPServer(t)
+	defer mock.Close()
+	mock.ToolsRequireResponses = true
+	openai.ClearCapabilityCaches()
+	defer openai.ClearCapabilityCaches()
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxy.Close()
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"call get_time"}],` +
+		`"tools":[{"type":"function","function":{"name":"get_time","parameters":{"type":"object"}}}],"max_tokens":64}`
+	resp, err := http.Post(proxy.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST /openai/v1/chat/completions: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 via the responses bridge, got %d: %s", resp.StatusCode, body)
+	}
+
+	var out struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens int `json:"prompt_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode chat.completion: %v", err)
+	}
+	if out.Object != "chat.completion" {
+		t.Errorf("caller must still receive a chat.completion, got %q", out.Object)
+	}
+	if len(out.Choices) != 1 || out.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("expected finish_reason=tool_calls, got %+v", out.Choices)
+	}
+	calls := out.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].ID != "call_mock_1" || calls[0].Function.Name != "get_time" {
+		t.Errorf("tool call not carried back: %+v", calls)
+	}
+	if out.Usage.PromptTokens != 30 {
+		t.Errorf("usage should be restated as prompt_tokens, got %+v", out.Usage)
+	}
+
+	// The upstream must have received a Responses body, not the chat body.
+	if _, ok := mock.LastResponsesBody["messages"]; ok {
+		t.Errorf("chat messages leaked into the responses request: %v", mock.LastResponsesBody)
+	}
+	if _, ok := mock.LastResponsesBody["input"]; !ok {
+		t.Errorf("responses request has no input: %v", mock.LastResponsesBody)
+	}
+	if _, ok := mock.LastResponsesBody["tools"]; !ok {
+		t.Errorf("tools were not carried over: %v", mock.LastResponsesBody)
+	}
+	if !openai.IsResponsesRequired("dep-openai-001") {
+		t.Error("deployment should be remembered as tools-on-responses only")
+	}
+}
+
+func TestOpenAI_ToolsBridgeToResponses_Stream(t *testing.T) {
+	mock := testutil.NewMockSAPServer(t)
+	defer mock.Close()
+	mock.ToolsRequireResponses = true
+	openai.ClearCapabilityCaches()
+	defer openai.ClearCapabilityCaches()
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxy.Close()
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"call get_time"}],` +
+		`"tools":[{"type":"function","function":{"name":"get_time","parameters":{"type":"object"}}}],` +
+		`"stream":true,"stream_options":{"include_usage":true}}`
+	resp, err := http.Post(proxy.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST /openai/v1/chat/completions stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	stream := string(body)
+
+	for _, want := range []string{"chat.completion.chunk", "call_mock_1", "tool_calls", `"usage"`, "[DONE]"} {
+		if !strings.Contains(stream, want) {
+			t.Errorf("stream is missing %q: %s", want, stream)
+		}
+	}
+	if strings.Contains(stream, `"type":"response.`) {
+		t.Errorf("raw responses events leaked to the caller: %s", stream)
+	}
+}
+
 func TestOpenAI_ChatCompletions_Stream(t *testing.T) {
 	proxyURL, cleanup := setupOpenAI(t)
 	defer cleanup()

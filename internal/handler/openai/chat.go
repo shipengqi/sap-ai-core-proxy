@@ -92,7 +92,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			return
 		}
 		slog.Info("calling openai model", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
-		upstream, err := h.chatStream(c.Request.Context(), dep, raw)
+		upstream, viaResponses, err := h.chatStream(c.Request.Context(), dep, raw)
 		if err != nil {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
@@ -115,6 +115,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			return
 		}
 		c.Status(http.StatusOK)
+		if viaResponses {
+			stream.PipeResponsesToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr, wantsStreamUsage(raw))
+			return
+		}
 		stream.PipeOpenAI(c, upstream)
 		return
 	}
@@ -124,6 +128,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		c.Request.Context(), modelStr, 5,
 		func(dep *sapclient.Deployment) (int, []byte, error) {
 			slog.Debug("trying deployment", "deployment_id", dep.ID, "model", modelStr)
+			if IsResponsesRequired(dep.ID) && hasTools(raw) {
+				return h.chatViaResponses(c.Request.Context(), dep, raw)
+			}
 			body := sapBody
 			if IsEffortUnsupported(dep.ID) {
 				body = buildSAPChatBody(withoutReasoningEffort(raw), false)
@@ -132,14 +139,25 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if err != nil {
 				return 0, nil, err
 			}
-			if status != http.StatusBadRequest || !IsUnsupportedEffortError(respBody) || IsEffortUnsupported(dep.ID) {
+			if status != http.StatusBadRequest {
 				return status, respBody, nil
 			}
-			// The model has no reasoning_effort argument at all. Remember that and
-			// retry once without it rather than turning a previously working
-			// request into a 400 just because the client now sets the field.
-			MarkEffortUnsupported(dep.ID)
-			return h.chatOnce(c.Request.Context(), dep, buildSAPChatBody(withoutReasoningEffort(raw), false))
+			if !IsEffortUnsupported(dep.ID) && IsUnsupportedEffortError(respBody) {
+				// The model has no reasoning_effort argument at all. Remember that
+				// and retry once without it rather than turning a previously
+				// working request into a 400 because the client sets the field.
+				MarkEffortUnsupported(dep.ID)
+				return h.chatOnce(c.Request.Context(), dep, buildSAPChatBody(withoutReasoningEffort(raw), false))
+			}
+			if hasTools(raw) && IsResponsesRequiredError(respBody) {
+				// The model accepts function tools only on /responses. Bridge the
+				// request there and hand the caller a chat.completion back.
+				MarkResponsesRequired(dep.ID)
+				slog.Info("model requires /responses for tools, bridging",
+					"model", modelStr, "deployment_id", dep.ID)
+				return h.chatViaResponses(c.Request.Context(), dep, raw)
+			}
+			return status, respBody, nil
 		},
 	)
 	if err != nil {
@@ -165,30 +183,100 @@ func (h *Handler) chatOnce(ctx context.Context, dep *sapclient.Deployment, body 
 	return resp.StatusCode, b, nil
 }
 
-// chatStream posts one streaming chat request, retrying once without
-// reasoning_effort when the model does not know the argument at all. The error
-// body is buffered and put back, so the caller's non-2xx handling still sees it.
-func (h *Handler) chatStream(ctx context.Context, dep *sapclient.Deployment, raw map[string]json.RawMessage) (*http.Response, error) {
+// chatStream posts one streaming chat request and applies the two capability
+// fallbacks: dropping reasoning_effort when the model does not know it, and
+// bridging to /responses when the model refuses function tools here. The second
+// return value reports whether the response comes from the Responses API and
+// therefore needs a different stream converter.
+//
+// A 400 error body is buffered and put back on the response when no fallback
+// applies, so the caller's generic non-2xx handling still sees it.
+func (h *Handler) chatStream(ctx context.Context, dep *sapclient.Deployment, raw map[string]json.RawMessage) (*http.Response, bool, error) {
+	if IsResponsesRequired(dep.ID) && hasTools(raw) {
+		resp, err := h.responsesStream(ctx, dep, raw)
+		return resp, true, err
+	}
+
 	body := buildSAPChatBody(raw, true)
 	if IsEffortUnsupported(dep.ID) {
 		body = buildSAPChatBody(withoutReasoningEffort(raw), true)
 	}
 	resp, err := h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), nil)
-	if err != nil || resp.StatusCode != http.StatusBadRequest || IsEffortUnsupported(dep.ID) {
-		return resp, err
+	if err != nil || resp.StatusCode != http.StatusBadRequest {
+		return resp, false, err
 	}
-	if _, sent := raw["reasoning_effort"]; !sent {
-		return resp, nil
-	}
+
 	errBody, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	if !IsUnsupportedEffortError(errBody) {
-		resp.Body = io.NopCloser(bytes.NewReader(errBody))
-		return resp, nil
+
+	if _, sent := raw["reasoning_effort"]; sent && !IsEffortUnsupported(dep.ID) && IsUnsupportedEffortError(errBody) {
+		MarkEffortUnsupported(dep.ID)
+		body = buildSAPChatBody(withoutReasoningEffort(raw), true)
+		r, err := h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), nil)
+		return r, false, err
 	}
-	MarkEffortUnsupported(dep.ID)
-	body = buildSAPChatBody(withoutReasoningEffort(raw), true)
-	return h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), nil)
+	if hasTools(raw) && IsResponsesRequiredError(errBody) {
+		MarkResponsesRequired(dep.ID)
+		slog.Info("model requires /responses for tools, bridging",
+			"deployment_id", dep.ID, "streaming", true)
+		r, err := h.responsesStream(ctx, dep, raw)
+		return r, true, err
+	}
+
+	resp.Body = io.NopCloser(bytes.NewReader(errBody))
+	return resp, false, nil
+}
+
+// responsesStream posts the bridged request to the deployment's Responses
+// endpoint.
+func (h *Handler) responsesStream(ctx context.Context, dep *sapclient.Deployment, raw map[string]json.RawMessage) (*http.Response, error) {
+	return h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+responsesPath,
+		bytes.NewReader(chatToResponsesBody(raw)), nil)
+}
+
+// chatViaResponses posts the bridged request and converts the answer back into a
+// chat.completion, so the caller keeps the surface it asked for.
+func (h *Handler) chatViaResponses(ctx context.Context, dep *sapclient.Deployment, raw map[string]json.RawMessage) (int, []byte, error) {
+	resp, err := h.client.Do(ctx, http.MethodPost, dep.DeployedURL+responsesPath,
+		bytes.NewReader(chatToResponsesBody(raw)), nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, b, nil
+	}
+	var model string
+	_ = json.Unmarshal(raw["model"], &model)
+	return resp.StatusCode, responsesToChatCompletion(b, model), nil
+}
+
+// hasTools reports whether the request carries a non-empty tools array. The
+// bridge only applies to tool-bearing requests: without tools the chat endpoint
+// serves these models fine, with reasoning intact.
+func hasTools(raw map[string]json.RawMessage) bool {
+	v, ok := raw["tools"]
+	if !ok {
+		return false
+	}
+	var tools []json.RawMessage
+	if json.Unmarshal(v, &tools) != nil {
+		return false
+	}
+	return len(tools) > 0
+}
+
+// wantsStreamUsage reports whether the caller asked for the usage block on the
+// stream (stream_options.include_usage).
+func wantsStreamUsage(raw map[string]json.RawMessage) bool {
+	var opts struct {
+		IncludeUsage bool `json:"include_usage"`
+	}
+	if v, ok := raw["stream_options"]; ok {
+		_ = json.Unmarshal(v, &opts)
+	}
+	return opts.IncludeUsage
 }
 
 // withoutReasoningEffort returns raw minus reasoning_effort. When the field is

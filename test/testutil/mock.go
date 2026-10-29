@@ -51,6 +51,14 @@ type MockSAPServer struct {
 	// "Unrecognized request argument supplied".
 	RejectReasoningEffort bool
 
+	// ToolsRequireResponses makes the OpenAI-compatible endpoint refuse any
+	// request carrying function tools, the way gpt-6.x does: it accepts them
+	// only on /responses.
+	ToolsRequireResponses bool
+
+	// LastResponsesBody captures the most recent body posted to /responses.
+	LastResponsesBody map[string]json.RawMessage
+
 	// OpenAIToolCallResponse makes the OpenAI-compatible mock answer with tool_calls
 	// instead of plain text.
 	OpenAIToolCallResponse bool
@@ -161,6 +169,7 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		m.mu.Lock()
 		m.LastOpenAIChatBody = rawBody
 		rejectEffort := m.RejectReasoningEffort
+		toolsRequireResponses := m.ToolsRequireResponses
 		m.mu.Unlock()
 		streaming, _ := reqBody["stream"].(bool)
 
@@ -169,6 +178,14 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"error":{"code":null,"message":"Unrecognized request argument supplied: reasoning_effort","param":null,"type":"invalid_request_error"}}`))
+				return
+			}
+		}
+		if toolsRequireResponses {
+			if _, hasTools := rawBody["tools"]; hasTools {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				_, _ = w.Write([]byte(`{"error":{"code":null,"message":"Function tools with reasoning_effort are not supported for this model in /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort to 'none'.","param":"reasoning_effort","type":"invalid_request_error"}}`))
 				return
 			}
 		}
@@ -259,6 +276,45 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 		m.log(r)
 		m.validateAuth(t, w, r)
 		if r.Method == http.MethodPost {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			var reqBody map[string]json.RawMessage
+			_ = json.Unmarshal(bodyBytes, &reqBody)
+			m.mu.Lock()
+			m.LastResponsesBody = reqBody
+			m.mu.Unlock()
+
+			// A tool-bearing request answers with a function call, so the bridge's
+			// response conversion is exercised end to end.
+			if _, hasTools := reqBody["tools"]; hasTools {
+				var streaming bool
+				_ = json.Unmarshal(reqBody["stream"], &streaming)
+				if streaming {
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Cache-Control", "no-cache")
+					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"fc_mock_1\",\"type\":\"function_call\",\"call_id\":\"call_mock_1\",\"name\":\"get_time\",\"arguments\":\"\"},\"output_index\":0}\n\n")
+					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\",\"item_id\":\"fc_mock_1\",\"output_index\":0}\n\n")
+					_, _ = fmt.Fprintf(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-mock-tool\",\"status\":\"completed\",\"output\":[{\"type\":\"function_call\"}],\"usage\":{\"input_tokens\":30,\"output_tokens\":7,\"total_tokens\":37,\"input_tokens_details\":{\"cached_tokens\":5},\"output_tokens_details\":{\"reasoning_tokens\":0}}}}\n\n")
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"id":     "resp-mock-tool",
+					"object": "response",
+					"status": "completed",
+					"output": []map[string]interface{}{
+						{"type": "function_call", "call_id": "call_mock_1", "name": "get_time", "arguments": "{}"},
+					},
+					"usage": map[string]interface{}{
+						"input_tokens":          30,
+						"output_tokens":         7,
+						"total_tokens":          37,
+						"input_tokens_details":  map[string]int{"cached_tokens": 5},
+						"output_tokens_details": map[string]int{"reasoning_tokens": 0},
+					},
+				})
+				return
+			}
+
 			w.Header().Set("Content-Type", "application/json")
 			// The Responses API reports usage as input_tokens/output_tokens, with
 			// the cached part under input_tokens_details.
