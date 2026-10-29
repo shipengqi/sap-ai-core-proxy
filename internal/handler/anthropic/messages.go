@@ -13,6 +13,7 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
@@ -98,6 +99,12 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 	markerRecorded := false
 	markerModel := dep.EffectiveModelName()
 
+	thinkingPath := "/invoke"
+	if streaming {
+		thinkingPath = "/invoke-with-response-stream"
+	}
+	cacheKey := openai.CapabilityKey(dep, thinkingPath)
+
 	// Build request body with thinking parameter handling
 	buildBody := func() ([]byte, error) {
 		filtered := make(map[string]json.RawMessage)
@@ -123,7 +130,7 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 		// Handle thinking parameter with cache check
 		if thinkingRaw, ok := raw["thinking"]; ok {
 			// Only add thinking if deployment supports it (not in unsupported cache)
-			if !openai.IsThinkingUnsupported(dep.ID) {
+			if !openai.IsThinkingUnsupported(cacheKey) {
 				filtered["thinking"] = thinkingRaw
 			}
 		}
@@ -140,53 +147,43 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 		return json.Marshal(filtered)
 	}
 
-	filteredBody, err := buildBody()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, errorBody("marshal filtered body: "+err.Error()))
-		return
-	}
-
 	if streaming {
 		slog.Info("calling anthropic model", "model", modelName, "streaming", true, "deployment_id", dep.ID)
-		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
-			dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(filteredBody), nil)
+		_, sentThinking := raw["thinking"]
+		upstream, _, err := h.deployments.CallStreaming(c.Request.Context(), dep, 5, func(candidate *sapclient.Deployment) (*http.Response, error) {
+			cacheKey = openai.CapabilityKey(candidate, thinkingPath)
+			call := func() (*http.Response, error) {
+				b, err := buildBody()
+				if err != nil {
+					return nil, err
+				}
+				return h.client.DoStreaming(c.Request.Context(), http.MethodPost, candidate.DeployedURL+thinkingPath, bytes.NewReader(b), resourceGroupHeaders(candidate))
+			}
+			resp, err := call()
+			if err != nil || resp.StatusCode != 400 || !sentThinking || openai.IsThinkingUnsupported(cacheKey) {
+				return resp, err
+			}
+			b, err := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			if err != nil {
+				return nil, err
+			}
+			if openai.IsAdaptiveThinkingError(b) {
+				openai.MarkThinkingUnsupported(cacheKey)
+				return call()
+			}
+			resp.Body = io.NopCloser(bytes.NewReader(b))
+			return resp, nil
+		})
 		if err != nil {
-			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+			c.JSON(502, errorBody(err.Error()))
 			return
 		}
 
-		// Do not probe thinking support with a full non-streaming generation before
-		// opening the stream. Claude Code cancels while waiting for that hidden
-		// request to finish. A rejected streaming request has not emitted SSE yet,
-		// so it is safe to strip thinking and retry here.
-		_, sentThinking := raw["thinking"]
-		if upstream.StatusCode == http.StatusBadRequest && sentThinking && !openai.IsThinkingUnsupported(dep.ID) {
-			errBody, _ := io.ReadAll(upstream.Body)
-			_ = upstream.Body.Close()
-			if openai.IsAdaptiveThinkingError(errBody) {
-				openai.MarkThinkingUnsupported(dep.ID)
-				filteredBody, err = buildBody()
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, errorBody("rebuild body: "+err.Error()))
-					return
-				}
-				upstream, err = h.client.DoStreaming(c.Request.Context(), http.MethodPost,
-					dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(filteredBody), nil)
-				if err != nil {
-					c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-					return
-				}
-			} else {
-				usage.MarkUpstreamStatus(c, http.StatusBadRequest)
-				c.Data(http.StatusBadRequest, "application/json", errBody)
-				return
-			}
+		// Preserve upstream HTTP failures before starting SSE.
+		if !proxy.CheckStream(c, upstream) {
+			return
 		}
-
-		// Preserve the native Anthropic streaming contract: the client-facing status
-		// is 200 once stream handling begins, while metrics retain the real upstream
-		// status for failures.
-		usage.MarkUpstreamStatus(c, upstream.StatusCode)
 		c.Status(http.StatusOK)
 		stream.PipeAnthropic(c, upstream)
 		return
@@ -194,40 +191,32 @@ func (h *Handler) messagesBedrock(c *gin.Context, modelName string, raw map[stri
 
 	slog.Info("calling anthropic model", "model", modelName, "streaming", false)
 
-	// First attempt with thinking (if not cached as unsupported)
-	resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-		dep.DeployedURL+"/invoke", bytes.NewReader(filteredBody), nil)
+	status, respBody, err := h.deployments.FindAndCall(c.Request.Context(), modelName, 5, func(candidate *sapclient.Deployment) (int, []byte, error) {
+		cacheKey = openai.CapabilityKey(candidate, thinkingPath)
+		call := func() (int, []byte, error) {
+			b, err := buildBody()
+			if err != nil {
+				return 0, nil, err
+			}
+			resp, err := h.client.Do(c.Request.Context(), http.MethodPost, candidate.DeployedURL+thinkingPath, bytes.NewReader(b), resourceGroupHeaders(candidate))
+			if err != nil {
+				return 0, nil, err
+			}
+			defer func() { _ = resp.Body.Close() }()
+			proxy.CopyHeaders(c, resp)
+			b, err = io.ReadAll(resp.Body)
+			return resp.StatusCode, b, err
+		}
+		status, b, err := call()
+		if _, sent := raw["thinking"]; sent && err == nil && status == 400 && !openai.IsThinkingUnsupported(cacheKey) && openai.IsAdaptiveThinkingError(b) {
+			openai.MarkThinkingUnsupported(cacheKey)
+			return call()
+		}
+		return status, b, err
+	})
 	if err != nil {
-		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+		c.JSON(502, errorBody(err.Error()))
 		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
-	status := resp.StatusCode
-
-	// Check if we need to retry without thinking
-	if status == http.StatusBadRequest && openai.IsAdaptiveThinkingError(respBody) {
-		slog.Info("deployment doesn't support adaptive thinking, retrying without it",
-			"model", modelName, "deployment_id", dep.ID)
-
-		openai.MarkThinkingUnsupported(dep.ID)
-
-		// Retry with thinking disabled (cache will skip thinking now)
-		filteredBody, err = buildBody()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, errorBody("marshal retry body: "+err.Error()))
-			return
-		}
-
-		resp, err = h.client.Do(c.Request.Context(), http.MethodPost,
-			dep.DeployedURL+"/invoke", bytes.NewReader(filteredBody), nil)
-		if err != nil {
-			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-			return
-		}
-		defer func() { _ = resp.Body.Close() }()
-		respBody, _ = io.ReadAll(resp.Body)
-		status = resp.StatusCode
 	}
 
 	// Token accounting: the upstream usage block is read out of the response we
@@ -247,23 +236,14 @@ func (h *Handler) messagesOpenAI(c *gin.Context, modelName string, raw map[strin
 		return
 	}
 
-	sapBody := transform.AnthropicToOpenAIBody(raw, false)
-
-	slog.Info("calling non-anthropic model via anthropic surface", "model", modelName)
-	status, respBody, err := h.deployments.FindAndCall(
-		c.Request.Context(), modelName, 5,
-		func(dep *sapclient.Deployment) (int, []byte, error) {
-			slog.Debug("trying deployment", "deployment_id", dep.ID, "model", modelName)
-			resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				dep.DeployedURL+"/chat/completions?api-version=2024-02-01", bytes.NewReader(sapBody), nil)
-			if err != nil {
-				return 0, nil, err
-			}
-			defer func() { _ = resp.Body.Close() }()
-			b, _ := io.ReadAll(resp.Body)
-			return resp.StatusCode, b, nil
-		},
-	)
+	if v, ok := raw["thinking"]; ok && string(v) != "null" {
+		c.JSON(400, errorBody("thinking cannot be represented on this non-Claude route; use the native provider API"))
+		return
+	}
+	var request map[string]json.RawMessage
+	_ = json.Unmarshal(transform.AnthropicToOpenAIBody(raw, false), &request)
+	request["model"], _ = json.Marshal(modelName)
+	status, respBody, err := h.chat.Complete(c.Request.Context(), request)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
@@ -278,4 +258,11 @@ func (h *Handler) messagesOpenAI(c *gin.Context, modelName string, raw map[strin
 	// token counts as the upstream OpenAI answer.
 	usage.ObserveJSONBody(c, anthropicResp)
 	c.Data(http.StatusOK, "application/json", anthropicResp)
+}
+
+func resourceGroupHeaders(dep *sapclient.Deployment) map[string]string {
+	if dep.ResourceGroupID == "" {
+		return nil
+	}
+	return map[string]string{"AI-Resource-Group": dep.ResourceGroupID}
 }

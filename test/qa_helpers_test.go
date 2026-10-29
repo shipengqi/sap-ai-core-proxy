@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/router"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 )
@@ -60,14 +61,14 @@ const (
 	qaAnthropicSSENoEvent = `data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}` + "\n" +
 		"\n" +
 		`data: {"type":"message_delta","usage":{"output_tokens":3}}` + "\n" +
-		"\n"
+		"\n" + `data: {"type":"message_stop"}` + "\n\n"
 
 	qaAnthropicSSENoEventExpected = "event: message_start\n" +
 		`data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}` + "\n" +
 		"\n" +
 		"event: message_delta\n" +
 		`data: {"type":"message_delta","usage":{"output_tokens":3}}` + "\n" +
-		"\n"
+		"\n" + "event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
 
 	// qaOpenAIBody is a non-streaming OpenAI chat completion.
 	qaOpenAIBody = `{"id":"chatcmpl-qa","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`
@@ -390,4 +391,14 @@ func qaModelOf(t *testing.T, doc qaStatsDoc) qaBreakdown {
 		t.Fatalf("by_model has %d entries, want 1: %+v", len(doc.ByModel), doc.ByModel)
 	}
 	return doc.ByModel[0]
+}
+
+func testCapabilityKey(t *testing.T, base, model, endpoint string) string {
+	t.Helper()
+	client := sapclient.NewClient(base, "default", sapclient.NewAuthManager(base, "test", "test"))
+	dep, err := sapclient.NewDeploymentManager(client).GetDeployment(t.Context(), model)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return openai.CapabilityKey(dep, endpoint)
 }

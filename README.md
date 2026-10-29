@@ -8,7 +8,7 @@ A Go reverse proxy that exposes SAP AI Core LLM deployments through standard API
 - **4 API surfaces** — OpenAI-compatible, Anthropic-native, Gemini-native, SAP Orchestration (LiteLLM)
 - **Streaming support** — SSE for OpenAI & Anthropic, raw chunked JSON for Gemini
 - **Automatic auth** — OAuth 2.0 client-credentials token exchange with in-memory caching
-- **Deployment discovery** — queries SAP AI Core for RUNNING deployments; 12-hour cache; 3-tier model matching (exact → fuzzy → family prefix fallback)
+- **Deployment discovery** — queries SAP AI Core for RUNNING deployments; 12-hour cache; exact model names, explicit aliases and vendor-prefix normalization; same-model failover on deployment retirement
 - **Model aliases** — translates standard model names (e.g. `claude-3-5-sonnet-latest`) to SAP AI Core deployment names automatically
 - **Tool calling** — OpenAI `tools` / `tool_calls` / `role: "tool"` and Anthropic `tool_use` / `tool_result` blocks are translated into each other, so a tool-calling loop works across either surface regardless of which model family backs it
 - **Claude Code / VSCode / IDE compatible** — works with any client that speaks OpenAI or Anthropic APIs
@@ -115,7 +115,7 @@ All config values can be overridden by environment variables (higher priority th
 | GET | `/openai/v1/models` | List all RUNNING deployments in OpenAI format |
 | POST | `/openai/v1/chat/completions` | Chat completions (streaming supported) |
 | POST | `/openai/v1/embeddings` | Embeddings |
-| POST | `/openai/v1/responses` | Create a response (stateful) |
+| POST | `/openai/v1/responses` | Create a response (native streaming and response affinity) |
 | GET | `/openai/v1/responses/{id}` | Get a response by ID |
 | DELETE | `/openai/v1/responses/{id}` | Delete a response |
 
@@ -139,8 +139,8 @@ All config values can be overridden by environment variables (higher priority th
 |---|---|---|
 | GET | `/litellm/v1/models` | List all RUNNING deployments |
 | GET | `/litellm/v1/model/info` | Model info via Orchestration |
-| POST | `/litellm/v1/chat/completions` | Chat via SAP Orchestration |
-| POST | `/litellm/v1/completions` | Completions via SAP Orchestration |
+| POST | `/litellm/v1/chat/completions` | Non-streaming chat via SAP Orchestration |
+| POST | `/litellm/v1/completions` | Same messages-based adapter; legacy prompt requests return 400 |
 | POST | `/litellm/v1/embeddings` | Embeddings (direct deployment) |
 
 ### Service Endpoints
@@ -168,7 +168,7 @@ Token accounting is on by default; set `server.metrics: false` (or `METRICS_ENAB
 
 Three things to know before reading the numbers:
 
-- `sap_proxy_requests_total{status}` is the **upstream-effective** status, not what the client received. A streaming request whose upstream failed is recorded with the upstream error code (or `502`) even though the client got `200`, because the SSE headers are written before the upstream answer is known.
+- `sap_proxy_requests_total{status}` is the **upstream-effective** status, not what the client received. Failures received before SSE starts retain the upstream HTTP status and retry/request-ID headers. Failures after streaming starts use a protocol error event; metrics record the upstream error (or `502`) even though the HTTP status is already `200`.
 - `usage_missing` means "the response was inspected but the upstream reported no usage". It never counts failed requests or endpoints that are not instrumented.
 - `uninstrumented` means "the request succeeded but no observation path read the response". A non-zero value points at a proxy code path missing accounting, not at a silent upstream.
 
@@ -180,10 +180,9 @@ On every request, the proxy resolves the upstream SAP AI Core deployment URL in 
 
 0. **`-latest` family resolution** — a bare `claude-<family>-latest` alias is matched against the live deployment list and bound to the highest version of that family (see below)
 1. **Exact match** — `deployment.modelName == normalizedModel`
-2. **Fuzzy substring match** — either name contains the other
-3. **Family prefix fallback** — strips the version suffix and matches the family (e.g. `claude-opus-4.8` → `claude-opus` matches any `*claude-opus*` deployment)
+2. **Vendor-prefix normalization** — `openai--gpt-6.1-sol` and `gpt-6.1-sol` refer to the same model. Explicit catalogue aliases also preserve model identity.
 
-A warning is logged when falling back to a non-exact match. The deployment list is cached for 12 hours.
+Missing models return an error; the proxy does not select a different model family or version. The deployment list is cached for 12 hours. Explicit retirement (410, an error envelope naming Gone, or deployment_not_found) blacklists that instance for one hour. Bounded failover selects instances of the initially resolved model, including when the request used a moving `-latest` alias. A generic endpoint 404 does not blacklist the deployment. When all known instances retire, discovery can refresh at most once per minute. Streaming failover happens before any downstream content is sent.
 
 ### Anthropic Model Aliases
 
@@ -216,16 +215,30 @@ Claude versions work without a code change: `claude-<family>-<major>-<minor>` be
 `anthropic--claude-<major>.<minor>-<family>` (e.g. `claude-sonnet-4-9` →
 `anthropic--claude-4.9-sonnet`), and the legacy `claude-<major>-<minor>-<family>` /
 `claude-<major>-<family>` shapes are handled too. This is necessary because SAP puts the
-version first while Anthropic puts the family first — a reordering the fuzzy and
-family-prefix matchers cannot bridge on their own.
+version first while Anthropic puts the family first. Alias normalization handles this naming difference without changing the requested version.
 
 ## Streaming
 
 | Surface | Wire Format |
 |---|---|
-| OpenAI | Server-Sent Events (`data: {...}\n\n`) — forwarded verbatim |
+| OpenAI Chat | SSE; native Chat is forwarded, Claude/GLM/Gemini/Responses are converted to Chat chunks |
+| OpenAI Responses | Native SSE events, forwarded immediately |
 | Anthropic | SSE with `event:` lines; injected automatically if SAP omits them |
-| Gemini | Raw chunked JSON bytes (not SSE) |
+| Gemini | Native chunked JSON array or SSE (`alt=sse`); forwarded as received |
+
+### Compatibility boundaries
+
+OpenAI Chat supports GPT, Claude, Gemini, Qwen, GLM and Perplexity in both response modes. Function tools are mapped for Claude/GLM and Gemini, including call IDs and results. For GPT deployments that explicitly reject Chat function tools and require Responses, a bounded 400 fallback uses the Responses API. Explicit `reasoning_effort:"none"` can still use Chat after this capability is cached. Other 400 errors are returned to the caller. If a Chat rejection also forces an explicit `reasoning_effort:"none"` request onto Responses, the bridge returns 400 because its current mapping cannot preserve that setting.
+
+The Responses bridge accepts text, images and function tools. It preserves image detail, refusal, incomplete status and usage, and defaults translated function tools to `strict:false`. Unsupported options such as `stop`, `n>1`, logprobs, and other tool/content types return 400. Claude and GLM reject unsupported Chat options; Claude rejects reasoning budgets that exceed an explicit token limit. Gemini supports function tools and structured JSON output; remote images, nonzero reasoning-effort translation, and enforcing `parallel_tool_calls:false` require the native API.
+
+The Anthropic surface supports Claude natively in both modes. Non-Claude requests share provider routing and Responses fallback for non-streaming calls; streaming and Anthropic thinking on those routes return 400. LiteLLM supports messages, tools and response_format through the non-streaming Orchestration adapter; streaming, legacy prompt and unimplemented generation options return 400.
+
+Responses IDs are kept per proxy instance, with a 24-hour TTL and a 10,000-route cap. `previous_response_id` stays on the owning deployment; failed DELETE retains that route. Restarting the proxy loses the routes, and multiple replicas require sticky routing. Shared durable affinity is not implemented. Use the native provider surface for signed reasoning history or model-specific adaptive-thinking features; Chat conversion does not provide full fidelity for those fields.
+
+Inference request bodies are limited to 32 MiB. SSE frames and Gemini JSON stream values are limited to 8 MiB; oversized or broken streams report an error. Streaming uses a 90-second response-header timeout and a 180-second read-idle timeout without a total generation timeout. Client write failure stops upstream consumption. Capability caches expire after one hour and are scoped to deployment address/model, resource group, endpoint and API version.
+
+These behaviors are covered by local mock-upstream tests. Availability and provider-specific constraints of individual SAP deployments still require live verification.
 
 ## Usage Examples
 

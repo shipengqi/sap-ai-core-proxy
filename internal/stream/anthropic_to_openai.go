@@ -1,187 +1,140 @@
 package stream
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
+	"github.com/gin-gonic/gin"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
+	"io"
 	"net/http"
 	"strings"
-
-	"github.com/gin-gonic/gin"
-
-	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
-// PipeAnthropicToOpenAI reads an Anthropic-format SSE stream from upstream (SAP
-// /invoke-with-response-stream) and writes OpenAI-format SSE chunks to the caller.
-//
-// Event mapping:
-//
-//	message_start                            → chunk with role:"assistant" delta
-//	content_block_start (thinking block)     → chunk with "<think>" content delta
-//	content_block_start (tool_use block)     → chunk with a tool_calls delta (index/id/name)
-//	content_block_delta (text_delta)         → chunk with content delta
-//	content_block_delta (input_json_delta)   → chunk with a tool_calls arguments delta
-//	content_block_stop  (thinking block)     → chunk with "</think>" content delta
-//	message_delta                            → records stop_reason for the final chunk
-//	message_stop                             → final chunk with finish_reason, then data: [DONE]
-//	all other event types                    → skipped
-func PipeAnthropicToOpenAI(c *gin.Context, upstream *http.Response, completionID, model string) {
+// PipeAnthropicToOpenAI preserves tool deltas and reports upstream failure.
+func PipeAnthropicToOpenAI(c *gin.Context, upstream *http.Response, id, model string, includeUsage ...bool) {
 	defer func() { _ = upstream.Body.Close() }()
-
-	usage.MarkStream(c)
-
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		return
+	streamHeaders(c)
+	terminal, writeFailed := false, false
+	write := func(delta any, finish any) bool {
+		ok := emitSSE(c, "", map[string]any{"id": id, "object": "chat.completion.chunk", "model": model, "choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}}})
+		writeFailed = !ok
+		return ok
 	}
-
-	writeRaw := func(chunk string) {
-		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", chunk)
-		flusher.Flush()
-	}
-
-	writeChunk := func(deltaJSON string) {
-		writeRaw(fmt.Sprintf(`{"id":%q,"object":"chat.completion.chunk","model":%q,"choices":[{"index":0,"delta":%s,"finish_reason":null}]}`,
-			completionID, model, deltaJSON))
-	}
-
-	writeFinish := func(reason string) {
-		writeRaw(fmt.Sprintf(`{"id":%q,"object":"chat.completion.chunk","model":%q,"choices":[{"index":0,"delta":{},"finish_reason":%q}]}`,
-			completionID, model, reason))
-	}
-
-	writeDone := func() {
-		writeRaw("[DONE]")
-	}
-
-	scanner := bufio.NewScanner(upstream.Body)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
-
-	var currentEventType string
-	var inThinkingBlock bool
-	var stopReason string
-	var sawToolUse bool
-	// currentToolIndex is the OpenAI tool_calls index of the block currently being
-	// streamed, or -1 when the active content block is not a tool_use.
-	currentToolIndex := -1
 	toolCount := 0
-
-	for scanner.Scan() {
-		line := scanner.Text()
-
-		if line == "" {
-			currentEventType = ""
-			continue
-		}
-
-		if strings.HasPrefix(line, "event:") {
-			currentEventType = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
-			continue
-		}
-
-		if !strings.HasPrefix(line, "data:") {
-			// An upstream that answers 200 with a bare JSON error body (no SSE
-			// framing) is not forwarded — this pipe drops non-data lines, which is
-			// pre-existing behaviour and must stay — but it still has to be
-			// inspected, otherwise the failure is counted as a success.
-			if strings.HasPrefix(line, "{") {
-				usage.ObserveAnthropicEvent(c, line)
+	currentTool := -1
+	argsSeen := false
+	stopReason := ""
+	sawTool := false
+	var inputTokens, outputTokens int
+	err := readSSE(upstream.Body, func(frame sseFrame) bool {
+		payload := frame.Data
+		if payload == "" {
+			if strings.HasPrefix(strings.TrimSpace(frame.Raw), "{") {
+				payload = strings.TrimSpace(frame.Raw)
+			} else {
+				return true
 			}
-			continue
 		}
-
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-
-		// The upstream here is Anthropic-shaped, so the usage arrives in
-		// message_start / message_delta even though the caller sees OpenAI chunks.
+		var ev struct {
+			Type         string `json:"type"`
+			ContentBlock struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"content_block"`
+			Delta struct {
+				Type        string `json:"type"`
+				Text        string `json:"text"`
+				Thinking    string `json:"thinking"`
+				PartialJSON string `json:"partial_json"`
+				StopReason  string `json:"stop_reason"`
+			} `json:"delta"`
+			Message struct {
+				Usage struct {
+					Input  int `json:"input_tokens"`
+					Output int `json:"output_tokens"`
+				} `json:"usage"`
+			} `json:"message"`
+			Usage struct {
+				Output int `json:"output_tokens"`
+			} `json:"usage"`
+			Error json.RawMessage `json:"error"`
+		}
+		if json.Unmarshal([]byte(payload), &ev) != nil {
+			streamError(c, "openai", "invalid upstream Anthropic event")
+			terminal = true
+			return false
+		}
 		usage.ObserveAnthropicEvent(c, payload)
-
-		// Infer event type from payload "type" field if not set by event: line.
-		eventType := currentEventType
-		if eventType == "" {
-			eventType = extractEventType(payload)
+		kind := ev.Type
+		if kind == "" {
+			kind = frame.Event
 		}
-
-		switch eventType {
+		if len(ev.Error) > 0 && string(ev.Error) != "null" || kind == "error" {
+			streamError(c, "openai", "upstream Anthropic stream failed: "+string(ev.Error))
+			terminal = true
+			return false
+		}
+		switch kind {
 		case "message_start":
-			writeChunk(`{"role":"assistant","content":""}`)
-
+			inputTokens = ev.Message.Usage.Input
+			outputTokens = ev.Message.Usage.Output
+			write(map[string]any{"role": "assistant", "content": ""}, nil)
 		case "content_block_start":
-			var blockStart struct {
-				ContentBlock struct {
-					Type string `json:"type"`
-					ID   string `json:"id"`
-					Name string `json:"name"`
-				} `json:"content_block"`
-			}
-			if err := json.Unmarshal([]byte(payload), &blockStart); err != nil {
-				continue
-			}
-			switch blockStart.ContentBlock.Type {
-			case "thinking":
-				inThinkingBlock = true
-				writeChunk(`{"content":"<think>"}`)
-			case "tool_use":
-				sawToolUse = true
-				currentToolIndex = toolCount
+			if ev.ContentBlock.Type == "tool_use" {
+				sawTool = true
+				currentTool = toolCount
 				toolCount++
-				writeChunk(toolCallStartDelta(currentToolIndex, blockStart.ContentBlock.ID, blockStart.ContentBlock.Name))
+				argsSeen = false
+				var delta any
+				_ = json.Unmarshal([]byte(toolCallStartDelta(currentTool, ev.ContentBlock.ID, ev.ContentBlock.Name)), &delta)
+				write(delta, nil)
 			}
-
 		case "content_block_delta":
-			var delta struct {
-				Delta struct {
-					Type        string `json:"type"`
-					Text        string `json:"text"`
-					PartialJSON string `json:"partial_json"`
-				} `json:"delta"`
-			}
-			if err := json.Unmarshal([]byte(payload), &delta); err != nil {
-				continue
-			}
-			switch delta.Delta.Type {
+			switch ev.Delta.Type {
 			case "text_delta":
-				writeChunk(fmt.Sprintf(`{"content":%s}`, mustJSON(delta.Delta.Text)))
+				write(map[string]any{"content": ev.Delta.Text}, nil)
+			case "thinking_delta":
+				write(map[string]any{"reasoning_content": ev.Delta.Thinking}, nil)
 			case "input_json_delta":
-				if currentToolIndex >= 0 {
-					writeChunk(fmt.Sprintf(`{"tool_calls":[{"index":%d,"function":{"arguments":%s}}]}`,
-						currentToolIndex, mustJSON(delta.Delta.PartialJSON)))
+				if currentTool >= 0 {
+					argsSeen = true
+					write(map[string]any{"tool_calls": []any{map[string]any{"index": currentTool, "function": map[string]any{"arguments": ev.Delta.PartialJSON}}}}, nil)
 				}
 			}
-
 		case "content_block_stop":
-			if inThinkingBlock {
-				inThinkingBlock = false
-				writeChunk(`{"content":"</think>"}`)
+			if currentTool >= 0 && !argsSeen {
+				write(map[string]any{"tool_calls": []any{map[string]any{"index": currentTool, "function": map[string]any{"arguments": "{}"}}}}, nil)
 			}
-			currentToolIndex = -1
-
+			currentTool = -1
 		case "message_delta":
-			var messageDelta struct {
-				Delta struct {
-					StopReason string `json:"stop_reason"`
-				} `json:"delta"`
+			stopReason = ev.Delta.StopReason
+			if ev.Usage.Output > outputTokens {
+				outputTokens = ev.Usage.Output
 			}
-			if err := json.Unmarshal([]byte(payload), &messageDelta); err == nil && messageDelta.Delta.StopReason != "" {
-				stopReason = messageDelta.Delta.StopReason
-			}
-
 		case "message_stop":
-			writeFinish(openAIFinishReason(stopReason, sawToolUse))
-			writeDone()
-			return
+			terminal = true
+			if !write(map[string]any{}, openAIFinishReason(stopReason, sawTool)) {
+				return false
+			}
+			if len(includeUsage) > 0 && includeUsage[0] {
+				if !emitSSE(c, "", map[string]any{"id": id, "object": "chat.completion.chunk", "model": model, "choices": []any{}, "usage": map[string]int{"prompt_tokens": inputTokens, "completion_tokens": outputTokens, "total_tokens": inputTokens + outputTokens}}) {
+					return false
+				}
+			}
+			_, _ = io.WriteString(c.Writer, "data: [DONE]\n\n")
+			c.Writer.Flush()
+			return false
+		}
+		return !writeFailed
+	})
+	if !terminal && !writeFailed {
+		if err != nil {
+			streamError(c, "openai", err.Error())
+		} else {
+			streamError(c, "openai", "upstream stream ended before message_stop")
 		}
 	}
-
-	// If upstream ended without message_stop, still close the stream properly.
-	writeFinish(openAIFinishReason(stopReason, sawToolUse))
-	writeDone()
 }
 
 // toolCallStartDelta builds the first OpenAI delta for a tool call, which carries

@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
@@ -31,14 +32,17 @@ func (h *Handler) chatCompletionsPerplexity(c *gin.Context, modelStr string, raw
 			return
 		}
 		slog.Info("calling perplexity model", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
-		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
-			buildURL(dep), bytes.NewReader(bodyBytes), nil)
+		upstream, _, err := h.deployments.CallStreaming(c.Request.Context(), dep, 5, func(candidate *sapclient.Deployment) (*http.Response, error) {
+			return h.client.DoStreaming(c.Request.Context(), http.MethodPost, buildURL(candidate), bytes.NewReader(bodyBytes), rgHeaders(candidate.ResourceGroupID))
+		})
 		if err != nil {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
 		// Recorded before c.Status(200) locks the client-visible status.
-		usage.MarkUpstreamStatus(c, upstream.StatusCode)
+		if !proxy.CheckStream(c, upstream) {
+			return
+		}
 		c.Status(http.StatusOK)
 		stream.PipeOpenAI(c, upstream)
 		return
@@ -49,12 +53,15 @@ func (h *Handler) chatCompletionsPerplexity(c *gin.Context, modelStr string, raw
 		c.Request.Context(), modelStr, 5,
 		func(dep *sapclient.Deployment) (int, []byte, error) {
 			resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				buildURL(dep), bytes.NewReader(bodyBytes), nil)
+				buildURL(dep), bytes.NewReader(bodyBytes), rgHeaders(dep.ResourceGroupID))
 			if err != nil {
 				return 0, nil, err
 			}
 			defer func() { _ = resp.Body.Close() }()
-			b, _ := io.ReadAll(resp.Body)
+			b, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return 0, nil, readErr
+			}
 			return resp.StatusCode, b, nil
 		},
 	)

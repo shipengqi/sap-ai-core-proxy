@@ -12,6 +12,7 @@ import (
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
@@ -55,6 +56,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
+	if validationErr := validateChat(raw); validationErr != nil {
+		c.JSON(400, errorBody(validationErr.Error()))
+		return
+	}
 	var streaming bool
 	if s, ok := raw["stream"]; ok {
 		_ = json.Unmarshal(s, &streaming)
@@ -83,8 +88,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	sapBody := buildSAPChatBody(raw, streaming)
-
 	if streaming {
 		dep, err := h.deployments.GetDeployment(c.Request.Context(), modelStr)
 		if err != nil {
@@ -92,26 +95,17 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			return
 		}
 		slog.Info("calling openai model", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
-		upstream, viaResponses, err := h.chatStream(c.Request.Context(), dep, raw)
+		var viaResponses bool
+		upstream, dep, err := h.deployments.CallStreaming(c.Request.Context(), dep, 5, func(candidate *sapclient.Deployment) (*http.Response, error) {
+			resp, via, err := h.chatStream(c.Request.Context(), candidate, raw)
+			viaResponses = via
+			return resp, err
+		})
 		if err != nil {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
-		// SAP can reject a streaming request before emitting any SSE bytes (for
-		// example, 429 token-rate limiting). Preserve that HTTP error instead of
-		// turning it into a misleading 200 empty stream that clients report as
-		// "user cancelled".
-		usage.MarkStream(c)
-		usage.MarkUpstreamStatus(c, upstream.StatusCode)
-		if upstream.StatusCode < http.StatusOK || upstream.StatusCode >= http.StatusMultipleChoices {
-			defer func() { _ = upstream.Body.Close() }()
-			copyUpstreamErrorHeaders(c, upstream)
-			errBody, _ := io.ReadAll(upstream.Body)
-			contentType := upstream.Header.Get("Content-Type")
-			if contentType == "" {
-				contentType = "application/json"
-			}
-			c.Data(upstream.StatusCode, contentType, errBody)
+		if !proxy.CheckStream(c, upstream) {
 			return
 		}
 		c.Status(http.StatusOK)
@@ -124,42 +118,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	}
 
 	slog.Info("calling openai model", "model", modelStr, "streaming", false)
-	status, respBody, err := h.deployments.FindAndCall(
-		c.Request.Context(), modelStr, 5,
-		func(dep *sapclient.Deployment) (int, []byte, error) {
-			slog.Debug("trying deployment", "deployment_id", dep.ID, "model", modelStr)
-			if IsResponsesRequired(dep.ID) && hasTools(raw) {
-				return h.chatViaResponses(c.Request.Context(), dep, raw)
-			}
-			body := sapBody
-			if IsEffortUnsupported(dep.ID) {
-				body = buildSAPChatBody(withoutReasoningEffort(raw), false)
-			}
-			status, respBody, err := h.chatOnce(c.Request.Context(), dep, body)
-			if err != nil {
-				return 0, nil, err
-			}
-			if status != http.StatusBadRequest {
-				return status, respBody, nil
-			}
-			if !IsEffortUnsupported(dep.ID) && IsUnsupportedEffortError(respBody) {
-				// The model has no reasoning_effort argument at all. Remember that
-				// and retry once without it rather than turning a previously
-				// working request into a 400 because the client sets the field.
-				MarkEffortUnsupported(dep.ID)
-				return h.chatOnce(c.Request.Context(), dep, buildSAPChatBody(withoutReasoningEffort(raw), false))
-			}
-			if hasTools(raw) && IsResponsesRequiredError(respBody) {
-				// The model accepts function tools only on /responses. Bridge the
-				// request there and hand the caller a chat.completion back.
-				MarkResponsesRequired(dep.ID)
-				slog.Info("model requires /responses for tools, bridging",
-					"model", modelStr, "deployment_id", dep.ID)
-				return h.chatViaResponses(c.Request.Context(), dep, raw)
-			}
-			return status, respBody, nil
-		},
-	)
+	status, respBody, err := h.completeGPT(c.Request.Context(), modelStr, raw)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 		return
@@ -174,12 +133,15 @@ const chatPath = "/chat/completions?api-version=2024-02-01"
 
 // chatOnce posts one chat request and buffers the response.
 func (h *Handler) chatOnce(ctx context.Context, dep *sapclient.Deployment, body []byte) (int, []byte, error) {
-	resp, err := h.client.Do(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), nil)
+	resp, err := h.client.Do(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), rgHeaders(dep.ResourceGroupID))
 	if err != nil {
 		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	b, _ := io.ReadAll(resp.Body)
+	b, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return 0, nil, readErr
+	}
 	return resp.StatusCode, b, nil
 }
 
@@ -192,31 +154,41 @@ func (h *Handler) chatOnce(ctx context.Context, dep *sapclient.Deployment, body 
 // A 400 error body is buffered and put back on the response when no fallback
 // applies, so the caller's generic non-2xx handling still sees it.
 func (h *Handler) chatStream(ctx context.Context, dep *sapclient.Deployment, raw map[string]json.RawMessage) (*http.Response, bool, error) {
-	if IsResponsesRequired(dep.ID) && hasTools(raw) {
+	if shouldUseResponses(CapabilityKey(dep, chatPath), raw) {
 		resp, err := h.responsesStream(ctx, dep, raw)
 		return resp, true, err
 	}
 
 	body := buildSAPChatBody(raw, true)
-	if IsEffortUnsupported(dep.ID) {
+	if IsEffortUnsupported(CapabilityKey(dep, chatPath)) {
 		body = buildSAPChatBody(withoutReasoningEffort(raw), true)
 	}
-	resp, err := h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), nil)
+	resp, err := h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), rgHeaders(dep.ResourceGroupID))
 	if err != nil || resp.StatusCode != http.StatusBadRequest {
 		return resp, false, err
 	}
 
-	errBody, _ := io.ReadAll(resp.Body)
+	errBody, readErr := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
+	if readErr != nil {
+		return nil, false, readErr
+	}
 
-	if _, sent := raw["reasoning_effort"]; sent && !IsEffortUnsupported(dep.ID) && IsUnsupportedEffortError(errBody) {
-		MarkEffortUnsupported(dep.ID)
+	if _, sent := raw["reasoning_effort"]; sent && !IsEffortUnsupported(CapabilityKey(dep, chatPath)) && IsUnsupportedEffortError(errBody) {
+		MarkEffortUnsupported(CapabilityKey(dep, chatPath))
 		body = buildSAPChatBody(withoutReasoningEffort(raw), true)
-		r, err := h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), nil)
-		return r, false, err
+		resp, err = h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+chatPath, bytes.NewReader(body), rgHeaders(dep.ResourceGroupID))
+		if err != nil || resp.StatusCode != http.StatusBadRequest {
+			return resp, false, err
+		}
+		errBody, readErr = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, false, readErr
+		}
 	}
 	if hasTools(raw) && IsResponsesRequiredError(errBody) {
-		MarkResponsesRequired(dep.ID)
+		MarkResponsesRequired(CapabilityKey(dep, chatPath))
 		slog.Info("model requires /responses for tools, bridging",
 			"deployment_id", dep.ID, "streaming", true)
 		r, err := h.responsesStream(ctx, dep, raw)
@@ -230,26 +202,45 @@ func (h *Handler) chatStream(ctx context.Context, dep *sapclient.Deployment, raw
 // responsesStream posts the bridged request to the deployment's Responses
 // endpoint.
 func (h *Handler) responsesStream(ctx context.Context, dep *sapclient.Deployment, raw map[string]json.RawMessage) (*http.Response, error) {
+	if err := validateResponsesBridge(raw); err != nil {
+		b, _ := json.Marshal(errorBody(err.Error()))
+		return &http.Response{StatusCode: 400, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+	}
 	return h.client.DoStreaming(ctx, http.MethodPost, dep.DeployedURL+responsesPath,
-		bytes.NewReader(chatToResponsesBody(raw)), nil)
+		bytes.NewReader(chatToResponsesBody(raw)), rgHeaders(dep.ResourceGroupID))
 }
 
 // chatViaResponses posts the bridged request and converts the answer back into a
 // chat.completion, so the caller keeps the surface it asked for.
 func (h *Handler) chatViaResponses(ctx context.Context, dep *sapclient.Deployment, raw map[string]json.RawMessage) (int, []byte, error) {
+	if err := validateResponsesBridge(raw); err != nil {
+		b, _ := json.Marshal(errorBody(err.Error()))
+		return 400, b, nil
+	}
 	resp, err := h.client.Do(ctx, http.MethodPost, dep.DeployedURL+responsesPath,
-		bytes.NewReader(chatToResponsesBody(raw)), nil)
+		bytes.NewReader(chatToResponsesBody(raw)), rgHeaders(dep.ResourceGroupID))
 	if err != nil {
 		return 0, nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	b, _ := io.ReadAll(resp.Body)
+	b, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return 0, nil, readErr
+	}
 	if resp.StatusCode != http.StatusOK {
 		return resp.StatusCode, b, nil
 	}
 	var model string
 	_ = json.Unmarshal(raw["model"], &model)
-	return resp.StatusCode, responsesToChatCompletion(b, model), nil
+	converted := responsesToChatCompletion(b, model)
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	_ = json.Unmarshal(converted, &envelope)
+	if len(envelope.Error) > 0 {
+		return http.StatusBadGateway, converted, nil
+	}
+	return resp.StatusCode, converted, nil
 }
 
 // hasTools reports whether the request carries a non-empty tools array. The
@@ -265,6 +256,18 @@ func hasTools(raw map[string]json.RawMessage) bool {
 		return false
 	}
 	return len(tools) > 0
+}
+
+// The learned restriction concerns tools with reasoning. Explicitly disabling
+// reasoning can still use chat and must not be replaced with default reasoning
+// by a cached bridge decision.
+func shouldUseResponses(deploymentID string, raw map[string]json.RawMessage) bool {
+	if !IsResponsesRequired(deploymentID) || !hasTools(raw) {
+		return false
+	}
+	var effort string
+	_ = json.Unmarshal(raw["reasoning_effort"], &effort)
+	return effort != "none"
 }
 
 // wantsStreamUsage reports whether the caller asked for the usage block on the
@@ -294,14 +297,6 @@ func withoutReasoningEffort(raw map[string]json.RawMessage) map[string]json.RawM
 	return out
 }
 
-func copyUpstreamErrorHeaders(c *gin.Context, upstream *http.Response) {
-	for _, name := range []string{"Retry-After", "RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset", "Request-Id", "X-Request-Id"} {
-		for _, value := range upstream.Header.Values(name) {
-			c.Writer.Header().Add(name, value)
-		}
-	}
-}
-
 // chatCompletionsAnthropic handles Claude models via Bedrock /invoke (non-streaming)
 // or /invoke-with-response-stream (streaming), converting between OpenAI and Bedrock
 // wire formats.
@@ -313,8 +308,17 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 		return
 	}
 
+	thinkingPath := "/invoke"
+	if streaming {
+		thinkingPath = "/invoke-with-response-stream"
+	}
+	cacheKey := CapabilityKey(dep, thinkingPath)
+	if validationErr := validateClaudeChat(raw, cacheKey); validationErr != nil {
+		c.JSON(400, errorBody(validationErr.Error()))
+		return
+	}
 	clientProvidedCacheControl := transform.HasCacheControl(raw)
-	bedrockBody, markerResult := openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
+	_, markerResult := openAIToBedrockBody(raw, cacheKey, h.anthropicAutoCache, clientProvidedCacheControl)
 
 	// Counted once per request, from the first build: the thinking retries below
 	// rebuild the same body and would otherwise inflate the counter. The model
@@ -325,85 +329,60 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 
 	if streaming {
 		slog.Info("calling anthropic model via openai surface", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
-		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
-			dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(bedrockBody), nil)
+		_, requested := raw["reasoning_effort"]
+		upstream, dep, err := h.deployments.CallStreaming(c.Request.Context(), dep, 5, func(candidate *sapclient.Deployment) (*http.Response, error) {
+			key := CapabilityKey(candidate, thinkingPath)
+			if err := validateClaudeChat(raw, key); err != nil {
+				b, _ := json.Marshal(errorBody(err.Error()))
+				return &http.Response{StatusCode: 400, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+			}
+			return h.thinkingStream(c.Request.Context(), candidate, thinkingPath, key, requested, func() []byte {
+				body, _ := openAIToBedrockBody(raw, key, h.anthropicAutoCache, clientProvidedCacheControl)
+				return body
+			})
+		})
 		if err != nil {
-			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+			c.JSON(502, errorBody(err.Error()))
 			return
 		}
 
-		// Avoid a hidden full non-streaming generation as a capability probe. If
-		// the stream endpoint rejects adaptive thinking before emitting SSE, retry
-		// the same endpoint once without thinking instead.
-		_, sentEffort := raw["reasoning_effort"]
-		if upstream.StatusCode == http.StatusBadRequest && sentEffort && !IsThinkingUnsupported(dep.ID) {
-			errBody, _ := io.ReadAll(upstream.Body)
-			_ = upstream.Body.Close()
-			if IsAdaptiveThinkingError(errBody) {
-				MarkThinkingUnsupported(dep.ID)
-				// Retry only: the auto-marker outcome was already counted above.
-				bedrockBody, _ = openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
-				upstream, err = h.client.DoStreaming(c.Request.Context(), http.MethodPost,
-					dep.DeployedURL+"/invoke-with-response-stream", bytes.NewReader(bedrockBody), nil)
-				if err != nil {
-					c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-					return
-				}
-			} else {
-				usage.MarkUpstreamStatus(c, http.StatusBadRequest)
-				c.Data(http.StatusBadRequest, "application/json", errBody)
-				return
-			}
-		}
-
-		// Recorded before c.Status(200) locks the client-visible status.
-		usage.MarkUpstreamStatus(c, upstream.StatusCode)
-		// Surface upstream failures as real HTTP errors. Once the SSE headers are
-		// written the status is locked at 200 and the client would only ever see an
-		// empty stream, hiding the actual upstream error.
-		if upstream.StatusCode != http.StatusOK {
-			defer func() { _ = upstream.Body.Close() }()
-			errBody, _ := io.ReadAll(upstream.Body)
-			c.Data(upstream.StatusCode, "application/json", errBody)
+		if !proxy.CheckStream(c, upstream) {
 			return
 		}
 		c.Status(http.StatusOK)
-		stream.PipeAnthropicToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
+		stream.PipeAnthropicToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr, wantsStreamUsage(raw))
 		return
 	}
 
 	slog.Info("calling anthropic model via openai surface", "model", modelStr, "streaming", false)
 
-	// First attempt with thinking (if not cached as unsupported)
-	resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-		dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
-	if err != nil {
-		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
-	status := resp.StatusCode
-
-	// Check if we need to retry without thinking
-	if status == http.StatusBadRequest && IsAdaptiveThinkingError(respBody) {
-		slog.Info("deployment doesn't support adaptive thinking, retrying without it",
-			"model", modelStr, "deployment_id", dep.ID)
-
-		MarkThinkingUnsupported(dep.ID)
-
-		// Retry with thinking disabled (cache will skip thinking now). The
-		// auto-marker outcome was already counted from the first build.
-		bedrockBody, _ = openAIToBedrockBody(raw, dep.ID, h.anthropicAutoCache, clientProvidedCacheControl)
-		resp, err = h.client.Do(c.Request.Context(), http.MethodPost,
-			dep.DeployedURL+"/invoke", bytes.NewReader(bedrockBody), nil)
-		if err != nil {
-			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-			return
+	status, respBody, err := h.deployments.FindAndCall(c.Request.Context(), modelStr, 5, func(candidate *sapclient.Deployment) (int, []byte, error) {
+		key := CapabilityKey(candidate, "/invoke")
+		if err := validateClaudeChat(raw, key); err != nil {
+			b, _ := json.Marshal(errorBody(err.Error()))
+			return 400, b, nil
 		}
-		defer func() { _ = resp.Body.Close() }()
-		respBody, _ = io.ReadAll(resp.Body)
-		status = resp.StatusCode
+		call := func() (int, []byte, error) {
+			body, _ := openAIToBedrockBody(raw, key, h.anthropicAutoCache, clientProvidedCacheControl)
+			resp, err := h.client.Do(c.Request.Context(), http.MethodPost, candidate.DeployedURL+"/invoke", bytes.NewReader(body), rgHeaders(candidate.ResourceGroupID))
+			if err != nil {
+				return 0, nil, err
+			}
+			defer func() { _ = resp.Body.Close() }()
+			proxy.CopyHeaders(c, resp)
+			b, err := io.ReadAll(resp.Body)
+			return resp.StatusCode, b, err
+		}
+		status, b, err := call()
+		if _, requested := raw["reasoning_effort"]; requested && err == nil && status == 400 && !IsThinkingUnsupported(key) && IsAdaptiveThinkingError(b) {
+			MarkThinkingUnsupported(key)
+			return call()
+		}
+		return status, b, err
+	})
+	if err != nil {
+		c.JSON(502, errorBody(err.Error()))
+		return
 	}
 
 	if status != http.StatusOK {
@@ -415,13 +394,25 @@ func (h *Handler) chatCompletionsAnthropic(c *gin.Context, modelStr string, raw 
 	// The converted body carries the Bedrock usage block restated as
 	// prompt_tokens / completion_tokens.
 	usage.ObserveJSONBody(c, openAIResp)
+	var check struct {
+		Error json.RawMessage `json:"error"`
+	}
+	_ = json.Unmarshal(openAIResp, &check)
+	if len(check.Error) > 0 {
+		c.Data(502, "application/json", openAIResp)
+		return
+	}
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
 // chatCompletionsGemini handles Gemini models via the native Gemini generateContent API,
 // converting between OpenAI and Gemini wire formats.
 func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map[string]json.RawMessage, streaming bool) {
-	geminiBody := openAIToGeminiBody(raw)
+	geminiBody, convertErr := transform.OpenAIToGeminiBody(raw)
+	if convertErr != nil {
+		c.JSON(400, errorBody(convertErr.Error()))
+		return
+	}
 
 	if streaming {
 		dep, err := h.deployments.GetDeployment(c.Request.Context(), modelStr)
@@ -430,16 +421,20 @@ func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map
 			return
 		}
 		slog.Info("calling gemini model via openai surface", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
-		upstreamURL := dep.DeployedURL + "/models/" + modelStr + ":streamGenerateContent"
-		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(geminiBody), nil)
+		upstream, dep, err := h.deployments.CallStreaming(c.Request.Context(), dep, 5, func(candidate *sapclient.Deployment) (*http.Response, error) {
+			upstreamURL := candidate.DeployedURL + "/models/" + geminiModelName(candidate) + ":streamGenerateContent"
+			return h.client.DoStreaming(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(geminiBody), rgHeaders(candidate.ResourceGroupID))
+		})
 		if err != nil {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
 		// Recorded before c.Status(200) locks the client-visible status.
-		usage.MarkUpstreamStatus(c, upstream.StatusCode)
+		if !proxy.CheckStream(c, upstream) {
+			return
+		}
 		c.Status(http.StatusOK)
-		stream.PipeGeminiToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
+		stream.PipeGeminiToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr, wantsStreamUsage(raw))
 		return
 	}
 
@@ -448,13 +443,16 @@ func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map
 		c.Request.Context(), modelStr, 5,
 		func(dep *sapclient.Deployment) (int, []byte, error) {
 			slog.Debug("trying deployment", "deployment_id", dep.ID, "model", modelStr)
-			upstreamURL := dep.DeployedURL + "/models/" + modelStr + ":generateContent"
+			upstreamURL := dep.DeployedURL + "/models/" + geminiModelName(dep) + ":generateContent"
 			resp, err := h.client.Do(c.Request.Context(), http.MethodPost, upstreamURL, bytes.NewReader(geminiBody), nil)
 			if err != nil {
 				return 0, nil, err
 			}
 			defer func() { _ = resp.Body.Close() }()
-			b, _ := io.ReadAll(resp.Body)
+			b, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return 0, nil, readErr
+			}
 			return resp.StatusCode, b, nil
 		},
 	)
@@ -471,6 +469,14 @@ func (h *Handler) chatCompletionsGemini(c *gin.Context, modelStr string, raw map
 	// The converted body carries Gemini's usageMetadata restated as
 	// prompt_tokens / completion_tokens.
 	usage.ObserveJSONBody(c, openAIResp)
+	var check struct {
+		Error json.RawMessage `json:"error"`
+	}
+	_ = json.Unmarshal(openAIResp, &check)
+	if len(check.Error) > 0 {
+		c.Data(502, "application/json", openAIResp)
+		return
+	}
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
@@ -494,16 +500,21 @@ func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string, an
 		}
 	}
 
-	// Map max_tokens / max_completion_tokens.
-	if _, ok := filtered["max_tokens"]; !ok {
-		if v, ok := raw["max_completion_tokens"]; ok {
-			filtered["max_tokens"] = v
-		} else {
-			v, _ := json.Marshal(8192)
-			filtered["max_tokens"] = v
-		}
+	// max_completion_tokens takes precedence when both limits are supplied.
+	if v, ok := raw["max_completion_tokens"]; ok {
+		filtered["max_tokens"] = v
+	} else if _, ok := filtered["max_tokens"]; !ok {
+		filtered["max_tokens"] = json.RawMessage(`8192`)
 	}
 
+	if v, ok := raw["stop"]; ok {
+		var text string
+		if json.Unmarshal(v, &text) == nil {
+			filtered["stop_sequences"], _ = json.Marshal([]string{text})
+		} else {
+			filtered["stop_sequences"] = v
+		}
+	}
 	v, _ := json.Marshal("bedrock-2023-05-31")
 	filtered["anthropic_version"] = v
 
@@ -532,7 +543,7 @@ func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string, an
 				if mt, ok := filtered["max_tokens"]; ok {
 					_ = json.Unmarshal(mt, &currentMax)
 				}
-				if currentMax <= budget {
+				if currentMax <= budget && raw["max_tokens"] == nil && raw["max_completion_tokens"] == nil {
 					v, _ := json.Marshal(budget + 1024)
 					filtered["max_tokens"] = v
 				}
@@ -564,33 +575,46 @@ func openAIToBedrockBody(raw map[string]json.RawMessage, deploymentID string, an
 // bedrockToOpenAIResponse converts a Bedrock /invoke response to OpenAI chat completion format.
 func bedrockToOpenAIResponse(data []byte, model string) []byte {
 	var bedrock struct {
-		ID      string `json:"id"`
+		ID      string          `json:"id"`
+		Error   json.RawMessage `json:"error"`
 		Content []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
+			Type     string          `json:"type"`
+			Text     string          `json:"text"`
+			Thinking string          `json:"thinking"`
+			ID       string          `json:"id"`
+			Name     string          `json:"name"`
+			Input    json.RawMessage `json:"input"`
 		} `json:"content"`
 		StopReason string `json:"stop_reason"`
 		Usage      struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
+			InputTokens   int `json:"input_tokens"`
+			OutputTokens  int `json:"output_tokens"`
+			CacheRead     int `json:"cache_read_input_tokens"`
+			CacheCreation int `json:"cache_creation_input_tokens"`
 		} `json:"usage"`
 	}
 
 	if err := json.Unmarshal(data, &bedrock); err != nil {
-		return data
+		return bridgeResponseError("invalid upstream Anthropic JSON", nil)
 	}
 
-	// Concatenate all text blocks; skip thinking blocks. tool_use blocks become
+	if len(bedrock.Error) > 0 && string(bedrock.Error) != "null" {
+		return data
+	}
+	if bedrock.ID == "" && len(bedrock.Content) == 0 {
+		return bridgeResponseError("upstream Anthropic response contains no message", nil)
+	}
+
+	// Concatenate text and reasoning blocks. tool_use blocks become
 	// OpenAI tool_calls so a tool-calling loop can continue.
-	content := ""
+	content, reasoning := "", ""
 	var toolCalls []map[string]interface{}
 	for _, block := range bedrock.Content {
 		switch block.Type {
 		case "text":
 			content += block.Text
+		case "thinking":
+			reasoning += block.Thinking
 		case "tool_use":
 			args := "{}"
 			if len(block.Input) > 0 && string(block.Input) != "null" {
@@ -624,6 +648,9 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 		"role":    "assistant",
 		"content": content,
 	}
+	if reasoning != "" {
+		message["reasoning_content"] = reasoning
+	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
 		// OpenAI reports null content when the turn is purely tool calls.
@@ -643,10 +670,11 @@ func bedrockToOpenAIResponse(data []byte, model string) []byte {
 				"finish_reason": finishReason,
 			},
 		},
-		"usage": map[string]int{
-			"prompt_tokens":     bedrock.Usage.InputTokens,
-			"completion_tokens": bedrock.Usage.OutputTokens,
-			"total_tokens":      bedrock.Usage.InputTokens + bedrock.Usage.OutputTokens,
+		"usage": map[string]interface{}{
+			"prompt_tokens":         bedrock.Usage.InputTokens + bedrock.Usage.CacheRead + bedrock.Usage.CacheCreation,
+			"completion_tokens":     bedrock.Usage.OutputTokens,
+			"total_tokens":          bedrock.Usage.InputTokens + bedrock.Usage.CacheRead + bedrock.Usage.CacheCreation + bedrock.Usage.OutputTokens,
+			"prompt_tokens_details": map[string]int{"cached_tokens": bedrock.Usage.CacheRead},
 		},
 	}
 

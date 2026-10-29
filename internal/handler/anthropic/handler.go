@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 )
 
@@ -12,10 +13,11 @@ type Handler struct {
 	client             *sapclient.Client
 	deployments        *sapclient.DeploymentManager
 	anthropicAutoCache bool
+	chat               *openai.Handler
 }
 
 func NewHandler(client *sapclient.Client, deployments *sapclient.DeploymentManager, anthropicAutoCache bool) *Handler {
-	return &Handler{client: client, deployments: deployments, anthropicAutoCache: anthropicAutoCache}
+	return &Handler{client: client, deployments: deployments, anthropicAutoCache: anthropicAutoCache, chat: openai.NewHandler(client, deployments, anthropicAutoCache)}
 }
 
 func (h *Handler) ListModels(c *gin.Context) {

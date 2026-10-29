@@ -29,7 +29,7 @@ func TestThinking_AnthropicMessages_UnsupportedModel(t *testing.T) {
 	// First request with thinking parameter should succeed after retry
 	reqBody := `{
 		"model": "claude-3-5-sonnet-latest",
-		"max_tokens": 100,
+		"max_tokens": 8192,
 		"messages": [{"role": "user", "content": "Hi"}],
 		"thinking": {"type": "enabled", "budget_tokens": 5000}
 	}`
@@ -92,7 +92,7 @@ func TestThinking_OpenAIChat_UnsupportedModel(t *testing.T) {
 	// Request with reasoning_effort (converts to thinking)
 	reqBody := `{
 		"model": "claude-3-5-sonnet-latest",
-		"max_tokens": 100,
+		"max_tokens": 8192,
 		"messages": [{"role": "user", "content": "Hi"}],
 		"reasoning_effort": "medium"
 	}`
@@ -161,7 +161,7 @@ func TestThinking_SupportedModel(t *testing.T) {
 	// Request with thinking parameter should succeed on first try
 	reqBody := `{
 		"model": "claude-3-5-sonnet-latest",
-		"max_tokens": 100,
+		"max_tokens": 8192,
 		"messages": [{"role": "user", "content": "Hi"}],
 		"thinking": {"type": "enabled", "budget_tokens": 5000}
 	}`
@@ -218,7 +218,7 @@ func TestThinking_Streaming_AutoProbe(t *testing.T) {
 	// 3. Retry the streaming endpoint without thinking → succeed
 	reqBody := `{
 		"model": "claude-3-5-sonnet-latest",
-		"max_tokens": 100,
+		"max_tokens": 8192,
 		"messages": [{"role": "user", "content": "Hi"}],
 		"thinking": {"type": "enabled", "budget_tokens": 5000},
 		"stream": true
@@ -245,7 +245,7 @@ func TestThinking_Streaming_AutoProbe(t *testing.T) {
 	}
 
 	// Verify thinking is now cached as unsupported
-	if !openai.IsThinkingUnsupported("dep-anthropic-001") {
+	if !openai.IsThinkingUnsupported(testCapabilityKey(t, mock.URL, "claude-3-5-sonnet-latest", "/invoke-with-response-stream")) {
 		t.Error("expected deployment to be cached as unsupported after streaming rejection")
 	}
 	for _, request := range mock.RequestLog {

@@ -25,16 +25,29 @@ type Client struct {
 	resourceGroup string
 	baseURL       string
 	http          *http.Client
+	streamHTTP    *http.Client
+}
+
+type responseObserverKey struct{}
+
+// WithResponseObserver lets callers retain response metadata while adapters
+// transform bodies. Observations run synchronously before the body is consumed.
+func WithResponseObserver(ctx context.Context, observe func(*http.Response)) context.Context {
+	return context.WithValue(ctx, responseObserverKey{}, observe)
 }
 
 func NewClient(baseURL, resourceGroup string, auth *AuthManager) *Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 90 * time.Second
 	return &Client{
 		auth:          auth,
 		resourceGroup: resourceGroup,
 		baseURL:       baseURL,
 		http: &http.Client{
-			Timeout: 300 * time.Second,
+			Timeout:   300 * time.Second,
+			Transport: transport,
 		},
+		streamHTTP: &http.Client{Transport: transport},
 	}
 }
 
@@ -47,7 +60,14 @@ func (c *Client) Do(ctx context.Context, method, urlStr string, body io.Reader, 
 
 // DoStreaming performs a signed request with no client timeout (for streaming responses).
 func (c *Client) DoStreaming(ctx context.Context, method, urlStr string, body io.Reader, extraHeaders map[string]string) (*http.Response, error) {
-	return c.do(ctx, method, urlStr, body, extraHeaders, &http.Client{})
+	streamCtx, cancel := context.WithCancel(ctx)
+	resp, err := c.do(streamCtx, method, urlStr, body, extraHeaders, c.streamHTTP)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	resp.Body = &idleBody{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
 }
 
 func (c *Client) do(ctx context.Context, method, urlStr string, body io.Reader, extraHeaders map[string]string, httpClient *http.Client) (*http.Response, error) {
@@ -77,6 +97,9 @@ func (c *Client) do(ctx context.Context, method, urlStr string, body io.Reader, 
 			c.auth.InvalidateToken()
 			continue
 		}
+		if observe, ok := ctx.Value(responseObserverKey{}).(func(*http.Response)); ok {
+			observe(resp)
+		}
 		return resp, nil
 	}
 	// unreachable
@@ -97,7 +120,13 @@ func (c *Client) doOnce(ctx context.Context, method, urlStr string, buf []byte, 
 			delay := retryBaseDelay * time.Duration(attempt)
 			slog.Warn("retrying transient network error", "method", method, "url", urlStr,
 				"attempt", attempt, "delay", delay, "err", err)
-			time.Sleep(delay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
 		}
 
 		var reqBody io.Reader
@@ -132,8 +161,14 @@ func (c *Client) doOnce(ctx context.Context, method, urlStr string, buf []byte, 
 	}
 	elapsed := time.Since(start).Milliseconds()
 	if resp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20+1))
 		_ = resp.Body.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("read upstream error: %w", readErr)
+		}
+		if len(bodyBytes) > 8<<20 {
+			return nil, fmt.Errorf("upstream error body exceeds 8 MiB")
+		}
 		resp.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		preview := string(bodyBytes)
 		if len(preview) > 500 {
@@ -147,6 +182,19 @@ func (c *Client) doOnce(ctx context.Context, method, urlStr string, buf []byte, 
 	}
 	return resp, nil
 }
+
+// An idle stream is cancelled independently of the total generation duration.
+type idleBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	timer := time.AfterFunc(180*time.Second, b.cancel)
+	defer timer.Stop()
+	return b.ReadCloser.Read(p)
+}
+func (b *idleBody) Close() error { b.cancel(); return b.ReadCloser.Close() }
 
 // isTransientNetworkErr reports whether err is a transient network failure worth retrying.
 // Only matches DNS-layer errors to avoid false positives from connection-level permission errors.

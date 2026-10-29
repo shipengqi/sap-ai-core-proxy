@@ -9,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/transform"
@@ -21,6 +22,10 @@ import (
 // This handler converts the incoming OpenAI-format request to Anthropic Messages format
 // and converts the Anthropic response back to OpenAI format.
 func (h *Handler) chatCompletionsGlm(c *gin.Context, modelStr string, raw map[string]json.RawMessage, streaming bool) {
+	if err := validateGLMChat(raw); err != nil {
+		c.JSON(400, errorBody(err.Error()))
+		return
+	}
 	glmBody := openAIToGLMBody(raw, modelStr, streaming)
 
 	buildURL := func(dep *sapclient.Deployment) string {
@@ -34,16 +39,19 @@ func (h *Handler) chatCompletionsGlm(c *gin.Context, modelStr string, raw map[st
 			return
 		}
 		slog.Info("calling glm model", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
-		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
-			buildURL(dep), bytes.NewReader(glmBody), nil)
+		upstream, dep, err := h.deployments.CallStreaming(c.Request.Context(), dep, 5, func(candidate *sapclient.Deployment) (*http.Response, error) {
+			return h.client.DoStreaming(c.Request.Context(), http.MethodPost, buildURL(candidate), bytes.NewReader(glmBody), rgHeaders(candidate.ResourceGroupID))
+		})
 		if err != nil {
 			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
 			return
 		}
 		// Recorded before c.Status(200) locks the client-visible status.
-		usage.MarkUpstreamStatus(c, upstream.StatusCode)
+		if !proxy.CheckStream(c, upstream) {
+			return
+		}
 		c.Status(http.StatusOK)
-		stream.PipeAnthropicToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr)
+		stream.PipeAnthropicToOpenAI(c, upstream, "chatcmpl-"+dep.ID, modelStr, wantsStreamUsage(raw))
 		return
 	}
 
@@ -52,12 +60,15 @@ func (h *Handler) chatCompletionsGlm(c *gin.Context, modelStr string, raw map[st
 		c.Request.Context(), modelStr, 5,
 		func(dep *sapclient.Deployment) (int, []byte, error) {
 			resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				buildURL(dep), bytes.NewReader(glmBody), nil)
+				buildURL(dep), bytes.NewReader(glmBody), rgHeaders(dep.ResourceGroupID))
 			if err != nil {
 				return 0, nil, err
 			}
 			defer func() { _ = resp.Body.Close() }()
-			b, _ := io.ReadAll(resp.Body)
+			b, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				return 0, nil, readErr
+			}
 			return resp.StatusCode, b, nil
 		},
 	)
@@ -74,6 +85,14 @@ func (h *Handler) chatCompletionsGlm(c *gin.Context, modelStr string, raw map[st
 	openAIResp := glmAnthropicToOpenAIResponse(respBody, modelStr)
 	// The converted body carries GLM's usage restated as OpenAI counters.
 	usage.ObserveJSONBody(c, openAIResp)
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	_ = json.Unmarshal(openAIResp, &envelope)
+	if len(envelope.Error) > 0 && string(envelope.Error) != "null" {
+		c.Data(502, "application/json", openAIResp)
+		return
+	}
 	c.Data(http.StatusOK, "application/json", openAIResp)
 }
 
@@ -104,9 +123,9 @@ func openAIToGLMBody(raw map[string]json.RawMessage, modelStr string, streaming 
 	}
 
 	// max_tokens / max_completion_tokens → max_tokens (Anthropic field name).
-	if v, ok := raw["max_tokens"]; ok {
+	if v, ok := raw["max_completion_tokens"]; ok {
 		out["max_tokens"] = v
-	} else if v, ok := raw["max_completion_tokens"]; ok {
+	} else if v, ok := raw["max_tokens"]; ok {
 		out["max_tokens"] = v
 	} else {
 		v, _ := json.Marshal(8192)
@@ -114,14 +133,19 @@ func openAIToGLMBody(raw map[string]json.RawMessage, modelStr string, streaming 
 	}
 
 	for _, field := range []string{"temperature", "top_p", "tools", "tool_choice", "stop_sequences", "metadata"} {
-		if v, ok := raw[field]; ok {
+		if v, ok := converted[field]; ok {
 			out[field] = v
 		}
 	}
 	// OpenAI stop → Anthropic stop_sequences
 	if _, ok := out["stop_sequences"]; !ok {
 		if v, ok := raw["stop"]; ok {
-			out["stop_sequences"] = v
+			var text string
+			if json.Unmarshal(v, &text) == nil {
+				out["stop_sequences"], _ = json.Marshal([]string{text})
+			} else {
+				out["stop_sequences"] = v
+			}
 		}
 	}
 
@@ -134,87 +158,5 @@ func openAIToGLMBody(raw map[string]json.RawMessage, modelStr string, streaming 
 
 // glmAnthropicToOpenAIResponse converts a GLM Anthropic Messages response to OpenAI format.
 func glmAnthropicToOpenAIResponse(data []byte, model string) []byte {
-	var resp struct {
-		ID      string `json:"id"`
-		Content []struct {
-			Type  string          `json:"type"`
-			Text  string          `json:"text"`
-			ID    string          `json:"id"`
-			Name  string          `json:"name"`
-			Input json.RawMessage `json:"input"`
-		} `json:"content"`
-		StopReason string `json:"stop_reason"`
-		Usage      struct {
-			InputTokens  int `json:"input_tokens"`
-			OutputTokens int `json:"output_tokens"`
-		} `json:"usage"`
-	}
-	if err := json.Unmarshal(data, &resp); err != nil {
-		return data
-	}
-
-	text := ""
-	var toolCalls []map[string]interface{}
-	for _, block := range resp.Content {
-		switch block.Type {
-		case "text":
-			text += block.Text
-		case "tool_use":
-			args := "{}"
-			if len(block.Input) > 0 && string(block.Input) != "null" {
-				args = string(block.Input)
-			}
-			toolCalls = append(toolCalls, map[string]interface{}{
-				"id":   block.ID,
-				"type": "function",
-				"function": map[string]string{
-					"name":      block.Name,
-					"arguments": args,
-				},
-			})
-		}
-	}
-
-	finishReason := "stop"
-	switch resp.StopReason {
-	case "max_tokens":
-		finishReason = "length"
-	case "tool_use":
-		finishReason = "tool_calls"
-	}
-	if finishReason == "stop" && len(toolCalls) > 0 {
-		finishReason = "tool_calls"
-	}
-
-	message := map[string]interface{}{
-		"role":    "assistant",
-		"content": text,
-	}
-	if len(toolCalls) > 0 {
-		message["tool_calls"] = toolCalls
-		if text == "" {
-			message["content"] = nil
-		}
-	}
-
-	openAI := map[string]interface{}{
-		"id":     "chatcmpl-" + resp.ID,
-		"object": "chat.completion",
-		"model":  model,
-		"choices": []map[string]interface{}{
-			{
-				"index":         0,
-				"message":       message,
-				"finish_reason": finishReason,
-			},
-		},
-		"usage": map[string]int{
-			"prompt_tokens":     resp.Usage.InputTokens,
-			"completion_tokens": resp.Usage.OutputTokens,
-			"total_tokens":      resp.Usage.InputTokens + resp.Usage.OutputTokens,
-		},
-	}
-
-	out, _ := json.Marshal(openAI)
-	return out
+	return bedrockToOpenAIResponse(data, model)
 }

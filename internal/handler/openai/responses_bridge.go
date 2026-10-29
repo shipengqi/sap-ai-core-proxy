@@ -13,9 +13,8 @@ const responsesPath = "/responses?api-version=2024-02-01"
 //
 // This exists for one reason: some models (gpt-6.x) accept function tools only
 // on /responses and answer every tool-bearing /chat/completions request with
-// 400. The caller reaches this only after upstream refused the chat body, so a
-// lossy mapping is acceptable — but anything that changes the meaning of a
-// message (tool calls, tool results, images) is carried over explicitly.
+// 400. The caller reaches this only after upstream refused the chat body, and unrepresentable options are rejected before conversion. Tool calls,
+// tool results and images are carried over explicitly.
 func chatToResponsesBody(raw map[string]json.RawMessage) []byte {
 	out := map[string]interface{}{}
 	instructions := make([]string, 0, 1)
@@ -145,10 +144,15 @@ func responsesContent(raw json.RawMessage, role string) (interface{}, bool) {
 			converted = append(converted, map[string]interface{}{"type": textType, "text": p.Text})
 		case "image_url":
 			var ref struct {
-				URL string `json:"url"`
+				URL    string `json:"url"`
+				Detail string `json:"detail"`
 			}
 			if json.Unmarshal(p.ImageURL, &ref) == nil && ref.URL != "" {
-				converted = append(converted, map[string]interface{}{"type": "input_image", "image_url": ref.URL})
+				image := map[string]interface{}{"type": "input_image", "image_url": ref.URL}
+				if ref.Detail != "" {
+					image["detail"] = ref.Detail
+				}
+				converted = append(converted, image)
 			} else {
 				var url string
 				if json.Unmarshal(p.ImageURL, &url) == nil && url != "" {
@@ -178,7 +182,7 @@ func responsesTools(raw json.RawMessage) []interface{} {
 			}
 			fields = fn
 		}
-		item := map[string]interface{}{"type": "function"}
+		item := map[string]interface{}{"type": "function", "strict": false}
 		for _, k := range []string{"name", "description", "parameters", "strict"} {
 			if v, ok := fields[k]; ok {
 				item[k] = v
@@ -265,16 +269,18 @@ func plainTextOrEmpty(raw json.RawMessage) string {
 // so the caller sees the surface it asked for.
 func responsesToChatCompletion(data []byte, model string) []byte {
 	var resp struct {
-		ID                string `json:"id"`
-		Status            string `json:"status"`
+		ID                string          `json:"id"`
+		Status            string          `json:"status"`
+		Error             json.RawMessage `json:"error"`
 		IncompleteDetails *struct {
 			Reason string `json:"reason"`
 		} `json:"incomplete_details"`
 		Output []struct {
 			Type    string `json:"type"`
 			Content []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
+				Type    string `json:"type"`
+				Text    string `json:"text"`
+				Refusal string `json:"refusal"`
 			} `json:"content"`
 			CallID    string `json:"call_id"`
 			Name      string `json:"name"`
@@ -293,10 +299,17 @@ func responsesToChatCompletion(data []byte, model string) []byte {
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		return data
+		return bridgeResponseError("invalid upstream Responses JSON", nil)
+	}
+	if resp.Status == "failed" || resp.Status == "cancelled" || len(resp.Error) > 0 && string(resp.Error) != "null" {
+		return bridgeResponseError("upstream Responses request failed", resp.Error)
+	}
+	if resp.Status != "completed" && resp.Status != "incomplete" {
+		return bridgeResponseError("upstream Responses request did not complete", nil)
 	}
 
 	var content strings.Builder
+	var refusal strings.Builder
 	toolCalls := make([]interface{}, 0, 2)
 	for _, item := range resp.Output {
 		switch item.Type {
@@ -304,6 +317,9 @@ func responsesToChatCompletion(data []byte, model string) []byte {
 			for _, part := range item.Content {
 				if part.Type == "output_text" {
 					content.WriteString(part.Text)
+				}
+				if part.Type == "refusal" {
+					refusal.WriteString(part.Refusal)
 				}
 			}
 		case "function_call":
@@ -324,13 +340,18 @@ func responsesToChatCompletion(data []byte, model string) []byte {
 
 	finishReason := "stop"
 	switch {
+	case resp.Status == "incomplete" && resp.IncompleteDetails != nil && resp.IncompleteDetails.Reason == "content_filter":
+		finishReason = "content_filter"
+	case resp.Status == "incomplete":
+		finishReason = "length"
 	case len(toolCalls) > 0:
 		finishReason = "tool_calls"
-	case resp.Status == "incomplete" && resp.IncompleteDetails != nil && resp.IncompleteDetails.Reason == "max_output_tokens":
-		finishReason = "length"
 	}
 
 	message := map[string]interface{}{"role": "assistant", "content": content.String()}
+	if refusal.Len() > 0 {
+		message["refusal"] = refusal.String()
+	}
 	if len(toolCalls) > 0 {
 		message["tool_calls"] = toolCalls
 		if content.Len() == 0 {
@@ -367,4 +388,9 @@ func responsesToChatCompletion(data []byte, model string) []byte {
 		"usage": usage,
 	})
 	return out
+}
+
+func bridgeResponseError(message string, details json.RawMessage) []byte {
+	b, _ := json.Marshal(map[string]any{"error": map[string]any{"type": "upstream_error", "message": message, "details": details}})
+	return b
 }

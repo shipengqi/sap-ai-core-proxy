@@ -6,119 +6,193 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
-
+	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
-var (
-	responseStore   = map[string]string{} // responseID → deploymentURL
-	responseRGStore = map[string]string{} // responseID → resourceGroupID
-	responseStoreMu sync.Mutex
-)
+const responseRouteTTL = 24 * time.Hour
+const maxResponseRoutes = 10000
 
-// CreateResponse proxies POST /openai/v1/responses and records the deployment URL.
+type responseRoute struct {
+	Deployment sapclient.Deployment
+	Expires    time.Time
+}
+type responseRegistry struct {
+	mu     sync.Mutex
+	routes map[string]responseRoute
+}
+
+func (r *responseRegistry) remember(id string, dep *sapclient.Deployment) {
+	if id == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now()
+	for key, v := range r.routes {
+		if now.After(v.Expires) {
+			delete(r.routes, key)
+		}
+	}
+	if _, exists := r.routes[id]; !exists && len(r.routes) >= maxResponseRoutes {
+		var oldest string
+		var expiry time.Time
+		for key, v := range r.routes {
+			if oldest == "" || v.Expires.Before(expiry) {
+				oldest = key
+				expiry = v.Expires
+			}
+		}
+		delete(r.routes, oldest)
+	}
+	r.routes[id] = responseRoute{Deployment: *dep, Expires: now.Add(responseRouteTTL)}
+}
+func (r *responseRegistry) lookup(id string) (*sapclient.Deployment, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	v, ok := r.routes[id]
+	if !ok {
+		return nil, false
+	}
+	if time.Now().After(v.Expires) {
+		delete(r.routes, id)
+		return nil, false
+	}
+	return &v.Deployment, true
+}
+func (r *responseRegistry) forget(id string) { r.mu.Lock(); defer r.mu.Unlock(); delete(r.routes, id) }
+
+// CreateResponse preserves native Responses streaming and stored-response affinity.
 func (h *Handler) CreateResponse(c *gin.Context) {
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, errorBody("read request body: "+err.Error()))
+		c.JSON(400, errorBody(err.Error()))
 		return
 	}
-
 	var req struct {
-		Model string `json:"model"`
+		Model    string `json:"model"`
+		Stream   bool   `json:"stream"`
+		Previous string `json:"previous_response_id"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		c.JSON(http.StatusBadRequest, errorBody("invalid JSON: "+err.Error()))
+	if json.Unmarshal(body, &req) != nil {
+		c.JSON(400, errorBody("invalid Responses request"))
 		return
 	}
-
-	modelName := req.Model
-	// Without this the request is counted under model="unknown": this endpoint
-	// never set the label, so its tokens were unattributable.
-	c.Set("model", modelName)
-	dep, err := h.deployments.GetDeployment(c.Request.Context(), modelName)
-	if err != nil {
-		c.JSON(http.StatusNotFound, errorBody(err.Error()))
-		return
+	var dep *sapclient.Deployment
+	if req.Previous != "" {
+		var ok bool
+		dep, ok = h.responses.lookup(req.Previous)
+		if !ok {
+			c.JSON(404, errorBody("previous response route not found; response affinity requires the same proxy instance"))
+			return
+		}
+		if req.Model != "" {
+			candidate, e := h.deployments.GetDeployment(c.Request.Context(), req.Model)
+			if e != nil {
+				c.JSON(404, errorBody(e.Error()))
+				return
+			}
+			if candidate.EffectiveModelName() != dep.EffectiveModelName() {
+				c.JSON(400, errorBody("previous_response_id belongs to a different model"))
+				return
+			}
+		} else {
+			req.Model = dep.EffectiveModelName()
+		}
+	} else {
+		if req.Model == "" {
+			c.JSON(400, errorBody("missing required field: model"))
+			return
+		}
+		dep, err = h.deployments.GetDeployment(c.Request.Context(), req.Model)
+		if err != nil {
+			c.JSON(404, errorBody(err.Error()))
+			return
+		}
 	}
-
-	upstream, err := h.client.Do(c.Request.Context(), http.MethodPost,
-		dep.DeployedURL+"/responses?api-version=2024-02-01", bytes.NewReader(body), nil)
-	if err != nil {
-		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-		return
-	}
-	defer func() { _ = upstream.Body.Close() }()
-	respBody, _ := io.ReadAll(upstream.Body)
-
-	if upstream.StatusCode == http.StatusOK || upstream.StatusCode == http.StatusCreated {
-		var resp struct {
+	c.Set("model", req.Model)
+	c.Set("resolved_model", dep.EffectiveModelName())
+	remember := func(data []byte) {
+		var response struct {
 			ID string `json:"id"`
 		}
-		if err := json.Unmarshal(respBody, &resp); err == nil && resp.ID != "" {
-			responseStoreMu.Lock()
-			responseStore[resp.ID] = dep.DeployedURL
-			responseRGStore[resp.ID] = dep.ResourceGroupID
-			responseStoreMu.Unlock()
+		if json.Unmarshal(data, &response) == nil {
+			h.responses.remember(response.ID, dep)
 		}
 	}
-
-	// The Responses API reports usage as input_tokens/output_tokens (with the
-	// cached part under input_tokens_details). Observation only.
-	usage.ObserveJSONBody(c, respBody)
-	c.Data(upstream.StatusCode, "application/json", respBody)
-}
-
-// GetResponse proxies GET /openai/v1/responses/:id.
-func (h *Handler) GetResponse(c *gin.Context) {
-	id := c.Param("id")
-	deployURL, rg := lookupResponse(id)
-	if deployURL == "" {
-		c.JSON(http.StatusNotFound, errorBody("response not found: "+id))
+	if req.Stream {
+		retries := 5
+		if req.Previous != "" {
+			retries = 0
+		}
+		upstream, resolved, e := h.deployments.CallStreaming(c.Request.Context(), dep, retries, func(candidate *sapclient.Deployment) (*http.Response, error) {
+			return h.client.DoStreaming(c.Request.Context(), http.MethodPost, candidate.DeployedURL+responsesPath, bytes.NewReader(body), rgHeaders(candidate.ResourceGroupID))
+		})
+		if e != nil {
+			c.JSON(502, errorBody(e.Error()))
+			return
+		}
+		dep = resolved
+		c.Set("resolved_model", dep.EffectiveModelName())
+		if !proxy.CheckStream(c, upstream) {
+			return
+		}
+		stream.PipeResponses(c, upstream, func(data []byte) {
+			var ev struct {
+				Response json.RawMessage `json:"response"`
+			}
+			if json.Unmarshal(data, &ev) == nil {
+				remember(ev.Response)
+			}
+		})
 		return
 	}
-
-	upstream, err := h.client.Do(c.Request.Context(), http.MethodGet,
-		deployURL+"/responses/"+id, nil, rgHeaders(rg))
+	upstream, err := h.client.Do(c.Request.Context(), http.MethodPost, dep.DeployedURL+responsesPath, bytes.NewReader(body), rgHeaders(dep.ResourceGroupID))
 	if err != nil {
-		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+		c.JSON(502, errorBody(err.Error()))
 		return
 	}
 	defer func() { _ = upstream.Body.Close() }()
-	respBody, _ := io.ReadAll(upstream.Body)
-	c.Data(upstream.StatusCode, "application/json", respBody)
-}
-
-// DeleteResponse proxies DELETE /openai/v1/responses/:id.
-func (h *Handler) DeleteResponse(c *gin.Context) {
-	id := c.Param("id")
-	deployURL, rg := lookupResponse(id)
-	if deployURL == "" {
-		c.JSON(http.StatusNotFound, errorBody("response not found: "+id))
+	b, err := io.ReadAll(upstream.Body)
+	if err != nil {
+		c.JSON(502, errorBody(err.Error()))
 		return
 	}
-
-	upstream, err := h.client.Do(c.Request.Context(), http.MethodDelete,
-		deployURL+"/responses/"+id, nil, rgHeaders(rg))
+	proxy.CopyHeaders(c, upstream)
+	if upstream.StatusCode >= 200 && upstream.StatusCode < 300 {
+		remember(b)
+	}
+	usage.ObserveJSONBody(c, b)
+	c.Data(upstream.StatusCode, "application/json", b)
+}
+func (h *Handler) GetResponse(c *gin.Context)    { h.storedResponse(c, http.MethodGet) }
+func (h *Handler) DeleteResponse(c *gin.Context) { h.storedResponse(c, http.MethodDelete) }
+func (h *Handler) storedResponse(c *gin.Context, method string) {
+	id := c.Param("id")
+	dep, ok := h.responses.lookup(id)
+	if !ok {
+		c.JSON(404, errorBody("response route not found: "+id))
+		return
+	}
+	upstream, err := h.client.Do(c.Request.Context(), method, dep.DeployedURL+"/responses/"+id+"?api-version=2024-02-01", nil, rgHeaders(dep.ResourceGroupID))
 	if err != nil {
-		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+		c.JSON(502, errorBody(err.Error()))
 		return
 	}
 	defer func() { _ = upstream.Body.Close() }()
-	respBody, _ := io.ReadAll(upstream.Body)
-
-	responseStoreMu.Lock()
-	delete(responseStore, id)
-	delete(responseRGStore, id)
-	responseStoreMu.Unlock()
-
-	c.Data(upstream.StatusCode, "application/json", respBody)
-}
-
-func lookupResponse(id string) (deployURL, rg string) {
-	responseStoreMu.Lock()
-	defer responseStoreMu.Unlock()
-	return responseStore[id], responseRGStore[id]
+	body, err := io.ReadAll(upstream.Body)
+	if err != nil {
+		c.JSON(502, errorBody(err.Error()))
+		return
+	}
+	proxy.CopyHeaders(c, upstream)
+	if method == http.MethodDelete && upstream.StatusCode >= 200 && upstream.StatusCode < 300 {
+		h.responses.forget(id)
+	}
+	c.Data(upstream.StatusCode, "application/json", body)
 }

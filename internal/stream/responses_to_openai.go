@@ -1,12 +1,9 @@
 package stream
 
 import (
-	"bufio"
-	"bytes"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -46,62 +43,38 @@ type responsesStreamResponse struct {
 func PipeResponsesToOpenAI(c *gin.Context, upstream *http.Response, id, model string, includeUsage bool) {
 	defer func() { _ = upstream.Body.Close() }()
 
-	usage.MarkStream(c)
-
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		return
+	streamHeaders(c)
+	terminal, writeFailed := false, false
+	writeChunk := func(chunk map[string]interface{}) bool {
+		ok := emitSSE(c, "", chunk)
+		writeFailed = !ok
+		return ok
 	}
-
-	writeChunk := func(chunk map[string]interface{}) {
-		b, err := json.Marshal(chunk)
-		if err != nil {
-			return
-		}
-		_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
-		flusher.Flush()
-	}
-	writeDelta := func(delta map[string]interface{}, finishReason interface{}) {
-		writeChunk(map[string]interface{}{
-			"id":     id,
-			"object": "chat.completion.chunk",
-			"model":  model,
-			"choices": []map[string]interface{}{
-				{"index": 0, "delta": delta, "finish_reason": finishReason},
-			},
+	writeDelta := func(delta map[string]interface{}, finishReason interface{}) bool {
+		return writeChunk(map[string]interface{}{
+			"id": id, "object": "chat.completion.chunk", "model": model,
+			"choices": []map[string]interface{}{{"index": 0, "delta": delta, "finish_reason": finishReason}},
 		})
 	}
-	writeDone := func() {
-		_, _ = io.WriteString(c.Writer, "data: [DONE]\n\n")
-		flusher.Flush()
+	writeError := func(message string) {
+		terminal = true
+		streamError(c, "openai", message)
 	}
-
-	// OpenAI streams the role first; clients use it to open the assistant turn.
-	writeDelta(map[string]interface{}{"role": "assistant", "content": ""}, nil)
+	if !writeDelta(map[string]interface{}{"role": "assistant", "content": ""}, nil) {
+		return
+	}
 
 	// Tool calls are addressed by their position in the caller's tool_calls
 	// array, while upstream identifies them by item ID.
 	toolIndex := map[string]int{}
 	nextToolIndex := 0
 
-	scanner := bufio.NewScanner(upstream.Body)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 || !bytes.HasPrefix(line, []byte("data:")) {
-			continue
+	arguments := map[string]*strings.Builder{}
+	err := readSSE(upstream.Body, func(frame sseFrame) bool {
+		payload := strings.TrimSpace(frame.Data)
+		if payload == "" || payload == "[DONE]" {
+			return true
 		}
-		payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
-		if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
-			continue
-		}
-
 		var ev struct {
 			Type   string `json:"type"`
 			Delta  string `json:"delta"`
@@ -115,10 +88,14 @@ func PipeResponsesToOpenAI(c *gin.Context, upstream *http.Response, id, model st
 			} `json:"item"`
 			Response responsesStreamResponse `json:"response"`
 		}
-		if err := json.Unmarshal(payload, &ev); err != nil {
-			continue
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			writeError("invalid upstream responses event")
+			return false
 		}
 
+		if ev.Type == "" {
+			ev.Type = frame.Event
+		}
 		switch ev.Type {
 		case "response.output_text.delta":
 			if ev.Delta != "" {
@@ -126,11 +103,15 @@ func PipeResponsesToOpenAI(c *gin.Context, upstream *http.Response, id, model st
 			}
 		case "response.output_item.added":
 			if ev.Item.Type != "function_call" {
-				continue
+				return true
+			}
+			if _, exists := toolIndex[ev.Item.ID]; exists {
+				return true
 			}
 			idx := nextToolIndex
 			nextToolIndex++
 			toolIndex[ev.Item.ID] = idx
+			arguments[ev.Item.ID] = &strings.Builder{}
 			writeDelta(map[string]interface{}{
 				"tool_calls": []map[string]interface{}{{
 					"index": idx,
@@ -138,14 +119,18 @@ func PipeResponsesToOpenAI(c *gin.Context, upstream *http.Response, id, model st
 					"type":  "function",
 					"function": map[string]string{
 						"name":      ev.Item.Name,
-						"arguments": "",
+						"arguments": ev.Item.Arguments,
 					},
 				}},
 			}, nil)
+			arguments[ev.Item.ID].WriteString(ev.Item.Arguments)
+		case "response.refusal.delta":
+			writeDelta(map[string]interface{}{"refusal": ev.Delta}, nil)
 		case "response.function_call_arguments.delta":
 			idx, ok := toolIndex[ev.ItemID]
 			if !ok {
-				continue
+				writeError("upstream tool arguments reference an unknown item")
+				return false
 			}
 			writeDelta(map[string]interface{}{
 				"tool_calls": []map[string]interface{}{{
@@ -153,63 +138,93 @@ func PipeResponsesToOpenAI(c *gin.Context, upstream *http.Response, id, model st
 					"function": map[string]string{"arguments": ev.Delta},
 				}},
 			}, nil)
-		case "response.completed":
-			writeDelta(map[string]interface{}{}, responsesFinishReason(ev.Response))
-			if includeUsage {
-				u := ev.Response.Usage
-				total := u.TotalTokens
-				if total == 0 {
-					total = u.InputTokens + u.OutputTokens
+			if arguments[ev.ItemID].Len()+len(ev.Delta) > maxSSEFrameBytes {
+				writeError("upstream tool arguments exceed 8 MiB")
+				return false
+			}
+			arguments[ev.ItemID].WriteString(ev.Delta)
+		case "response.output_item.done":
+			if ev.Item.Type == "function_call" {
+				args, exists := arguments[ev.Item.ID]
+				if !exists || args.String() != ev.Item.Arguments {
+					writeError("upstream tool arguments disagree with the completed item")
+					return false
 				}
-				chunk := map[string]interface{}{
-					"id":      id,
-					"object":  "chat.completion.chunk",
-					"model":   model,
-					"choices": []map[string]interface{}{},
-					"usage": map[string]interface{}{
-						"prompt_tokens":     u.InputTokens,
-						"completion_tokens": u.OutputTokens,
-						"total_tokens":      total,
-						"prompt_tokens_details": map[string]int{
-							"cached_tokens": u.InputTokensDetails.CachedTokens,
-						},
-						"completion_tokens_details": map[string]int{
-							"reasoning_tokens": u.OutputTokensDetails.ReasoningTokens,
-						},
+			}
+		case "response.completed", "response.incomplete":
+			if ev.Type == "response.incomplete" {
+				ev.Response.Status = "incomplete"
+			}
+			if ev.Type == "response.completed" && (ev.Response.Status == "failed" || ev.Response.Status == "cancelled") {
+				writeError("upstream responses stream failed")
+				return false
+			}
+			if !writeDelta(map[string]interface{}{}, responsesFinishReason(ev.Response)) {
+				return false
+			}
+			u := ev.Response.Usage
+			total := u.TotalTokens
+			if total == 0 {
+				total = u.InputTokens + u.OutputTokens
+			}
+			chunk := map[string]interface{}{
+				"id":      id,
+				"object":  "chat.completion.chunk",
+				"model":   model,
+				"choices": []map[string]interface{}{},
+				"usage": map[string]interface{}{
+					"prompt_tokens":     u.InputTokens,
+					"completion_tokens": u.OutputTokens,
+					"total_tokens":      total,
+					"prompt_tokens_details": map[string]int{
+						"cached_tokens": u.InputTokensDetails.CachedTokens,
 					},
-				}
-				b, _ := json.Marshal(chunk)
-				usage.ObserveOpenAIChunk(c, string(b))
+					"completion_tokens_details": map[string]int{
+						"reasoning_tokens": u.OutputTokensDetails.ReasoningTokens,
+					},
+				},
+			}
+			b, _ := json.Marshal(chunk)
+			usage.ObserveOpenAIChunk(c, string(b))
+			if includeUsage {
 				writeChunk(chunk)
 			}
-			writeDone()
-			return
+			terminal = true
+			if !writeFailed {
+				_, writeErr := c.Writer.WriteString("data: [DONE]\n\n")
+				writeFailed = writeErr != nil
+				if !writeFailed {
+					c.Writer.Flush()
+				}
+			}
+			return false
 		case "response.failed", "error":
-			b, _ := json.Marshal(map[string]interface{}{
-				"error": map[string]interface{}{
-					"message": "upstream responses stream failed",
-					"type":    "upstream_error",
-					"details": json.RawMessage(payload),
-				},
-			})
-			_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", b)
-			flusher.Flush()
-			writeDone()
-			return
+			writeError("upstream responses stream failed: " + payload)
+			return false
+		}
+		return !writeFailed
+	})
+	if !terminal && !writeFailed {
+		if err != nil {
+			writeError("reading upstream responses stream: " + err.Error())
+		} else {
+			writeError("upstream responses stream ended before a terminal event")
 		}
 	}
 
-	writeDone()
 }
 
 func responsesFinishReason(resp responsesStreamResponse) string {
+	if resp.Status == "incomplete" {
+		if resp.IncompleteDetails != nil && resp.IncompleteDetails.Reason == "content_filter" {
+			return "content_filter"
+		}
+		return "length"
+	}
 	for _, item := range resp.Output {
 		if item.Type == "function_call" {
 			return "tool_calls"
 		}
-	}
-	if resp.Status == "incomplete" && resp.IncompleteDetails != nil && resp.IncompleteDetails.Reason == "max_output_tokens" {
-		return "length"
 	}
 	return "stop"
 }

@@ -2,44 +2,82 @@ package openai
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"sync"
+	"time"
+
+	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 )
 
-// Both caches below key on deployment ID, like the thinking cache: the
-// capability belongs to the model behind the deployment, not to the client.
+const capabilityTTL = time.Hour
+
+type capabilityCache struct{ entries sync.Map }
+
+func (c *capabilityCache) has(key string) bool {
+	v, ok := c.entries.Load(key)
+	if !ok {
+		return false
+	}
+	if time.Now().After(v.(time.Time)) {
+		c.entries.CompareAndDelete(key, v)
+		return false
+	}
+	return true
+}
+func (c *capabilityCache) mark(key string) {
+	now := time.Now()
+	c.entries.Range(func(k, v any) bool {
+		if now.After(v.(time.Time)) {
+			c.entries.CompareAndDelete(k, v)
+		}
+		return true
+	})
+	c.entries.Store(key, now.Add(capabilityTTL))
+}
+func (c *capabilityCache) clear() {
+	c.entries.Range(func(k, _ any) bool { c.entries.Delete(k); return true })
+}
+
+// CapabilityKey prevents observations from leaking between SAP environments,
+// replaced models, resource groups, endpoints, or API versions.
+func CapabilityKey(dep *sapclient.Deployment, endpoint string) string {
+	b, _ := json.Marshal([]string{dep.ID, dep.DeployedURL, dep.EffectiveModelName(), dep.ResourceGroupID, endpoint})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 // effortUnsupportedCache records deployments whose OpenAI-compatible
 // /chat/completions endpoint does not know the reasoning_effort argument at all
 // (gpt-4o answers 400 "Unrecognized request argument supplied").
-var effortUnsupportedCache sync.Map
+var effortUnsupportedCache capabilityCache
 
 // responsesRequiredCache records deployments that refuse function tools on
 // /chat/completions and accept them only on /responses (gpt-6.x).
-var responsesRequiredCache sync.Map
+var responsesRequiredCache capabilityCache
 
 // IsEffortUnsupported reports whether reasoning_effort must be stripped before
 // forwarding to this deployment.
-func IsEffortUnsupported(deploymentID string) bool {
-	_, exists := effortUnsupportedCache.Load(deploymentID)
-	return exists
+func IsEffortUnsupported(key string) bool {
+	return effortUnsupportedCache.has(key)
 }
 
 // MarkEffortUnsupported remembers that the deployment rejects reasoning_effort.
-func MarkEffortUnsupported(deploymentID string) {
-	effortUnsupportedCache.Store(deploymentID, true)
+func MarkEffortUnsupported(key string) {
+	effortUnsupportedCache.mark(key)
 }
 
 // IsResponsesRequired reports whether tool-bearing requests to this deployment
 // have to be bridged to /responses.
-func IsResponsesRequired(deploymentID string) bool {
-	_, exists := responsesRequiredCache.Load(deploymentID)
-	return exists
+func IsResponsesRequired(key string) bool {
+	return responsesRequiredCache.has(key)
 }
 
 // MarkResponsesRequired remembers that the deployment refuses tools on
 // /chat/completions.
-func MarkResponsesRequired(deploymentID string) {
-	responsesRequiredCache.Store(deploymentID, true)
+func MarkResponsesRequired(key string) {
+	responsesRequiredCache.mark(key)
 }
 
 // IsUnsupportedEffortError matches the 400 a model returns when reasoning_effort
@@ -62,20 +100,11 @@ func IsResponsesRequiredError(body []byte) bool {
 
 // ClearCapabilityCaches clears both caches. For tests only.
 func ClearCapabilityCaches() {
-	effortUnsupportedCache.Range(func(key, _ interface{}) bool {
-		effortUnsupportedCache.Delete(key)
-		return true
-	})
-	responsesRequiredCache.Range(func(key, _ interface{}) bool {
-		responsesRequiredCache.Delete(key)
-		return true
-	})
+	effortUnsupportedCache.clear()
+	responsesRequiredCache.clear()
 }
 
 // ClearEffortCache clears only the effort cache. For tests only.
 func ClearEffortCache() {
-	effortUnsupportedCache.Range(func(key, _ interface{}) bool {
-		effortUnsupportedCache.Delete(key)
-		return true
-	})
+	effortUnsupportedCache.clear()
 }

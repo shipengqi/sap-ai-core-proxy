@@ -320,8 +320,8 @@ func TestMetrics_StreamingUpstreamErrorIsRecordedAsFailure(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("client status = %d, want the unchanged 200: %s", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("client status = %d, want upstream 429: %s", resp.StatusCode, body)
 	}
 	if !strings.Contains(string(body), "mock upstream streaming failure") {
 		t.Errorf("the upstream error body must still be forwarded, got: %q", body)

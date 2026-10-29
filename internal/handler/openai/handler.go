@@ -13,10 +13,11 @@ type Handler struct {
 	client             *sapclient.Client
 	deployments        *sapclient.DeploymentManager
 	anthropicAutoCache bool
+	responses          *responseRegistry
 }
 
 func NewHandler(client *sapclient.Client, deployments *sapclient.DeploymentManager, anthropicAutoCache bool) *Handler {
-	return &Handler{client: client, deployments: deployments, anthropicAutoCache: anthropicAutoCache}
+	return &Handler{client: client, deployments: deployments, anthropicAutoCache: anthropicAutoCache, responses: &responseRegistry{routes: make(map[string]responseRoute)}}
 }
 
 type modelObject struct {

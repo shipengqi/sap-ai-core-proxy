@@ -37,7 +37,7 @@ func TestQA_Characterization_StreamingUpstreamErrorLooksLikeSuccess(t *testing.T
 	// Fidelity: the client still receives exactly what the upstream sent. The
 	// trailing newline is pre-existing pipe behaviour (PipeAnthropic re-frames
 	// every line with "\n"), not something this feature introduced.
-	if want := string(up.streamBody) + "\n"; string(body) != want {
+	if want := "event: error\ndata: " + string(up.streamBody) + "\n\n"; string(body) != want {
 		t.Errorf("client body = %q, want %q", body, want)
 	}
 

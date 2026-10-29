@@ -221,3 +221,26 @@ func TestIsResponsesRequiredError(t *testing.T) {
 		t.Error("unrelated errors must not be treated as a tools error")
 	}
 }
+
+func TestResponsesToChatCompletion_IncompleteToolCall(t *testing.T) {
+	for _, reason := range []string{"max_output_tokens", "content_filter"} {
+		t.Run(reason, func(t *testing.T) {
+			body := []byte(`{"status":"incomplete","incomplete_details":{"reason":"` + reason + `"},"output":[{"type":"function_call","call_id":"call_1","name":"f","arguments":"{\"x\":"}]}`)
+			var out struct {
+				Choices []struct {
+					FinishReason string `json:"finish_reason"`
+				} `json:"choices"`
+			}
+			if err := json.Unmarshal(responsesToChatCompletion(body, "m"), &out); err != nil {
+				t.Fatal(err)
+			}
+			want := "length"
+			if reason == "content_filter" {
+				want = "content_filter"
+			}
+			if len(out.Choices) != 1 || out.Choices[0].FinishReason != want {
+				t.Errorf("incomplete tool call must not be marked executable: %+v", out)
+			}
+		})
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
 // runResponsesPipe feeds a canned Responses SSE body through the converter and
@@ -186,5 +187,53 @@ func TestPipeResponsesToOpenAI_FailedEvent(t *testing.T) {
 	}
 	if !strings.Contains(body, "[DONE]") {
 		t.Error("a failed stream must still terminate with [DONE]")
+	}
+}
+
+func TestPipeResponsesToOpenAI_Incomplete(t *testing.T) {
+	// A truncated function call must not tell the client to execute it.
+	sse := `data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"function_call"}],"usage":{"input_tokens":3,"output_tokens":2}}}` + "\n\n"
+	chunks := runResponsesPipe(t, sse, true)
+	var finish string
+	for _, chunk := range chunks {
+		choices, _ := chunk["choices"].([]interface{})
+		if len(choices) > 0 {
+			if reason, ok := choices[0].(map[string]interface{})["finish_reason"].(string); ok {
+				finish = reason
+			}
+		}
+	}
+	if finish != "length" {
+		t.Errorf("truncated tool call should finish with length, got %q", finish)
+	}
+	if _, ok := chunks[len(chunks)-1]["usage"]; !ok {
+		t.Error("incomplete response must still report usage")
+	}
+}
+
+func TestPipeResponsesToOpenAI_UnexpectedEOF(t *testing.T) {
+	chunks := runResponsesPipe(t, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n", false)
+	if _, ok := chunks[len(chunks)-1]["error"]; !ok {
+		t.Fatal("a stream cut off before a terminal event must surface an error")
+	}
+}
+
+func TestPipeResponsesToOpenAI_UsageWithoutClientOptIn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	col := usage.NewCollector()
+	r := gin.New()
+	r.Use(usage.Middleware(col))
+	r.POST("/openai/v1/chat/completions", func(c *gin.Context) {
+		sse := `data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":30,"output_tokens":7,"input_tokens_details":{"cached_tokens":5}}}}` + "\n\n"
+		PipeResponsesToOpenAI(c, &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(sse))}, "id", "m", false)
+	})
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil))
+	if strings.Contains(rec.Body.String(), `"usage"`) {
+		t.Error("usage must not be sent to a client that did not request it")
+	}
+	stats := col.Snapshot()
+	if stats.Totals.Tokens.Input != 30 || stats.Totals.Tokens.Output != 7 || stats.Totals.Tokens.CacheRead != 5 {
+		t.Errorf("proxy must observe usage independently of client opt-in: %+v", stats.Totals)
 	}
 }

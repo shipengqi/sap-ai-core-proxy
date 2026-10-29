@@ -2,6 +2,7 @@ package test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -163,7 +164,7 @@ func TestOpenAI_ReasoningEffortFallbackWhenArgumentUnknown(t *testing.T) {
 	if _, still := mock.LastOpenAIChatBody["reasoning_effort"]; still {
 		t.Errorf("retry still carried reasoning_effort: %v", mock.LastOpenAIChatBody)
 	}
-	if !openai.IsEffortUnsupported("dep-openai-001") {
+	if !openai.IsEffortUnsupported(testCapabilityKey(t, mock.URL, "gpt-4o", "/chat/completions?api-version=2024-02-01")) {
 		t.Error("deployment should be remembered as not supporting reasoning_effort")
 	}
 }
@@ -240,7 +241,7 @@ func TestOpenAI_ToolsBridgeToResponses(t *testing.T) {
 	if _, ok := mock.LastResponsesBody["tools"]; !ok {
 		t.Errorf("tools were not carried over: %v", mock.LastResponsesBody)
 	}
-	if !openai.IsResponsesRequired("dep-openai-001") {
+	if !openai.IsResponsesRequired(testCapabilityKey(t, mock.URL, "gpt-4o", "/chat/completions?api-version=2024-02-01")) {
 		t.Error("deployment should be remembered as tools-on-responses only")
 	}
 }
@@ -280,6 +281,47 @@ func TestOpenAI_ToolsBridgeToResponses_Stream(t *testing.T) {
 	}
 	if strings.Contains(stream, `"type":"response.`) {
 		t.Errorf("raw responses events leaked to the caller: %s", stream)
+	}
+}
+
+func TestOpenAI_ToolsBridgeFallbackBoundaries(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		for _, scenario := range []string{"cached_none", "effort_then_responses"} {
+			t.Run(fmt.Sprintf("%s/stream=%t", scenario, streaming), func(t *testing.T) {
+				openai.ClearCapabilityCaches()
+				defer openai.ClearCapabilityCaches()
+				mock := testutil.NewMockSAPServer(t)
+				defer mock.Close()
+				mock.ToolsRequireResponses = true
+				effort := "low"
+				if scenario == "cached_none" {
+					openai.MarkResponsesRequired(testCapabilityKey(t, mock.URL, "gpt-4o", "/chat/completions?api-version=2024-02-01"))
+					effort = "none"
+				} else {
+					mock.RejectReasoningEffort = true
+				}
+				proxy, err := testutil.NewTestProxy(mock.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer proxy.Close()
+				body := fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":"call get_time"}],"tools":[{"type":"function","function":{"name":"get_time","parameters":{"type":"object"}}}],"reasoning_effort":%q,"stream":%t}`, effort, streaming)
+				status, resp := qaPost(t, proxy.URL+"/openai/v1/chat/completions", body)
+				if status != http.StatusOK {
+					t.Fatalf("fallback should succeed, got %d: %s", status, resp)
+				}
+				if scenario == "cached_none" {
+					if mock.LastResponsesBody != nil {
+						t.Error("explicit none must use chat even after learning the tools/reasoning restriction")
+					}
+					if string(mock.LastOpenAIChatBody["reasoning_effort"]) != `"none"` {
+						t.Error("explicit none must reach the chat endpoint")
+					}
+				} else if mock.LastResponsesBody == nil {
+					t.Error("tools/reasoning rejection after dropping effort must still trigger the bridge")
+				}
+			})
+		}
 	}
 }
 

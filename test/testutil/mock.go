@@ -181,7 +181,7 @@ func (m *MockSAPServer) registerHandlers(t *testing.T, mux *http.ServeMux) {
 				return
 			}
 		}
-		if toolsRequireResponses {
+		if toolsRequireResponses && string(rawBody["reasoning_effort"]) != `"none"` {
 			if _, hasTools := rawBody["tools"]; hasTools {
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusBadRequest)
