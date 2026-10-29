@@ -47,4 +47,3 @@ func (h *Handler) ListModels(c *gin.Context) {
 func errorBody(msg string) gin.H {
 	return gin.H{"error": gin.H{"message": msg, "type": "proxy_error"}}
 }
-

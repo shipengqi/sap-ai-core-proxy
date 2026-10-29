@@ -3,6 +3,7 @@ package stream
 import (
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -15,14 +16,17 @@ import (
 const geminiStreamCaptureLimit = 512 * 1024
 
 // PipeGemini forwards a Gemini streaming response as raw chunked bytes.
-// Gemini does not use SSE — it returns chunked JSON arrays.
+// Gemini may return a chunked JSON array or SSE when alt=sse is requested.
 func PipeGemini(c *gin.Context, upstream *http.Response) {
 	defer func() { _ = upstream.Body.Close() }()
 
 	usage.MarkStream(c)
+	if strings.HasPrefix(upstream.Header.Get("Content-Type"), "text/event-stream") {
+		pipeGeminiSSE(c, upstream)
+		return
+	}
 
 	c.Header("Content-Type", upstream.Header.Get("Content-Type"))
-	c.Header("Transfer-Encoding", "chunked")
 	c.Header("Cache-Control", "no-cache")
 	c.Header("X-Accel-Buffering", "no")
 
@@ -40,7 +44,9 @@ func PipeGemini(c *gin.Context, upstream *http.Response) {
 	for {
 		n, err := upstream.Body.Read(buf)
 		if n > 0 {
-			_, _ = c.Writer.Write(buf[:n])
+			if _, writeErr := c.Writer.Write(buf[:n]); writeErr != nil {
+				return
+			}
 			if ok {
 				flusher.Flush()
 			}
@@ -61,11 +67,31 @@ func PipeGemini(c *gin.Context, upstream *http.Response) {
 			break
 		}
 		if err != nil {
+			usage.MarkUpstreamStatus(c, http.StatusBadGateway)
 			break
 		}
 	}
 
 	if !truncated && len(capture) > 0 {
 		usage.ObserveGeminiStream(c, capture)
+	}
+}
+
+func pipeGeminiSSE(c *gin.Context, upstream *http.Response) {
+	streamHeaders(c)
+	writeFailed := false
+	err := readSSE(upstream.Body, func(frame sseFrame) bool {
+		if frame.Data != "" && frame.Data != "[DONE]" {
+			usage.ObserveGeminiChunk(c, []byte(frame.Data))
+		}
+		_, err := io.WriteString(c.Writer, frame.Raw+"\n")
+		writeFailed = err != nil
+		if !writeFailed {
+			c.Writer.Flush()
+		}
+		return !writeFailed
+	})
+	if err != nil && !writeFailed {
+		streamError(c, "gemini", err.Error())
 	}
 }

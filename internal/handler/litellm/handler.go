@@ -53,7 +53,11 @@ func (h *Handler) ModelInfo(c *gin.Context) {
 		return
 	}
 	defer func() { _ = upstream.Body.Close() }()
-	respBody, _ := io.ReadAll(upstream.Body)
+	respBody, readErr := io.ReadAll(upstream.Body)
+	if readErr != nil {
+		c.JSON(502, errorBody(readErr.Error()))
+		return
+	}
 	c.Data(upstream.StatusCode, "application/json", respBody)
 }
 
@@ -101,7 +105,11 @@ func (h *Handler) doOrchestration(c *gin.Context, dep *sapclient.Deployment, req
 		return
 	}
 	defer func() { _ = upstream.Body.Close() }()
-	respBody, _ := io.ReadAll(upstream.Body)
+	respBody, readErr := io.ReadAll(upstream.Body)
+	if readErr != nil {
+		c.JSON(502, errorBody(readErr.Error()))
+		return
+	}
 
 	if upstream.StatusCode != http.StatusOK {
 		c.Data(upstream.StatusCode, "application/json", respBody)
@@ -122,4 +130,3 @@ func (h *Handler) doOrchestration(c *gin.Context, dep *sapclient.Deployment, req
 func errorBody(msg string) gin.H {
 	return gin.H{"error": gin.H{"message": msg, "type": "proxy_error"}}
 }
-

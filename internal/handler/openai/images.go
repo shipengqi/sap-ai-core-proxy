@@ -67,7 +67,11 @@ func (h *Handler) ImageGenerations(c *gin.Context) {
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			c.JSON(502, errorBody(readErr.Error()))
+			return
+		}
 		if resp.StatusCode != http.StatusOK {
 			c.Data(resp.StatusCode, "application/json", respBody)
 			return
@@ -91,7 +95,11 @@ func (h *Handler) ImageGenerations(c *gin.Context) {
 		}
 		defer func() { _ = resp.Body.Close() }()
 
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			c.JSON(502, errorBody(readErr.Error()))
+			return
+		}
 		if resp.StatusCode != http.StatusOK {
 			c.Data(resp.StatusCode, "application/json", respBody)
 			return
@@ -109,6 +117,10 @@ func (h *Handler) ImageGenerations(c *gin.Context) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		c.JSON(502, errorBody(readErr.Error()))
+		return
+	}
 	c.Data(resp.StatusCode, "application/json", respBody)
 }

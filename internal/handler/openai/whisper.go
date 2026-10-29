@@ -124,7 +124,11 @@ func (h *Handler) Whisper(c *gin.Context) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		c.JSON(502, errorBody(readErr.Error()))
+		return
+	}
 	respCT := resp.Header.Get("Content-Type")
 	if respCT == "" {
 		respCT = "application/json"

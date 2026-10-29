@@ -1,6 +1,7 @@
 package sapclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -64,13 +65,14 @@ type deploymentsResponse struct {
 const blacklistTTL = time.Hour
 
 // DeploymentManager fetches and caches SAP AI Core deployments with a 12-hour TTL.
-// It also maintains a short-lived blacklist for deployments that return 404/Gone,
+// It also maintains a short-lived blacklist for explicitly retired deployments,
 // so they are skipped on subsequent requests and excluded from the models list.
 type DeploymentManager struct {
-	client    *Client
-	mu        sync.RWMutex
-	cached    []Deployment
-	fetchedAt time.Time
+	client              *Client
+	mu                  sync.RWMutex
+	cached              []Deployment
+	fetchedAt           time.Time
+	recoveryRefreshedAt time.Time
 
 	blMu      sync.Mutex
 	blacklist map[string]time.Time // deploymentURL → blacklisted-until
@@ -84,7 +86,7 @@ func NewDeploymentManager(client *Client) *DeploymentManager {
 }
 
 // MarkUnhealthy blacklists a deployment URL for blacklistTTL.
-// Call this when SAP returns 404 or "Gone" for an inference request.
+// Call this when SAP explicitly reports retirement or a missing deployment.
 func (d *DeploymentManager) MarkUnhealthy(deployedURL string) {
 	d.blMu.Lock()
 	d.blacklist[deployedURL] = time.Now().Add(blacklistTTL)
@@ -104,8 +106,7 @@ func (d *DeploymentManager) isBlacklisted(deployedURL string) bool {
 }
 
 // GetDeploymentURL resolves the upstream URL for a given model name.
-// Matching order: exact → fuzzy substring → family prefix.
-// Logs a warning when falling back to a non-exact match.
+// Only exact names, explicit aliases and vendor-prefix normalization match.
 func (d *DeploymentManager) GetDeploymentURL(ctx context.Context, modelName string) (string, error) {
 	dep, err := d.findDeployment(ctx, modelName)
 	if err != nil {
@@ -143,8 +144,7 @@ func (d *DeploymentManager) findDeployment(ctx context.Context, modelName string
 	// Build a deduplicated list of candidate names to search:
 	// 1. the catalogue-aliased name (e.g. "anthropic--claude-4.8-opus")
 	// 2. the original user-facing name (e.g. "claude-opus-4-8")
-	// This lets the alias hint SAP's internal name while the original provides
-	// a fuzzy/family fallback when the SAP environment uses a different name.
+	// Both candidates refer to the same model under different naming conventions.
 	aliased := catalogue.Normalize(modelName)
 	candidates := []string{aliased}
 	if aliased != modelName {
@@ -164,7 +164,7 @@ func (d *DeploymentManager) findDeployment(ctx context.Context, modelName string
 			}
 		}
 
-		// 2. Fuzzy substring match.
+		// Vendor prefixes are naming differences, not permission to change models.
 		for i, dep := range deployments {
 			if d.isBlacklisted(dep.DeployedURL) {
 				continue
@@ -173,24 +173,8 @@ func (d *DeploymentManager) findDeployment(ctx context.Context, modelName string
 			if dn == "" {
 				continue
 			}
-			if strings.Contains(target, dn) || strings.Contains(dn, target) {
-				slog.Warn("deployment fuzzy match", "requested", modelName, "candidate", cand, "matched", dep.EffectiveModelName())
+			if normalizeDepName(target) == dn {
 				return &deployments[i], nil
-			}
-		}
-
-		// 3. Family prefix fallback (strips version suffix).
-		family := extractFamily(target)
-		if family != target {
-			for i, dep := range deployments {
-				if d.isBlacklisted(dep.DeployedURL) {
-					continue
-				}
-				dn := normalizeDepName(dep.EffectiveModelName())
-				if strings.Contains(dn, family) {
-					slog.Warn("deployment family fallback", "requested", modelName, "candidate", cand, "family", family, "matched", dep.EffectiveModelName())
-					return &deployments[i], nil
-				}
 			}
 		}
 	}
@@ -198,23 +182,27 @@ func (d *DeploymentManager) findDeployment(ctx context.Context, modelName string
 	return nil, fmt.Errorf("no running deployment found for model %q", modelName)
 }
 
-// FindAndCall resolves a deployment for modelName, calls fn(dep), and if SAP
-// returns a retryable error (404 / Gone) marks the deployment unhealthy and
-// tries the next matching deployment. At most maxRetries attempts are made.
-//
-// fn must return (statusCode, body, error). A statusCode of 404 or a body
-// containing "Gone" triggers a retry with the next available deployment.
+// FindAndCall retries only explicit deployment retirement, on instances of the
+// initially resolved model. maxRetries excludes the first attempt.
 func (d *DeploymentManager) FindAndCall(
 	ctx context.Context,
 	modelName string,
 	maxRetries int,
 	fn func(dep *Deployment) (int, []byte, error),
 ) (int, []byte, error) {
+	resolved := modelName
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		dep, err := d.findDeployment(ctx, modelName)
+		if err := ctx.Err(); err != nil {
+			return 0, nil, err
+		}
+		dep, err := d.findDeployment(ctx, resolved)
+		if err != nil && attempt > 0 {
+			dep, err = d.findReplacement(ctx, resolved)
+		}
 		if err != nil {
 			return 0, nil, err
 		}
+		resolved = dep.EffectiveModelName()
 
 		status, body, err := fn(dep)
 		if err != nil {
@@ -233,17 +221,89 @@ func (d *DeploymentManager) FindAndCall(
 	return 0, nil, fmt.Errorf("all deployments for model %q returned errors", modelName)
 }
 
-// isRetryableStatus returns true for SAP errors that indicate the deployment
-// is not usable: 404 (wrong resource group / not found) or "Gone" (retired).
-func isRetryableStatus(status int, body []byte) bool {
-	if status == 404 {
-		return true
+// CallStreaming can fail over before any downstream bytes are written. It
+// never retries an in-progress generation or changes the resolved model.
+func (d *DeploymentManager) CallStreaming(ctx context.Context, initial *Deployment, maxRetries int, call func(*Deployment) (*http.Response, error)) (*http.Response, *Deployment, error) {
+	dep := initial
+	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, dep, err
+		}
+		resp, err := call(dep)
+		if err != nil {
+			return nil, dep, err
+		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return resp, dep, nil
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, (8<<20)+1))
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, dep, fmt.Errorf("read upstream error: %w", err)
+		}
+		if len(body) > 8<<20 {
+			return nil, dep, fmt.Errorf("upstream error body exceeds 8 MiB")
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(body))
+		if !isRetryableStatus(resp.StatusCode, body) {
+			return resp, dep, nil
+		}
+		d.MarkUnhealthy(dep.DeployedURL)
+		if attempt >= maxRetries {
+			return resp, dep, nil
+		}
+		next, err := d.findReplacement(ctx, initial.EffectiveModelName())
+		if err != nil {
+			return resp, dep, nil
+		}
+		_ = resp.Body.Close()
+		dep = next
 	}
+}
+
+// Refresh stale discovery after the known instances retire, at most once per
+// minute across requests. The replacement still has to match the pinned model.
+func (d *DeploymentManager) findReplacement(ctx context.Context, model string) (*Deployment, error) {
+	dep, err := d.findDeployment(ctx, model)
+	if err == nil || d.client == nil || ctx.Err() != nil {
+		return dep, err
+	}
+	d.mu.Lock()
+	if time.Since(d.recoveryRefreshedAt) < time.Minute {
+		d.mu.Unlock()
+		return nil, err
+	}
+	d.recoveryRefreshedAt = time.Now()
+	d.fetchedAt = time.Time{}
+	d.mu.Unlock()
+	return d.findDeployment(ctx, model)
+}
+
+// isRetryableStatus excludes generic endpoint errors and normal completion text.
+func isRetryableStatus(status int, body []byte) bool {
+	// A missing endpoint is not evidence that the whole deployment is retired.
 	// SAP returns 410 Gone or 200 with {"error":"Gone"} for retired deployments.
 	if status == 410 {
 		return true
 	}
-	return strings.Contains(string(body), `"Gone"`)
+	var envelope struct {
+		Error json.RawMessage `json:"error"`
+	}
+	if json.Unmarshal(body, &envelope) != nil || len(envelope.Error) == 0 {
+		return false
+	}
+	var message string
+	if json.Unmarshal(envelope.Error, &message) == nil {
+		return message == "Gone"
+	}
+	var detail struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(envelope.Error, &detail) != nil {
+		return false
+	}
+	return detail.Code == "Gone" || detail.Message == "Gone" || status == 404 && detail.Code == "deployment_not_found"
 }
 func (d *DeploymentManager) GetOrchestrationURL(ctx context.Context) (string, error) {
 	dep, err := d.GetOrchestrationDeployment(ctx)
@@ -323,7 +383,10 @@ func (d *DeploymentManager) fetch(ctx context.Context) ([]Deployment, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(resp.Body)
+	if readErr != nil {
+		return nil, fmt.Errorf("read deployments: %w", readErr)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("deployments endpoint %d: %s", resp.StatusCode, body)
 	}
@@ -413,19 +476,4 @@ func normalizeDepName(name string) string {
 		lower = lower[idx+2:]
 	}
 	return lower
-}
-
-// extractFamily strips a trailing version segment from a model name.
-// Examples: "claude-opus-4.8" → "claude-opus", "gpt-4.1-mini" → "gpt-4"
-func extractFamily(model string) string {
-	parts := strings.Split(model, "-")
-	for i := len(parts) - 1; i > 0; i-- {
-		last := parts[i]
-		// If the last segment looks like a version (starts with digit or is "latest"/"preview"),
-		// strip it.
-		if last == "latest" || last == "preview" || (len(last) > 0 && last[0] >= '0' && last[0] <= '9') {
-			return strings.Join(parts[:i], "-")
-		}
-	}
-	return model
 }

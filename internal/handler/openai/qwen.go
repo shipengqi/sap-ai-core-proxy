@@ -1,14 +1,13 @@
 package openai
 
 import (
-	"bytes"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
@@ -70,54 +69,26 @@ func (h *Handler) chatCompletionsQwen(c *gin.Context, modelStr string, raw map[s
 		return
 	}
 
-	// Remove api-version suffix — Alibaba Bailian ignores it but we keep the URL clean.
-	buildURL := func(dep *sapclient.Deployment) string {
-		return dep.DeployedURL + "/chat/completions"
-	}
-
-	body := applyQwenThinking(raw, dep.ID)
-	bodyBytes, _ := json.Marshal(body)
-
 	if streaming {
-		// Auto-detect thinking support before streaming if needed
-		if _, hasEffort := raw["reasoning_effort"]; hasEffort && !IsThinkingUnsupported(dep.ID) {
-			slog.Info("probing thinking support before streaming", "model", modelStr, "deployment_id", dep.ID)
-
-			// Build minimal probe request (same body as actual request)
-			probeResp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-				buildURL(dep), bytes.NewReader(bodyBytes), nil)
-			if err != nil {
-				c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-				return
-			}
-			probeBody, _ := io.ReadAll(probeResp.Body)
-			_ = probeResp.Body.Close()
-
-			// Check if thinking is unsupported
-			if probeResp.StatusCode == http.StatusBadRequest && IsAdaptiveThinkingError(probeBody) {
-				slog.Info("detected thinking not supported, caching result", "deployment_id", dep.ID)
-				MarkThinkingUnsupported(dep.ID)
-
-				// Rebuild body without thinking
-				body = applyQwenThinking(raw, dep.ID)
-				bodyBytes, _ = json.Marshal(body)
-			} else if probeResp.StatusCode != http.StatusOK {
-				// Probe failed for other reasons, return error
-				c.Data(probeResp.StatusCode, "application/json", probeBody)
-				return
-			}
-			// Probe succeeded (200 OK), thinking is supported - proceed with streaming
-		}
 
 		slog.Info("calling qwen model", "model", modelStr, "streaming", true, "deployment_id", dep.ID)
-		upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
-			buildURL(dep), bytes.NewReader(bodyBytes), nil)
+		_, requested := raw["reasoning_effort"]
+		upstream, _, err := h.deployments.CallStreaming(c.Request.Context(), dep, 5, func(candidate *sapclient.Deployment) (*http.Response, error) {
+			key := CapabilityKey(candidate, "/chat/completions")
+			return h.thinkingStream(c.Request.Context(), candidate, "/chat/completions", key, requested, func() []byte {
+				body, _ := json.Marshal(applyQwenThinking(raw, key))
+				return body
+			})
+		})
 		if err != nil {
-			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+			c.JSON(502, errorBody(err.Error()))
 			return
 		}
+
 		// Recorded before c.Status(200) locks the client-visible status.
-		usage.MarkUpstreamStatus(c, upstream.StatusCode)
+		if !proxy.CheckStream(c, upstream) {
+			return
+		}
 		c.Status(http.StatusOK)
 		stream.PipeOpenAI(c, upstream)
 		return
@@ -125,37 +96,10 @@ func (h *Handler) chatCompletionsQwen(c *gin.Context, modelStr string, raw map[s
 
 	slog.Info("calling qwen model", "model", modelStr, "streaming", false)
 
-	// First attempt with thinking (if not cached as unsupported)
-	resp, err := h.client.Do(c.Request.Context(), http.MethodPost,
-		buildURL(dep), bytes.NewReader(bodyBytes), nil)
+	status, respBody, err := h.Complete(c.Request.Context(), raw)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+		c.JSON(502, errorBody(err.Error()))
 		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
-	status := resp.StatusCode
-
-	// Check if we need to retry without thinking
-	if status == http.StatusBadRequest && IsAdaptiveThinkingError(respBody) {
-		slog.Info("deployment doesn't support adaptive thinking, retrying without it",
-			"model", modelStr, "deployment_id", dep.ID)
-
-		MarkThinkingUnsupported(dep.ID)
-
-		// Retry with thinking disabled (cache will skip thinking now)
-		body = applyQwenThinking(raw, dep.ID)
-		bodyBytes, _ = json.Marshal(body)
-
-		resp, err = h.client.Do(c.Request.Context(), http.MethodPost,
-			buildURL(dep), bytes.NewReader(bodyBytes), nil)
-		if err != nil {
-			c.JSON(http.StatusBadGateway, errorBody(err.Error()))
-			return
-		}
-		defer func() { _ = resp.Body.Close() }()
-		respBody, _ = io.ReadAll(resp.Body)
-		status = resp.StatusCode
 	}
 
 	// Qwen answers in OpenAI format; observation only, the body is unchanged.

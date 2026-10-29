@@ -24,7 +24,7 @@ const qaAnthropicSSEErrorText = "event: message_start\n" +
 	"\n" +
 	"event: message_delta\n" +
 	`data: {"type":"message_delta","usage":{"output_tokens":12}}` + "\n" +
-	"\n"
+	"\n" + "event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
 
 // qaAnthropicSSEWithBraceLine is a healthy stream plus one malformed non-SSE line
 // that starts with "{" and is not an error.
@@ -35,7 +35,7 @@ const qaAnthropicSSEWithBraceLine = "event: message_start\n" +
 	"\n" +
 	"event: message_delta\n" +
 	`data: {"type":"message_delta","usage":{"output_tokens":12}}` + "\n" +
-	"\n"
+	"\n" + "event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
 
 // TestQA_F1_UpstreamStreamFailureRecordedAsFailure covers the real-failure path:
 // the upstream rejects the streaming request outright (429) before any frame.
@@ -50,12 +50,12 @@ func TestQA_F1_UpstreamStreamFailureRecordedAsFailure(t *testing.T) {
 	defer proxy.Close()
 
 	status, body := qaPost(t, proxy.URL+"/anthropic/v1/messages", qaClientBodyStreaming)
-	if status != http.StatusOK {
-		t.Fatalf("client status = %d, want the unchanged 200: %s", status, body)
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("client status = %d, want upstream 429: %s", status, body)
 	}
 	// Fidelity: the client receives the upstream body plus the newline the pipe
 	// adds to every line.
-	if want := string(up.streamBody) + "\n"; string(body) != want {
+	if want := string(up.streamBody); string(body) != want {
 		t.Errorf("client body = %q, want %q", body, want)
 	}
 
@@ -100,7 +100,7 @@ func TestQA_F1_FakeSuccessBareJSONError(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("client status = %d, want the unchanged 200: %s", status, body)
 	}
-	if want := string(up.streamBody) + "\n"; string(body) != want {
+	if want := "event: error\ndata: " + string(up.streamBody) + "\n\n"; string(body) != want {
 		t.Errorf("client body = %q, want %q", body, want)
 	}
 
@@ -227,7 +227,7 @@ func TestQA_BucketsReconcile(t *testing.T) {
 	// 3. Streaming request the upstream rejects.
 	up.streamStatus = http.StatusBadRequest
 	up.streamBody = []byte(`{"type":"error","error":{"message":"bad"}}`)
-	if status, body := qaPost(t, proxy.URL+"/anthropic/v1/messages", qaClientBodyStreaming); status != 200 {
+	if status, body := qaPost(t, proxy.URL+"/anthropic/v1/messages", qaClientBodyStreaming); status != 400 {
 		t.Fatalf("anthropic stream failure: %d %s", status, body)
 	}
 	// 4. Embeddings, usage reported.
@@ -371,7 +371,7 @@ func TestQA_MalformedStreamBraceLineIsTransparent(t *testing.T) {
 // providers include "error": null on success bodies.
 func TestQA_BraceLineWithNullErrorIsNotFailure(t *testing.T) {
 	up := newQAUpstream(t)
-	up.streamBody = []byte(`{"error":null,"note":"ok"}`)
+	up.streamBody = []byte(`{"error":null,"note":"ok"}` + "\n\n" + "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	defer up.Close()
 	proxy := qaProxy(t, up.URL)
 	defer proxy.Close()
@@ -405,8 +405,8 @@ func TestQA_StatusLabelIsEffectiveStatus(t *testing.T) {
 	// Streaming 400: client 200, label 400.
 	up.streamStatus = http.StatusBadRequest
 	up.streamBody = []byte(`{"type":"error","error":{"message":"bad"}}`)
-	if status, _ := qaPost(t, proxy.URL+"/anthropic/v1/messages", qaClientBodyStreaming); status != http.StatusOK {
-		t.Fatalf("streaming 400: client status = %d, want 200", status)
+	if status, _ := qaPost(t, proxy.URL+"/anthropic/v1/messages", qaClientBodyStreaming); status != http.StatusBadRequest {
+		t.Fatalf("streaming 400: client status = %d, want 400", status)
 	}
 
 	metrics := qaGetMetrics(t, proxy.URL)
@@ -455,7 +455,7 @@ func TestQA_F1_StreamFailureAcrossSurfaces(t *testing.T) {
 			wantSurface: "anthropic",
 			wantModel:   "anthropic--claude-3.5-sonnet",
 			wantStatus:  http.StatusTooManyRequests,
-			wantBody:    `{"type":"error","error":{"message":"slow down"}}` + "\n",
+			wantBody:    `{"type":"error","error":{"message":"slow down"}}`,
 		},
 		{
 			name:    "openai-chat",
@@ -500,8 +500,7 @@ func TestQA_F1_StreamFailureAcrossSurfaces(t *testing.T) {
 			// Pre-existing: PipeAnthropicToOpenAI only forwards data: lines, so a
 			// non-SSE error body never reaches the client. What it does emit is the
 			// synthesised finish chunk and [DONE].
-			wantBody: `data: {"id":"chatcmpl-dep-qa-001","object":"chat.completion.chunk","model":"zai--glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
-				"data: [DONE]\n\n",
+			wantBody: `{"type":"error","error":{"message":"slow down"}}`,
 		},
 		{
 			name:    "perplexity",
@@ -514,7 +513,7 @@ func TestQA_F1_StreamFailureAcrossSurfaces(t *testing.T) {
 			wantSurface: "openai",
 			wantModel:   "sonar-pro",
 			wantStatus:  http.StatusServiceUnavailable,
-			wantBody:    `{"error":{"message":"overloaded","type":"server_error"}}` + "\n",
+			wantBody:    `{"error":{"message":"overloaded","type":"server_error"}}`,
 		},
 	}
 
@@ -529,7 +528,7 @@ func TestQA_F1_StreamFailureAcrossSurfaces(t *testing.T) {
 			status, body := qaPost(t, proxy.URL+tc.path, tc.request)
 			wantClientStatus := tc.wantClientStatus
 			if wantClientStatus == 0 {
-				wantClientStatus = http.StatusOK
+				wantClientStatus = tc.wantStatus
 			}
 			if status != wantClientStatus {
 				t.Fatalf("client status = %d, want %d: %s", status, wantClientStatus, body)
@@ -640,10 +639,8 @@ func TestQA_ResidualGap_AnthropicToOpenAIFakeSuccess(t *testing.T) {
 	}
 	// Pre-existing behaviour, unchanged: the non-SSE error body is not forwarded,
 	// the client gets the synthesised finish chunk and [DONE].
-	wantBody := `data: {"id":"chatcmpl-dep-qa-001","object":"chat.completion.chunk","model":"zai--glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
-		"data: [DONE]\n\n"
-	if string(body) != wantBody {
-		t.Errorf("client body = %q, want %q", body, wantBody)
+	if !strings.Contains(string(body), `"error"`) || strings.Contains(string(body), `"finish_reason":"stop"`) || !strings.Contains(string(body), "[DONE]") {
+		t.Errorf("upstream error was not surfaced: %s", body)
 	}
 
 	doc := qaGetStats(t, proxy.URL)
@@ -689,11 +686,11 @@ func TestQA_ResidualGap_PrettyPrintedStreamError(t *testing.T) {
 	}
 
 	doc := qaGetStats(t, proxy.URL)
-	if doc.Totals.Failures != 0 {
-		t.Fatalf("failures = %d, want the current 0 — if this changed, update the gap note", doc.Totals.Failures)
+	if doc.Totals.Failures != 1 {
+		t.Fatalf("failures = %d, want 1", doc.Totals.Failures)
 	}
-	if doc.Totals.UsageMissing != 1 {
-		t.Errorf("usage_missing = %d, want the current 1", doc.Totals.UsageMissing)
+	if doc.Totals.UsageMissing != 0 {
+		t.Errorf("usage_missing = %d, want 0", doc.Totals.UsageMissing)
 	}
-	t.Log("GAP: a multi-line (pretty-printed) JSON error body inside a 200 stream is not detected")
+	t.Log("a multi-line error is reported as a failed stream")
 }

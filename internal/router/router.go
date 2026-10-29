@@ -17,6 +17,7 @@ import (
 	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/litellm"
 	openaihandler "github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/middleware"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/version"
@@ -44,6 +45,25 @@ func New(client *sapclient.Client, deployments *sapclient.DeploymentManager, deb
 	// the way out.
 	r.Use(diagnostics.Middleware(diag))
 	r.Use(usage.Middleware(collector))
+
+	// Bound inference bodies before handlers decode them; tool histories and images
+	// still have a generous limit, while malformed requests cannot grow memory forever.
+	r.Use(func(c *gin.Context) {
+		c.Request = c.Request.WithContext(sapclient.WithResponseObserver(c.Request.Context(), func(resp *http.Response) {
+			proxy.CopyHeaders(c, resp)
+		}))
+		path := c.Request.URL.Path
+		if c.Request.Method == http.MethodPost && (strings.HasPrefix(path, "/openai/") || strings.HasPrefix(path, "/anthropic/") || strings.HasPrefix(path, "/gemini/") || strings.HasPrefix(path, "/litellm/")) {
+			body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, 32<<20))
+			_ = c.Request.Body.Close()
+			if err != nil {
+				c.AbortWithStatusJSON(413, gin.H{"error": gin.H{"type": "invalid_request_error", "message": "request body exceeds 32 MiB or cannot be read"}})
+				return
+			}
+			c.Request.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		c.Next()
+	})
 
 	oa := openaihandler.NewHandler(client, deployments, anthropicAutoCache)
 	an := anthropic.NewHandler(client, deployments, anthropicAutoCache)

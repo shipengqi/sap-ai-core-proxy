@@ -46,7 +46,11 @@ func (h *Handler) Embeddings(c *gin.Context) {
 		return
 	}
 	defer func() { _ = upstream.Body.Close() }()
-	respBody, _ := io.ReadAll(upstream.Body)
+	respBody, readErr := io.ReadAll(upstream.Body)
+	if readErr != nil {
+		c.JSON(502, errorBody(readErr.Error()))
+		return
+	}
 	// Embeddings bill prompt tokens, and they report them as usage.prompt_tokens.
 	usage.ObserveJSONBody(c, respBody)
 	c.Data(upstream.StatusCode, "application/json", respBody)

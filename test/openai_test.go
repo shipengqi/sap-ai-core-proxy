@@ -2,11 +2,13 @@ package test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/handler/openai"
 	"github.com/shipengqi/sap-ai-core-proxy/test/testutil"
 )
 
@@ -89,6 +91,237 @@ func TestOpenAI_ChatCompletions(t *testing.T) {
 	}
 	if len(result.Choices) == 0 || result.Choices[0].Message.Content == "" {
 		t.Error("expected non-empty choices[0].message.content")
+	}
+}
+
+// reasoning_effort used to be swallowed by the field whitelist. For models that
+// only accept function tools on /responses (gpt-6.x), an explicit "none" is the
+// only way a tool-bearing chat request can succeed, so dropping the field turned
+// every such request into a 400 the client had no way to fix.
+func TestOpenAI_ReasoningEffortIsForwarded(t *testing.T) {
+	mock := testutil.NewMockSAPServer(t)
+	defer mock.Close()
+	// The capability cache is keyed by deployment ID, which the mock reuses
+	// across tests; a stale entry would strip the field before it is sent.
+	openai.ClearEffortCache()
+	defer openai.ClearEffortCache()
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxy.Close()
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Say hi"}],` +
+		`"tools":[{"type":"function","function":{"name":"get_time","parameters":{"type":"object"}}}],` +
+		`"reasoning_effort":"none"}`
+	resp, err := http.Post(proxy.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST /openai/v1/chat/completions: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+
+	// The tools array is what makes upstream demand an explicit effort; assert it
+	// survived too so the test cannot pass on a request that never had tools.
+	if _, ok := mock.LastOpenAIChatBody["tools"]; !ok {
+		t.Fatalf("tools missing from the forwarded body: %v", mock.LastOpenAIChatBody)
+	}
+	if got := string(mock.LastOpenAIChatBody["reasoning_effort"]); got != `"none"` {
+		t.Errorf("reasoning_effort not forwarded to SAP, got %q (body: %v)", got, mock.LastOpenAIChatBody)
+	}
+}
+
+// Models without a reasoning_effort argument (gpt-4o) answer 400 when the field
+// is sent. Forwarding it must not turn those models into failures: the proxy
+// retries without the field and remembers the capability per deployment.
+func TestOpenAI_ReasoningEffortFallbackWhenArgumentUnknown(t *testing.T) {
+	mock := testutil.NewMockSAPServer(t)
+	defer mock.Close()
+	mock.RejectReasoningEffort = true
+	openai.ClearEffortCache()
+	defer openai.ClearEffortCache()
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxy.Close()
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"Say hi"}],"reasoning_effort":"low"}`
+	resp, err := http.Post(proxy.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST /openai/v1/chat/completions: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200 after dropping reasoning_effort, got %d: %s", resp.StatusCode, body)
+	}
+	if _, still := mock.LastOpenAIChatBody["reasoning_effort"]; still {
+		t.Errorf("retry still carried reasoning_effort: %v", mock.LastOpenAIChatBody)
+	}
+	if !openai.IsEffortUnsupported(testCapabilityKey(t, mock.URL, "gpt-4o", "/chat/completions?api-version=2024-02-01")) {
+		t.Error("deployment should be remembered as not supporting reasoning_effort")
+	}
+}
+
+// gpt-6.x refuses function tools on /chat/completions and accepts them only on
+// /responses. The proxy must bridge the request there and hand the caller back
+// the chat.completion it asked for.
+func TestOpenAI_ToolsBridgeToResponses(t *testing.T) {
+	mock := testutil.NewMockSAPServer(t)
+	defer mock.Close()
+	mock.ToolsRequireResponses = true
+	openai.ClearCapabilityCaches()
+	defer openai.ClearCapabilityCaches()
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxy.Close()
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"call get_time"}],` +
+		`"tools":[{"type":"function","function":{"name":"get_time","parameters":{"type":"object"}}}],"max_tokens":64}`
+	resp, err := http.Post(proxy.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST /openai/v1/chat/completions: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 via the responses bridge, got %d: %s", resp.StatusCode, body)
+	}
+
+	var out struct {
+		Object  string `json:"object"`
+		Choices []struct {
+			FinishReason string `json:"finish_reason"`
+			Message      struct {
+				ToolCalls []struct {
+					ID       string `json:"id"`
+					Function struct {
+						Name string `json:"name"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage struct {
+			PromptTokens int `json:"prompt_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		t.Fatalf("decode chat.completion: %v", err)
+	}
+	if out.Object != "chat.completion" {
+		t.Errorf("caller must still receive a chat.completion, got %q", out.Object)
+	}
+	if len(out.Choices) != 1 || out.Choices[0].FinishReason != "tool_calls" {
+		t.Fatalf("expected finish_reason=tool_calls, got %+v", out.Choices)
+	}
+	calls := out.Choices[0].Message.ToolCalls
+	if len(calls) != 1 || calls[0].ID != "call_mock_1" || calls[0].Function.Name != "get_time" {
+		t.Errorf("tool call not carried back: %+v", calls)
+	}
+	if out.Usage.PromptTokens != 30 {
+		t.Errorf("usage should be restated as prompt_tokens, got %+v", out.Usage)
+	}
+
+	// The upstream must have received a Responses body, not the chat body.
+	if _, ok := mock.LastResponsesBody["messages"]; ok {
+		t.Errorf("chat messages leaked into the responses request: %v", mock.LastResponsesBody)
+	}
+	if _, ok := mock.LastResponsesBody["input"]; !ok {
+		t.Errorf("responses request has no input: %v", mock.LastResponsesBody)
+	}
+	if _, ok := mock.LastResponsesBody["tools"]; !ok {
+		t.Errorf("tools were not carried over: %v", mock.LastResponsesBody)
+	}
+	if !openai.IsResponsesRequired(testCapabilityKey(t, mock.URL, "gpt-4o", "/chat/completions?api-version=2024-02-01")) {
+		t.Error("deployment should be remembered as tools-on-responses only")
+	}
+}
+
+func TestOpenAI_ToolsBridgeToResponses_Stream(t *testing.T) {
+	mock := testutil.NewMockSAPServer(t)
+	defer mock.Close()
+	mock.ToolsRequireResponses = true
+	openai.ClearCapabilityCaches()
+	defer openai.ClearCapabilityCaches()
+	proxy, err := testutil.NewTestProxy(mock.URL)
+	if err != nil {
+		t.Fatalf("start proxy: %v", err)
+	}
+	defer proxy.Close()
+
+	reqBody := `{"model":"gpt-4o","messages":[{"role":"user","content":"call get_time"}],` +
+		`"tools":[{"type":"function","function":{"name":"get_time","parameters":{"type":"object"}}}],` +
+		`"stream":true,"stream_options":{"include_usage":true}}`
+	resp, err := http.Post(proxy.URL+"/openai/v1/chat/completions", "application/json", strings.NewReader(reqBody))
+	if err != nil {
+		t.Fatalf("POST /openai/v1/chat/completions stream: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	stream := string(body)
+
+	for _, want := range []string{"chat.completion.chunk", "call_mock_1", "tool_calls", `"usage"`, "[DONE]"} {
+		if !strings.Contains(stream, want) {
+			t.Errorf("stream is missing %q: %s", want, stream)
+		}
+	}
+	if strings.Contains(stream, `"type":"response.`) {
+		t.Errorf("raw responses events leaked to the caller: %s", stream)
+	}
+}
+
+func TestOpenAI_ToolsBridgeFallbackBoundaries(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		for _, scenario := range []string{"cached_none", "effort_then_responses"} {
+			t.Run(fmt.Sprintf("%s/stream=%t", scenario, streaming), func(t *testing.T) {
+				openai.ClearCapabilityCaches()
+				defer openai.ClearCapabilityCaches()
+				mock := testutil.NewMockSAPServer(t)
+				defer mock.Close()
+				mock.ToolsRequireResponses = true
+				effort := "low"
+				if scenario == "cached_none" {
+					openai.MarkResponsesRequired(testCapabilityKey(t, mock.URL, "gpt-4o", "/chat/completions?api-version=2024-02-01"))
+					effort = "none"
+				} else {
+					mock.RejectReasoningEffort = true
+				}
+				proxy, err := testutil.NewTestProxy(mock.URL)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer proxy.Close()
+				body := fmt.Sprintf(`{"model":"gpt-4o","messages":[{"role":"user","content":"call get_time"}],"tools":[{"type":"function","function":{"name":"get_time","parameters":{"type":"object"}}}],"reasoning_effort":%q,"stream":%t}`, effort, streaming)
+				status, resp := qaPost(t, proxy.URL+"/openai/v1/chat/completions", body)
+				if status != http.StatusOK {
+					t.Fatalf("fallback should succeed, got %d: %s", status, resp)
+				}
+				if scenario == "cached_none" {
+					if mock.LastResponsesBody != nil {
+						t.Error("explicit none must use chat even after learning the tools/reasoning restriction")
+					}
+					if string(mock.LastOpenAIChatBody["reasoning_effort"]) != `"none"` {
+						t.Error("explicit none must reach the chat endpoint")
+					}
+				} else if mock.LastResponsesBody == nil {
+					t.Error("tools/reasoning rejection after dropping effort must still trigger the bridge")
+				}
+			})
+		}
 	}
 }
 

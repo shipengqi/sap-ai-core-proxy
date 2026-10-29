@@ -14,6 +14,8 @@ var BedrockAllowedFields = map[string]bool{
 	"messages":          true,
 	"system":            true,
 	"max_tokens":        true,
+	"temperature":       true,
+	"output_config":     true,
 	"top_p":             true,
 	"top_k":             true,
 	"stop_sequences":    true,
@@ -44,9 +46,22 @@ func PromoteSystemMessages(m map[string]json.RawMessage) map[string]json.RawMess
 	var systemParts []string
 	var remaining []message
 	for _, msg := range msgs {
-		if msg.Role == "system" {
+		if msg.Role == "system" || msg.Role == "developer" {
 			var s string
-			if err := json.Unmarshal(msg.Content, &s); err == nil {
+			if json.Unmarshal(msg.Content, &s) != nil {
+				var parts []struct {
+					Type string `json:"type"`
+					Text string `json:"text"`
+				}
+				if json.Unmarshal(msg.Content, &parts) == nil {
+					for _, p := range parts {
+						if p.Type == "text" || p.Type == "input_text" {
+							s += p.Text
+						}
+					}
+				}
+			}
+			if s != "" {
 				systemParts = append(systemParts, s)
 			}
 		} else {

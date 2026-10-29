@@ -62,13 +62,13 @@ func TestQA2AutoMarkerCountsOncePerRequestAcrossThinkingRetry(t *testing.T) {
 		{
 			name:    "openai non-streaming retry",
 			path:    "/openai/v1/chat/completions",
-			body:    strings.Replace(qa2OpenAIToolsBody, `"max_tokens":100`, `"max_tokens":100,"reasoning_effort":"medium"`, 1),
+			body:    strings.Replace(qa2OpenAIToolsBody, `"max_tokens":100`, `"max_tokens":8192,"reasoning_effort":"medium"`, 1),
 			surface: "openai",
 		},
 		{
 			name:    "openai streaming retry",
 			path:    "/openai/v1/chat/completions",
-			body:    strings.Replace(qa2OpenAIToolsBody, `"max_tokens":100`, `"max_tokens":100,"stream":true,"reasoning_effort":"medium"`, 1),
+			body:    strings.Replace(qa2OpenAIToolsBody, `"max_tokens":100`, `"max_tokens":8192,"stream":true,"reasoning_effort":"medium"`, 1),
 			surface: "openai",
 		},
 	}
@@ -151,7 +151,7 @@ func TestQA2AutoMarkerSilentWhenDisabledAcrossRetry(t *testing.T) {
 		{
 			name:    "openai",
 			path:    "/openai/v1/chat/completions",
-			body:    strings.Replace(qa2OpenAIToolsBody, `"max_tokens":100`, `"max_tokens":100,"reasoning_effort":"medium"`, 1),
+			body:    strings.Replace(qa2OpenAIToolsBody, `"max_tokens":100`, `"max_tokens":8192,"reasoning_effort":"medium"`, 1),
 			surface: "openai",
 		},
 	}

@@ -53,8 +53,9 @@ func (a *AuthManager) GetToken(ctx context.Context) (string, error) {
 	a.mu.Lock()
 	if a.token != "" && time.Until(a.expiresAt) > 60*time.Second {
 		tok := a.token
+		expiresAt := a.expiresAt
 		a.mu.Unlock()
-		slog.Debug("auth: token cache hit", "expires_in_s", int(time.Until(a.expiresAt).Seconds()))
+		slog.Debug("auth: token cache hit", "expires_in_s", int(time.Until(expiresAt).Seconds()))
 		return tok, nil
 	}
 	a.mu.Unlock()
@@ -83,14 +84,20 @@ func (a *AuthManager) fetchToken(ctx context.Context) (string, error) {
 	req.SetBasicAuth(a.clientID, a.clientSecret)
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
 		slog.Error("auth: token request failed", "err", err)
 		return "", fmt.Errorf("token request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	body, _ := io.ReadAll(resp.Body)
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, (1<<20)+1))
+	if readErr != nil {
+		return "", fmt.Errorf("read token response: %w", readErr)
+	}
+	if len(body) > 1<<20 {
+		return "", fmt.Errorf("token response exceeds 1 MiB")
+	}
 	if resp.StatusCode != http.StatusOK {
 		slog.Error("auth: token endpoint error", "status", resp.StatusCode, "body", string(body))
 		return "", fmt.Errorf("token endpoint %d: %s", resp.StatusCode, body)
@@ -101,6 +108,9 @@ func (a *AuthManager) fetchToken(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("parse token response: %w", err)
 	}
 
+	if tr.AccessToken == "" {
+		return "", fmt.Errorf("token endpoint returned an empty access token")
+	}
 	ttl := time.Duration(tr.ExpiresIn) * time.Second
 	if ttl <= 0 {
 		ttl = 3600 * time.Second
