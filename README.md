@@ -61,12 +61,31 @@ Edit `~/.aicoreproxy/config.json`:
 ### 3. Run
 
 ```bash
-./sap-ai-core-proxy
+./aicoreproxy
 # or
 make run
 ```
 
 The proxy starts on `http://localhost:3001` (default).
+
+### Command Line
+
+The Cobra CLI groups server and diagnostic tools under one executable:
+
+```bash
+./aicoreproxy                         # default: start the proxy
+./aicoreproxy serve --no-tui           # explicitly start without the embedded dashboard
+./aicoreproxy tui --url http://localhost:3001 --interval 5s
+./aicoreproxy tui --plain             # one remote snapshot, then exit
+./aicoreproxy cacheprobe --models gpt-5.6-terra,gpt-4o
+./aicoreproxy version                 # full version and build identity
+./aicoreproxy --help
+./aicoreproxy cacheprobe --help
+```
+
+No-argument startup remains compatible with Docker and systemd. `--version` is also supported on the root and `serve` commands. Version and help never load configuration or contact SAP. Known legacy single-dash flags (such as `-version`, `-no-tui`, `-models` and `-interval`) remain accepted, including `=value` forms. Flag values and tokens after `--` are not rewritten. Unlike the old parser, unexpected positional arguments are rejected instead of silently ignored; syntax errors exit 2, runtime errors exit 1. Put tool-specific flags after their subcommand; server flags work on both the root and `serve` commands.
+
+The standalone `go run ./cmd/aicore-tui` and `go run ./cmd/aicore-cacheprobe` entry points remain available and share the same tool commands. Configuration precedence remains defaults → JSON file → environment variables; no new configuration flags or Viper layer are introduced. `cacheprobe` sends real model requests and can incur usage charges.
 
 ## Configuration
 
@@ -395,7 +414,7 @@ The dashboard starts in the same process as the proxy and refreshes metrics auto
 ```bash
 make run WITH_TUI=0
 # or run the binary directly:
-./aicoreproxy -no-tui
+./aicoreproxy --no-tui
 # equivalent target:
 make server
 ```
@@ -405,13 +424,15 @@ To run the dashboard against an already-running proxy:
 ```bash
 make tui
 # or
+./aicoreproxy tui --url http://localhost:3001 --interval 5s
+# standalone entry point is also supported:
 go run ./cmd/aicore-tui --url http://localhost:3001 --interval 5s
 ```
 
 The dashboard polls `/stats`, `/stats/cache`, `/stats/compress`, and `/version`, and shows request totals, failures, token/cache counters, cache hit ratio, per-surface totals, compression counters, and endpoint health. The build version sits in the header: the in-process dashboard reads it directly, while `make tui` fetches it from the remote instance and prints `unknown` when that proxy predates the route. It defaults to `http://localhost:3001`; `--plain` prints one snapshot and exits, which is useful for scripts:
 
 ```bash
-go run ./cmd/aicore-tui --plain
+./aicoreproxy tui --plain
 ```
 
 When launched through `make run` or `./aicoreproxy` in an interactive terminal, the dashboard and proxy run together in one process. The dashboard is automatically skipped when stdout is redirected or captured (for example by WorkBuddy, systemd, Docker, or another process), preventing ANSI terminal control sequences from corrupting the caller's output. The `-no-tui` flag disables the dashboard explicitly. The standalone `make tui` target remains available for connecting to an already-running proxy.
@@ -421,8 +442,10 @@ When launched through `make run` or `./aicoreproxy` in an interactive terminal, 
 Prompt caching is not one mechanism, and whether a given deployment supports it — or supports explicit breakpoints — cannot be read off the model name. `cmd/aicore-cacheprobe` asks the deployment directly:
 
 ```bash
-go run ./cmd/aicore-cacheprobe
-go run ./cmd/aicore-cacheprobe -models gpt-5.6-terra,gpt-5.4,gpt-4o
+./aicoreproxy cacheprobe
+./aicoreproxy cacheprobe --models gpt-5.6-terra,gpt-5.4,gpt-4o
+# standalone entry point is also supported:
+go run ./cmd/aicore-cacheprobe -models gpt-5.6-terra,gpt-4o
 ```
 
 It sends a ~2000 token prefix five times per model and reports what the usage block says: whether implicit caching hits with no marker at all, whether `prompt_cache_options` / `prompt_cache_breakpoint` are accepted and a repeat cache hit is observed (a hit alone cannot distinguish explicit breakpoints from automatic caching), and whether `prompt_cache_key` is accepted. It talks to SAP AI Core directly, so the proxy's own field filtering cannot mask the answer.
@@ -452,13 +475,16 @@ Two findings worth knowing before writing a client against these deployments: ex
 
 ```
 sap-ai-core-proxy/
-├── main.go                          # Server startup, config wiring
+├── main.go                          # Thin Cobra CLI entry point
 ├── cmd/aicore-tui/                   # Read-only terminal dashboard
 │   ├── main.go
 │   ├── stats/                        # Observation endpoint client
 │   └── format/                       # Pure display formatting helpers
 ├── cmd/aicore-cacheprobe/            # Per-deployment prompt-cache capability probe
 ├── internal/
+│   ├── cli/                         # Cobra commands and server startup
+│   ├── dashboard/                   # Shared remote dashboard runner
+│   ├── cacheprobe/                  # Shared prompt-cache probe runner
 │   ├── config/config.go             # Load ~/.aicoreproxy/config.json + env overrides
 │   ├── version/version.go           # Build identity for -version, /version and both dashboards
 │   ├── usage/                       # Token accounting, /stats and Prometheus metrics
@@ -489,7 +515,7 @@ sap-ai-core-proxy/
 
 1. **Config load** — reads `~/.aicoreproxy/config.json`, applies env var overrides
 2. **Token exchange** — on first request, POSTs client credentials to `token_url/oauth/token`; cached until 60s before expiry; concurrent requests deduplicated via singleflight
-3. **Deployment resolution** — fetches all RUNNING deployments from SAP AI Core at startup; cached 12 hours; resolved via 3-tier lookup per request
+3. **Deployment resolution** — fetches all RUNNING deployments from SAP AI Core on first use; cached 12 hours; resolved via 3-tier lookup per request
 4. **Request translation** — Anthropic: filters to allowed fields, promotes system messages; LiteLLM: transforms to SAP Orchestration `config.modules` envelope
 5. **Upstream call** — all requests signed with `Authorization: Bearer <token>` and `AI-Resource-Group: <resource_group>`
 6. **Response forwarding** — non-streaming: body piped as-is; streaming: per-provider flush strategy

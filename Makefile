@@ -1,6 +1,7 @@
 .PHONY: help build run tui server test vet lint docker.build clean deploy
 
-# make run starts both processes by default. Use WITH_TUI=0 for server-only mode.
+# make run starts the proxy with an in-process TUI on interactive terminals.
+# Use WITH_TUI=0 for server-only mode.
 WITH_TUI ?= 1
 
 INSTALL_BIN  := /usr/local/bin/aicoreproxy
@@ -29,13 +30,13 @@ build: ## Build the binary
 	go build -ldflags "$(LDFLAGS)" -o aicoreproxy .
 
 run: ## Run proxy and TUI (use WITH_TUI=0 for proxy only)
-	go run . $(if $(filter 0,$(WITH_TUI)),-no-tui,)
+	go run . $(if $(filter 0,$(WITH_TUI)),--no-tui,)
 
 server: ## Run proxy only
-	go run .
+	go run . serve --no-tui
 
 tui: ## Run the terminal dashboard against an existing proxy
-	go run ./cmd/aicore-tui
+	go run . tui
 
 test: ## Run all tests
 	go test ./...
