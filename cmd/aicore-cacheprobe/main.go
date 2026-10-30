@@ -15,8 +15,8 @@
 //	            caching works with no marker at all
 //	explicit#1  prompt_cache_options + prompt_cache_breakpoint; a 200 means the
 //	            deployment accepts them, a 400 means it does not
-//	explicit#2  same breakpoint again; a hit here is what proves the breakpoint
-//	            actually caches rather than merely being accepted
+//	explicit#2  same breakpoint again; reports repeat hits, but cannot distinguish
+//	            explicit breakpoint caching from automatic prefix caching
 //	key         prompt_cache_key alone
 //
 // The prefix carries a per-run nonce so "cold" is genuinely cold. Without it the
@@ -152,10 +152,10 @@ func summarise(r map[string]result) string {
 	switch {
 	case r["explicit#1"].errParam == "prompt_cache_options":
 		parts = append(parts, "explicit breakpoints NOT supported")
-	case r["explicit#1"].status == http.StatusOK && r["explicit#2"].cached > 0:
-		parts = append(parts, fmt.Sprintf("explicit breakpoints work (%d of %d cached on the repeat)", r["explicit#2"].cached, r["explicit#2"].prompt))
+	case r["explicit#1"].status == http.StatusOK && r["explicit#2"].status == http.StatusOK && r["explicit#2"].cached > 0:
+		parts = append(parts, fmt.Sprintf("explicit parameters accepted; repeat cache hit observed (%d of %d cached, automatic caching not excluded)", r["explicit#2"].cached, r["explicit#2"].prompt))
 	case r["explicit#1"].status == http.StatusOK:
-		parts = append(parts, "explicit parameters accepted but the breakpoint did not hit")
+		parts = append(parts, "explicit parameters accepted; no successful repeat cache hit observed")
 	default:
 		parts = append(parts, "explicit breakpoints unproven")
 	}

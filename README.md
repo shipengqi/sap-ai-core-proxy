@@ -425,7 +425,7 @@ go run ./cmd/aicore-cacheprobe
 go run ./cmd/aicore-cacheprobe -models gpt-5.6-terra,gpt-5.4,gpt-4o
 ```
 
-It sends a ~2000 token prefix five times per model and reports what the usage block says: whether implicit caching hits with no marker at all, whether `prompt_cache_options` / `prompt_cache_breakpoint` are accepted and actually cache, and whether `prompt_cache_key` is accepted. It talks to SAP AI Core directly, so the proxy's own field filtering cannot mask the answer.
+It sends a ~2000 token prefix five times per model and reports what the usage block says: whether implicit caching hits with no marker at all, whether `prompt_cache_options` / `prompt_cache_breakpoint` are accepted and a repeat cache hit is observed (a hit alone cannot distinguish explicit breakpoints from automatic caching), and whether `prompt_cache_key` is accepted. It talks to SAP AI Core directly, so the proxy's own field filtering cannot mask the answer.
 
 Two findings worth knowing before writing a client against these deployments: explicit breakpoints are rejected with `400 invalid_parameter` on models before GPT-5.6, and `prompt_cache_key` participates in cache identity, so changing it turns a warm prefix into a miss.
 

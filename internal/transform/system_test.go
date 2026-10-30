@@ -99,7 +99,7 @@ func TestPromoteSystemMessagesCases(t *testing.T) {
 		{
 			name:         "block-array system content is promoted",
 			in:           `{"messages":[{"role":"system","content":[{"type":"text","text":"A"},{"type":"text","text":"B"}]},{"role":"user","content":"hi"}]}`,
-			wantSystem:   `"A\nB"`,
+			wantSystem:   `"AB"`,
 			wantMessages: `[{"role":"user","content":"hi"}]`,
 		},
 		{
@@ -111,7 +111,13 @@ func TestPromoteSystemMessagesCases(t *testing.T) {
 		{
 			name:         "developer input_text is appended after cache breakpoint",
 			in:           `{"system":[{"type":"text","text":"S","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"developer","content":[{"type":"input_text","text":"D"},{"type":"text","text":"E"}]},{"role":"user","content":"hi"}]}`,
-			wantSystem:   `[{"type":"text","text":"S","cache_control":{"type":"ephemeral"}},{"type":"text","text":"D"},{"type":"text","text":"E"}]`,
+			wantSystem:   `[{"type":"text","text":"S","cache_control":{"type":"ephemeral"}},{"type":"text","text":"DE"}]`,
+			wantMessages: `[{"role":"user","content":"hi"}]`,
+		},
+		{
+			name:         "block boundaries do not alter literal instructions",
+			in:           `{"system":"S","messages":[{"role":"developer","content":[{"type":"input_text","text":"pass"},{"type":"text","text":"word"}]},{"role":"system","content":"tail"},{"role":"user","content":"hi"}]}`,
+			wantSystem:   `"S\npassword\ntail"`,
 			wantMessages: `[{"role":"user","content":"hi"}]`,
 		},
 		{

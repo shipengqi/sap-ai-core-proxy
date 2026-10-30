@@ -113,10 +113,14 @@ func systemTexts(content json.RawMessage) (texts []string, ok bool) {
 	if err := json.Unmarshal(content, &blocks); err != nil {
 		return nil, false
 	}
+	var text strings.Builder
 	for _, b := range blocks {
-		if (b.Type == "text" || b.Type == "input_text") && b.Text != "" {
-			texts = append(texts, b.Text)
+		if b.Type == "text" || b.Type == "input_text" {
+			text.WriteString(b.Text)
 		}
+	}
+	if text.Len() > 0 {
+		texts = append(texts, text.String())
 	}
 	return texts, true
 }
