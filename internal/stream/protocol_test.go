@@ -56,7 +56,7 @@ func (b *oneFrameBody) Read(p []byte) (int, error) {
 func (b *oneFrameBody) Close() error { b.closed = true; return nil }
 
 func TestPipesStopOnClientWriteFailure(t *testing.T) {
-	for _, name := range []string{"openai", "responses", "bridge", "anthropic", "gemini"} {
+	for _, name := range []string{"openai", "responses", "bridge", "anthropic", "gemini", "orchestration"} {
 		t.Run(name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
 			c, _ := gin.CreateTestContext(failingWriter{headers: make(http.Header)})
@@ -75,6 +75,9 @@ func TestPipesStopOnClientWriteFailure(t *testing.T) {
 			case "gemini":
 				body.frame = "[{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hello\"}]}}]}]"
 				PipeGeminiToOpenAI(c, resp, "id", "m")
+			case "orchestration":
+				body.frame = orchestrationEvent(`[{"index":0,"delta":{"content":"hello"}}]`, "")
+				PipeOrchestrationToOpenAI(c, resp, false)
 			}
 			if !body.closed || body.reads > 1 {
 				t.Fatalf("upstream continued after failed write: %+v", body)

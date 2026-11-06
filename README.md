@@ -158,7 +158,7 @@ All config values can be overridden by environment variables (higher priority th
 |---|---|---|
 | GET | `/litellm/v1/models` | List all RUNNING deployments |
 | GET | `/litellm/v1/model/info` | Model info via Orchestration |
-| POST | `/litellm/v1/chat/completions` | Non-streaming chat via SAP Orchestration |
+| POST | `/litellm/v1/chat/completions` | Streaming and non-streaming chat via SAP Orchestration |
 | POST | `/litellm/v1/completions` | Same messages-based adapter; legacy prompt requests return 400 |
 | POST | `/litellm/v1/embeddings` | Embeddings (direct deployment) |
 
@@ -244,6 +244,7 @@ version first while Anthropic puts the family first. Alias normalization handles
 | OpenAI Responses | Native SSE events, forwarded immediately |
 | Anthropic | SSE with `event:` lines; injected automatically if SAP omits them |
 | Gemini | Native chunked JSON array or SSE (`alt=sse`); forwarded as received |
+| LiteLLM / Orchestration | SAP SSE `final_result` converted to OpenAI Chat chunks; intermediate module results are not exposed |
 
 ### Compatibility boundaries
 
@@ -251,7 +252,9 @@ OpenAI Chat supports GPT, Claude, Gemini, Qwen, GLM and Perplexity in both respo
 
 The Responses bridge accepts text, images and function tools. It preserves image detail, refusal, incomplete status and usage, and defaults translated function tools to `strict:false`. Unsupported options such as `stop`, `n>1`, logprobs, and other tool/content types return 400. Claude and GLM reject unsupported Chat options; Claude rejects reasoning budgets that exceed an explicit token limit. Gemini supports function tools and structured JSON output; remote images, nonzero reasoning-effort translation, and enforcing `parallel_tool_calls:false` require the native API.
 
-The Anthropic surface supports Claude natively in both modes. Non-Claude requests share provider routing and Responses fallback for non-streaming calls; streaming and Anthropic thinking on those routes return 400. LiteLLM supports messages, tools and response_format through the non-streaming Orchestration adapter; streaming, legacy prompt and unimplemented generation options return 400.
+The Anthropic surface supports Claude natively in both modes. Non-Claude requests share provider routing and Responses fallback for non-streaming calls; streaming and Anthropic thinking on those routes return 400.
+
+LiteLLM supports messages, tools and response_format through SAP Orchestration in both modes. Streaming enables `config.stream.enabled` and unwraps only `final_result`, preserving text/reasoning deltas, tool-call indices and argument fragments, and finish reasons. SAP's empty initial placeholder and intermediate module results are not exposed. `stream_options.include_usage:true` adds a standalone OpenAI usage chunk; usage is always requested upstream for proxy accounting. Common OpenAI generation parameters (including temperature, top_p, stop, reasoning_effort, tool_choice and parallel_tool_calls) are forwarded into `model.params`. `max_tokens` is translated to `max_completion_tokens`, with an explicit `max_completion_tokens` taking precedence. Model-specific support is determined by SAP; there is no fallback to a direct deployment. Legacy prompt requests, unknown parameters and invalid stream options return 400. Upstream HTTP errors retain their status; malformed, failed or prematurely ended streams emit an error and `[DONE]` rather than reporting success.
 
 Responses IDs are kept per proxy instance, with a 24-hour TTL and a 10,000-route cap. `previous_response_id` stays on the owning deployment; failed DELETE retains that route. Restarting the proxy loses the routes, and multiple replicas require sticky routing. Shared durable affinity is not implemented. Use the native provider surface for signed reasoning history or model-specific adaptive-thinking features; Chat conversion does not provide full fidelity for those fields.
 
@@ -476,7 +479,7 @@ If your configuration denies providers by default, add allow rules for the selec
 
 Preserve existing rules and their order. OpenCode V2 uses top-level `policies`; `experimental.policies` is deprecated. Managed policies may still restrict provider access.
 
-The `aicore-litellm` provider is included for completeness, but the `/litellm/v1` surface currently supports only non-streaming requests and is not recommended for interactive OpenCode coding sessions. Prefer the native surfaces above.
+The `aicore-litellm` provider supports interactive streaming sessions through SAP Orchestration. Select `aicore-litellm/gpt-6-luna` or `aicore-litellm/gpt-6-astra` to use that path. Your SAP Orchestration deployment must support the selected model and its requested tools/parameters. Prefer the native surfaces above when you need native provider features rather than Orchestration.
 
 OpenCode reloads configuration after saving; use `/reload` if you need to force a full reload. See the [OpenCode V2 configuration](https://opencode.ai/v2/docs/config) and [provider](https://opencode.ai/v2/docs/providers) guides for more options.
 

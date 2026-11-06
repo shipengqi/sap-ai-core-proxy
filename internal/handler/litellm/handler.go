@@ -9,7 +9,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/usage"
 )
 
@@ -61,26 +63,78 @@ func (h *Handler) ModelInfo(c *gin.Context) {
 	c.Data(upstream.StatusCode, "application/json", respBody)
 }
 
-func buildOrchestrationBody(model string, messages, tools, responseFormat json.RawMessage) ([]byte, error) {
-	promptObj := map[string]json.RawMessage{"template": messages}
-	if tools != nil {
-		promptObj["tools"] = tools
+func buildOrchestrationBody(model string, raw map[string]json.RawMessage, streaming bool) ([]byte, error) {
+	promptObj := map[string]json.RawMessage{"template": raw["messages"]}
+	if raw["tools"] != nil {
+		promptObj["tools"] = raw["tools"]
 	}
-	if responseFormat != nil {
-		promptObj["response_format"] = responseFormat
+	if raw["response_format"] != nil {
+		promptObj["response_format"] = raw["response_format"]
+	}
+	params := make(map[string]json.RawMessage)
+	for key, value := range raw {
+		if orchestrationModelParameter(key) {
+			params[key] = value
+		}
+	}
+	if value, ok := raw["max_completion_tokens"]; ok {
+		params["max_completion_tokens"] = value
+	} else if value, ok := raw["max_tokens"]; ok {
+		params["max_completion_tokens"] = value
+	}
+	if streaming {
+		// Match SAP's SDK: collect usage upstream even when the client doesn't
+		// request it. The stream adapter controls client-visible usage separately.
+		params["stream_options"] = json.RawMessage(`{"include_usage":true}`)
+	}
+	modelConfig := map[string]any{"name": model}
+	if len(params) > 0 {
+		modelConfig["params"] = params
 	}
 	body := map[string]interface{}{
 		"config": map[string]interface{}{
 			"modules": map[string]interface{}{
 				"prompt_templating": map[string]interface{}{
 					"prompt": promptObj,
-					"model":  map[string]string{"name": model},
+					"model":  modelConfig,
 				},
 			},
-			"stream": map[string]bool{"enabled": false},
+			"stream": map[string]bool{"enabled": streaming},
 		},
 	}
 	return json.Marshal(body)
+}
+
+// These OpenAI fields belong in model.params, not in the prompt template or
+// the global Orchestration stream config. Model-specific validation is SAP's.
+func orchestrationModelParameter(key string) bool {
+	switch key {
+	case "temperature", "top_p", "n", "stop", "presence_penalty", "frequency_penalty",
+		"logit_bias", "user", "tool_choice", "parallel_tool_calls", "seed", "logprobs",
+		"top_logprobs", "reasoning_effort":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *Handler) streamOrchestration(c *gin.Context, dep *sapclient.Deployment, reqBody []byte, includeUsage bool) {
+	headers := map[string]string{"Accept": "text/event-stream"}
+	if dep.ResourceGroupID != "" {
+		headers["AI-Resource-Group"] = dep.ResourceGroupID
+	}
+	upstream, err := h.client.DoStreaming(c.Request.Context(), http.MethodPost,
+		dep.DeployedURL+"/v2/completion", bytes.NewReader(reqBody),
+		headers)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, errorBody(err.Error()))
+		return
+	}
+	if !proxy.CheckStream(c, upstream) {
+		return
+	}
+	c.Status(http.StatusOK)
+	stream.PipeOrchestrationToOpenAI(c, upstream, includeUsage)
 }
 
 func parseOrchestrationResponse(data []byte) (json.RawMessage, error) {
