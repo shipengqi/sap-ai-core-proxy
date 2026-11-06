@@ -321,6 +321,165 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
+### Codex CLI
+
+Edit `~/.codex/config.toml` to select the proxy provider and add its definition:
+
+```toml
+# Top-level settings: place these before any [table] headers.
+model_provider = "aicoreproxy"
+model = "gpt-6.1-sol" # Optional: choose a model available in your SAP AI Core deployments.
+
+[model_providers.aicoreproxy]
+base_url = "http://localhost:6655/openai/v1"
+name = "AI Core Proxy"
+requires_openai_auth = true
+supports_websockets = false
+wire_api = "responses"
+```
+
+Update existing `model_provider` and `model` settings rather than adding duplicate keys. The example assumes the proxy listens on port `6655`; if you use the default proxy port, change the URL to `http://localhost:3001/openai/v1`. `wire_api = "responses"` selects the Responses API, while `supports_websockets = false` keeps requests on HTTP/SSE.
+
+Also edit `~/.codex/auth.json` to use API-key authentication:
+
+```json
+{
+  "OPENAI_API_KEY": "any-value",
+  "auth_mode": "apikey"
+}
+```
+
+`auth_mode` must be `"apikey"`. `OPENAI_API_KEY` can be any non-empty value: Codex requires it because `requires_openai_auth = true`, but the proxy handles SAP AI Core authentication using its own configured credentials.
+
+### OpenCode V2
+
+Merge the following into `~/.config/opencode/opencode.jsonc` for all projects, or into a project-local `opencode.jsonc`. Preserve unrelated settings and merge entries into an existing `providers` object rather than creating duplicate keys.
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "aicore-openai/gpt-6.1-sol",
+  "providers": {
+    "aicore-openai": {
+      "canonical": "openai",
+      "name": "AI Core Proxy — OpenAI",
+      "settings": {
+        "apiKey": "any-value",
+        "baseURL": "http://localhost:6655/openai/v1",
+        "transport": "http"
+      },
+      "models": {
+        "gpt-5": {"limit": {"context": 400000, "input": 272000, "output": 128000}},
+        "gpt-5.4": {"limit": {"context": 1050000, "input": 922000, "output": 128000}},
+        "gpt-5.5": {"limit": {"context": 1050000, "input": 922000, "output": 128000}},
+        "gpt-5.6-luna": {"limit": {"context": 1050000, "input": 922000, "output": 128000}},
+        "gpt-5.6-sol": {"limit": {"context": 1050000, "input": 922000, "output": 128000}},
+        "gpt-5.6-terra": {"limit": {"context": 1050000, "input": 922000, "output": 128000}},
+        "gpt-6-astra": {"limit": {"context": 1050000, "input": 872000, "output": 128000}},
+        "gpt-6-luna": {"limit": {"context": 1050000, "input": 872000, "output": 128000}},
+        "gpt-6.1-sol": {"limit": {"context": 1050000, "input": 872000, "output": 128000}}
+      }
+    },
+    "aicore-anthropic": {
+      "canonical": "anthropic",
+      "name": "AI Core Proxy — Anthropic",
+      "settings": {
+        "apiKey": "any-value",
+        "baseURL": "http://localhost:6655/anthropic/v1"
+      },
+      "models": {
+        "claude-haiku-4-5": {"limit": {"context": 200000, "input": 200000, "output": 64000}, "name": "Haiku 4.5"},
+        "claude-opus-4-5": {"limit": {"context": 200000, "input": 200000, "output": 64000}, "name": "Opus 4.5"},
+        "claude-opus-4-6": {"limit": {"context": 200000, "input": 200000, "output": 128000}, "name": "Opus 4.6"},
+        "claude-opus-4-7": {"limit": {"context": 1000000, "input": 1000000, "output": 128000}, "name": "Opus 4.7"},
+        "claude-opus-4-8": {"limit": {"context": 1000000, "input": 1000000, "output": 128000}, "name": "Opus 4.8"},
+        "claude-sonnet-4-5": {"limit": {"context": 200000, "input": 200000, "output": 64000}, "name": "Sonnet 4.5"},
+        "claude-sonnet-4-6": {"limit": {"context": 200000, "input": 200000, "output": 128000}, "name": "Sonnet 4.6"},
+        "claude-sonnet-4-6[1m]": {"limit": {"context": 1000000, "input": 1000000, "output": 128000}, "modelID": "claude-sonnet-4-6", "name": "Sonnet 4.6 (1M context)"}
+      }
+    },
+    "aicore-google": {
+      "canonical": "google",
+      "name": "AI Core Proxy — Gemini",
+      "settings": {
+        "apiKey": "any-value",
+        "baseURL": "http://localhost:6655/gemini/v1beta"
+      },
+      "models": {
+        "gemini-2.5-flash": {"limit": {"context": 1000000, "input": 1000000, "output": 65536}},
+        "gemini-2.5-flash-lite": {"limit": {"context": 1000000, "input": 1000000, "output": 65535}},
+        "gemini-2.5-pro": {"limit": {"context": 1000000, "input": 1000000, "output": 65536}},
+        "gemini-3.1-flash-lite": {"limit": {"context": 1000000, "input": 1000000, "output": 65536}},
+        "gemini-3.5-flash": {"limit": {"context": 1000000, "input": 1000000, "output": 65536}},
+        "gemini-3.8-flash": {"limit": {"context": 1000000, "input": 1000000, "output": 65536}}
+      }
+    },
+    "aicore-litellm": {
+      "name": "AI Core Proxy — LiteLLM",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "apiKey": "any-value",
+        "baseURL": "http://localhost:6655/litellm/v1"
+      },
+      "models": {
+        "claude-haiku-4-5": {"limit": {"context": 200000, "output": 64000}, "name": "Haiku 4.5"},
+        "claude-opus-4-5": {"limit": {"context": 200000, "output": 64000}, "name": "Opus 4.5"},
+        "claude-opus-4-6": {"limit": {"context": 200000, "output": 128000}, "name": "Opus 4.6"},
+        "claude-opus-4-7": {"limit": {"context": 1000000, "output": 128000}, "name": "Opus 4.7"},
+        "claude-opus-4-8": {"limit": {"context": 1000000, "output": 128000}, "name": "Opus 4.8"},
+        "claude-sonnet-4-5": {"limit": {"context": 200000, "output": 64000}, "name": "Sonnet 4.5"},
+        "claude-sonnet-4-6": {"limit": {"context": 200000, "output": 128000}, "name": "Sonnet 4.6"},
+        "claude-sonnet-4-6[1m]": {"limit": {"context": 1000000, "output": 128000}, "modelID": "claude-sonnet-4-6", "name": "Sonnet 4.6 (1M context)"},
+        "gemini-2.5-flash": {"limit": {"context": 1000000, "output": 65536}, "name": "Gemini 2.5 Flash"},
+        "gemini-2.5-flash-lite": {"limit": {"context": 1000000, "output": 65535}, "name": "Gemini 2.5 Flash Lite"},
+        "gemini-2.5-pro": {"limit": {"context": 1000000, "output": 65536}, "name": "Gemini 2.5 Pro"},
+        "gemini-3.1-flash-lite": {"limit": {"context": 1000000, "output": 65536}, "name": "Gemini 3.1 Flash Lite"},
+        "gemini-3.5-flash": {"limit": {"context": 1000000, "output": 65536}, "name": "Gemini 3.5 Flash"},
+        "gemini-3.8-flash": {"limit": {"context": 1000000, "output": 65536}, "name": "Gemini 3.8 Flash"},
+        "gpt-4.1": {"limit": {"context": 128000, "output": 32768}, "name": "GPT-4.1"},
+        "gpt-4.1-mini": {"limit": {"context": 1047576, "output": 32768}, "name": "GPT-4.1 mini"},
+        "gpt-5": {"limit": {"context": 400000, "input": 272000, "output": 128000}, "name": "GPT-5"},
+        "gpt-5-mini": {"limit": {"context": 393216, "input": 265216, "output": 128000}, "name": "GPT-5 mini"},
+        "gpt-5.4": {"limit": {"context": 1050000, "input": 922000, "output": 128000}, "name": "GPT-5.4"},
+        "gpt-5.5": {"limit": {"context": 1050000, "input": 922000, "output": 128000}, "name": "GPT-5.5"},
+        "gpt-5.6-luna": {"limit": {"context": 1050000, "input": 922000, "output": 128000}, "name": "GPT-5.6 Luna"},
+        "gpt-5.6-sol": {"limit": {"context": 1050000, "input": 922000, "output": 128000}, "name": "GPT-5.6 Sol"},
+        "gpt-5.6-terra": {"limit": {"context": 1050000, "input": 922000, "output": 128000}, "name": "GPT-5.6 Terra"},
+        "gpt-6-astra": {"limit": {"context": 1050000, "input": 872000, "output": 128000}, "name": "GPT-6 Astra"},
+        "gpt-6-luna": {"limit": {"context": 1050000, "input": 872000, "output": 128000}, "name": "GPT-6 Luna"},
+        "gpt-6.1-sol": {"limit": {"context": 1050000, "input": 872000, "output": 128000}, "name": "GPT-6.1 Sol"}
+      }
+    }
+  }
+}
+```
+
+- The `aicore-*` keys are custom provider IDs; model references use `provider/model`, such as `aicore-anthropic/claude-sonnet-4-6`. `canonical` inherits the corresponding native provider's runtime and catalog defaults. Keep only the providers you need.
+- The example uses port `6655`; replace it with `3001` if the proxy uses its default port. `apiKey` can be any non-empty value because the proxy uses its own SAP AI Core credentials. No Codex-style `auth.json` edit is needed.
+- OpenAI's `settings.transport: "http"` disables WebSockets and uses HTTP/SSE. The proxy supports the Responses API over HTTP, not a session WebSocket transport.
+- Model names and token limits are examples; configure only models available in your SAP AI Core deployments and verify their actual limits. Inheriting a catalog does not make every catalog model available through SAP. Use `/models` to select a model after saving.
+- If `agents.<name>.model` is already configured, it overrides the root `model` for that agent. Update those references too if you want all agents to use the proxy.
+
+If your configuration denies providers by default, add allow rules for the selected provider IDs to the existing top-level `policies` array, after the deny rule:
+
+```jsonc
+{
+  "policies": [
+    { "action": "provider.use", "resource": "*", "effect": "deny" },
+    { "action": "provider.use", "resource": "aicore-openai", "effect": "allow" },
+    { "action": "provider.use", "resource": "aicore-anthropic", "effect": "allow" },
+    { "action": "provider.use", "resource": "aicore-google", "effect": "allow" },
+    { "action": "provider.use", "resource": "aicore-litellm", "effect": "allow" }
+  ]
+}
+```
+
+Preserve existing rules and their order. OpenCode V2 uses top-level `policies`; `experimental.policies` is deprecated. Managed policies may still restrict provider access.
+
+The `aicore-litellm` provider is included for completeness, but the `/litellm/v1` surface currently supports only non-streaming requests and is not recommended for interactive OpenCode coding sessions. Prefer the native surfaces above.
+
+OpenCode reloads configuration after saving; use `/reload` if you need to force a full reload. See the [OpenCode V2 configuration](https://opencode.ai/v2/docs/config) and [provider](https://opencode.ai/v2/docs/providers) guides for more options.
+
 ## Docker
 
 ### Build
