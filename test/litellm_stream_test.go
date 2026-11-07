@@ -253,10 +253,10 @@ func TestOrchestrationCancelsUpstreamWhenClientDisconnects(t *testing.T) {
 	}
 	scanner := bufio.NewScanner(resp.Body)
 	if !scanner.Scan() || !strings.Contains(scanner.Text(), `"content":"hello"`) {
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		t.Fatalf("initial delta missing: %s (%v)", scanner.Text(), scanner.Err())
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	timer := time.NewTimer(3 * time.Second)
 	defer timer.Stop()
 	select {
