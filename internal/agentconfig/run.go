@@ -23,10 +23,10 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 	if opts.Discover {
 		available, err := DiscoverModels(opts.BaseURL())
 		if err != nil {
-			fmt.Fprintf(out, "Model discovery unavailable (%v); using the curated catalog.\n\n", err)
+			_, _ = fmt.Fprintf(out, "Model discovery unavailable (%v); using the curated catalog.\n\n", err)
 		} else {
 			opts.Available = available
-			fmt.Fprintf(out, "Discovered %d running deployments from %s.\n\n", len(available), opts.BaseURL())
+			_, _ = fmt.Fprintf(out, "Discovered %d running deployments from %s.\n\n", len(available), opts.BaseURL())
 		}
 	}
 
@@ -37,11 +37,11 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 		if !terminal {
 			return fmt.Errorf("interactive selection needs a terminal; pass --agents %s --yes", strings.Join(IDs(), ","))
 		}
-		fmt.Fprintf(out, "Proxy URL: %s\n\nSelect agents to configure:\n", opts.BaseURL())
+		_, _ = fmt.Fprintf(out, "Proxy URL: %s\n\nSelect agents to configure:\n", opts.BaseURL())
 		for i, agent := range All() {
-			fmt.Fprintf(out, "  [%d] %-12s %s\n", i+1, agent.Name(), targetList(agent.Targets(env)))
+			_, _ = fmt.Fprintf(out, "  [%d] %-12s %s\n", i+1, agent.Name(), targetList(agent.Targets(env)))
 		}
-		fmt.Fprint(out, "Selection (e.g. \"1 3\" or \"all\", empty to cancel): ")
+		_, _ = fmt.Fprint(out, "Selection (e.g. \"1 3\" or \"all\", empty to cancel): ")
 		line, err := readLine(reader)
 		if err != nil {
 			return err
@@ -51,7 +51,7 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 			return err
 		}
 		if len(ids) == 0 {
-			fmt.Fprintln(out, "Cancelled.")
+			_, _ = fmt.Fprintln(out, "Cancelled.")
 			return nil
 		}
 	}
@@ -82,37 +82,37 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 			return err
 		}
 		for _, w := range agent.Warnings(env) {
-			fmt.Fprintf(out, "WARNING [%s]: %s\n", agent.Name(), w)
+			_, _ = fmt.Fprintf(out, "WARNING [%s]: %s\n", agent.Name(), w)
 		}
 		changes = append(changes, plan...)
 	}
 
-	fmt.Fprintf(out, "\nProxy URL: %s\n\nPlanned changes:\n", opts.BaseURL())
+	_, _ = fmt.Fprintf(out, "\nProxy URL: %s\n\nPlanned changes:\n", opts.BaseURL())
 	for _, change := range changes {
-		fmt.Fprintf(out, "  %-8s %s\n", change.Status(), change.Path)
+		_, _ = fmt.Fprintf(out, "  %-8s %s\n", change.Status(), change.Path)
 	}
-	fmt.Fprintln(out)
+	_, _ = fmt.Fprintln(out)
 	for _, change := range changes {
 		if change.Changed() {
-			fmt.Fprint(out, Diff(change.Path, change.Old, change.New))
-			fmt.Fprintln(out)
+			_, _ = fmt.Fprint(out, Diff(change.Path, change.Old, change.New))
+			_, _ = fmt.Fprintln(out)
 		}
 	}
 	if opts.DryRun {
-		fmt.Fprintln(out, "Dry run: no files were written.")
+		_, _ = fmt.Fprintln(out, "Dry run: no files were written.")
 		return nil
 	}
 	if !opts.Yes {
 		if !terminal {
 			return fmt.Errorf("confirmation needs a terminal; pass --yes to apply non-interactively")
 		}
-		fmt.Fprint(out, "Write these files? [y/N]: ")
+		_, _ = fmt.Fprint(out, "Write these files? [y/N]: ")
 		answer, err := readLine(reader)
 		if err != nil {
 			return err
 		}
 		if !strings.EqualFold(strings.TrimSpace(answer), "y") && !strings.EqualFold(strings.TrimSpace(answer), "yes") {
-			fmt.Fprintln(out, "Cancelled.")
+			_, _ = fmt.Fprintln(out, "Cancelled.")
 			return nil
 		}
 	}
@@ -129,29 +129,29 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 		return err
 	}
 	if changed {
-		fmt.Fprintln(out, "Configuration written.")
+		_, _ = fmt.Fprintln(out, "Configuration written.")
 	} else {
-		fmt.Fprintln(out, "Already configured; nothing to change.")
+		_, _ = fmt.Fprintln(out, "Already configured; nothing to change.")
 	}
 	if len(backups) > 0 {
-		fmt.Fprintln(out, "\nBackups:")
+		_, _ = fmt.Fprintln(out, "\nBackups:")
 		for _, path := range backups {
-			fmt.Fprintf(out, "  %s\n", path)
+			_, _ = fmt.Fprintf(out, "  %s\n", path)
 		}
 	}
-	fmt.Fprintln(out, "\nVerify in each agent:")
+	_, _ = fmt.Fprintln(out, "\nVerify in each agent:")
 	for _, agent := range agents {
-		fmt.Fprintf(out, "  %-12s %s\n", agent.Name(), agent.Verify())
+		_, _ = fmt.Fprintf(out, "  %-12s %s\n", agent.Name(), agent.Verify())
 	}
-	fmt.Fprintf(out, "\nProxy health: curl %s/health\n", opts.BaseURL())
-	fmt.Fprintf(out, "Available models: curl %s/openai/v1/models\n", opts.BaseURL())
+	_, _ = fmt.Fprintf(out, "\nProxy health: curl %s/health\n", opts.BaseURL())
+	_, _ = fmt.Fprintf(out, "Available models: curl %s/openai/v1/models\n", opts.BaseURL())
 	return nil
 }
 
 func printStatus(out io.Writer, opts Options, env Env) error {
-	fmt.Fprintf(out, "Proxy URL: %s\n", opts.BaseURL())
+	_, _ = fmt.Fprintf(out, "Proxy URL: %s\n", opts.BaseURL())
 	for _, agent := range All() {
-		fmt.Fprintf(out, "\n%s (%s)\n", agent.Name(), agent.ID())
+		_, _ = fmt.Fprintf(out, "\n%s (%s)\n", agent.Name(), agent.ID())
 		plan, err := agent.Plan(opts, env)
 		if err != nil {
 			return err
@@ -161,10 +161,10 @@ func printStatus(out io.Writer, opts Options, env Env) error {
 			if bytes.Contains(change.Old, managedMarker(agent.ID())) {
 				state += ", already configured"
 			}
-			fmt.Fprintf(out, "  %s: %s\n", change.Path, state)
+			_, _ = fmt.Fprintf(out, "  %s: %s\n", change.Path, state)
 		}
 		for _, w := range agent.Warnings(env) {
-			fmt.Fprintf(out, "  WARNING: %s\n", w)
+			_, _ = fmt.Fprintf(out, "  WARNING: %s\n", w)
 		}
 	}
 	return nil
@@ -250,14 +250,14 @@ func chooseModels(reader *bufio.Reader, out io.Writer, opts Options, agents []Ag
 		id     string
 	}
 	var entries []entry
-	fmt.Fprintln(out, "\nModels:")
+	_, _ = fmt.Fprintln(out, "\nModels:")
 	for _, family := range families {
 		for _, m := range ModelsFor(opts, family) {
 			entries = append(entries, entry{family, m.ID})
-			fmt.Fprintf(out, "  [%d] %s\n", len(entries), m.ID)
+			_, _ = fmt.Fprintf(out, "  [%d] %s\n", len(entries), m.ID)
 		}
 	}
-	fmt.Fprint(out, "Selection (Enter = keep the defaults, e.g. \"1 3\"): ")
+	_, _ = fmt.Fprint(out, "Selection (Enter = keep the defaults, e.g. \"1 3\"): ")
 	line, err := readLine(reader)
 	if err != nil {
 		return nil, err

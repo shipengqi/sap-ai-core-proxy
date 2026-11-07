@@ -51,7 +51,7 @@ func postOrchestration(t *testing.T, proxyURL, body string) (int, http.Header, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +160,7 @@ func TestOrchestrationFlushesBeforeUpstreamCompletes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("proxy buffered the generation instead of flushing: %v", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	scanner := bufio.NewScanner(resp.Body)
 	if !scanner.Scan() || !strings.Contains(scanner.Text(), `"content":"first chunk"`) {
 		t.Fatalf("first delta unavailable before upstream finished: %s (%v)", scanner.Text(), scanner.Err())

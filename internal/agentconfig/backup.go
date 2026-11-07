@@ -43,13 +43,13 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 		return fmt.Errorf("create temp file for %s: %w", path, err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("chmod %s: %w", path, err)
 	}
 	if err := tmp.Close(); err != nil {
