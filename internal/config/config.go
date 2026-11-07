@@ -50,10 +50,7 @@ func Load() (*Config, error) {
 		Server: Server{Port: 3001, LogLevel: "info", Metrics: true},
 	}
 
-	path := filepath.Join(homeDir(), ".aicoreproxy", "config.json")
-	if v := os.Getenv("AICOREPROXY_CONFIG_FILE"); v != "" {
-		path = v
-	}
+	path := configPath()
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, cfg); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
@@ -66,6 +63,43 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+func configPath() string {
+	if v := os.Getenv("AICOREPROXY_CONFIG_FILE"); v != "" {
+		return v
+	}
+	return filepath.Join(homeDir(), ".aicoreproxy", "config.json")
+}
+
+// LoadPortOnly reads just the listen port, without validating SAP credentials
+// or requiring a config file. Commands such as `configure` must work before
+// the proxy has ever been configured. Precedence matches Load: defaults,
+// JSON file, then the PORT environment variable.
+func LoadPortOnly() (int, error) {
+	port := 3001
+	path := configPath()
+	if data, err := os.ReadFile(path); err == nil {
+		var raw struct {
+			Server struct {
+				Port int `json:"port"`
+			} `json:"server"`
+		}
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return 0, fmt.Errorf("parse %s: %w", path, err)
+		}
+		if raw.Server.Port > 0 {
+			port = raw.Server.Port
+		}
+	} else if !os.IsNotExist(err) {
+		return 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	if v := os.Getenv("PORT"); v != "" {
+		if p, err := strconv.Atoi(v); err == nil && p > 0 {
+			port = p
+		}
+	}
+	return port, nil
 }
 
 func overrideFromEnv(cfg *Config) {

@@ -12,6 +12,7 @@ A Go reverse proxy that exposes SAP AI Core LLM deployments through standard API
 - **Model aliases** — translates standard model names (e.g. `claude-3-5-sonnet-latest`) to SAP AI Core deployment names automatically
 - **Tool calling** — OpenAI `tools` / `tool_calls` / `role: "tool"` and Anthropic `tool_use` / `tool_result` blocks are translated into each other, so a tool-calling loop works across either surface regardless of which model family backs it
 - **Claude Code / VSCode / IDE compatible** — works with any client that speaks OpenAI or Anthropic APIs
+- **One-command agent setup** — `./aicoreproxy configure` interactively writes proxy settings for Claude Code, Codex and OpenCode, merging into existing files with backups
 
 ## Quick Start
 
@@ -78,6 +79,8 @@ The Cobra CLI groups server and diagnostic tools under one executable:
 ./aicoreproxy tui --url http://localhost:3001 --interval 5s
 ./aicoreproxy tui --plain             # one remote snapshot, then exit
 ./aicoreproxy cacheprobe --models gpt-5.6-terra,gpt-4o
+./aicoreproxy configure                # interactive: choose agents and write their proxy settings
+./aicoreproxy configure --dry-run      # preview the changes without writing anything
 ./aicoreproxy version                 # full version and build identity
 ./aicoreproxy --help
 ./aicoreproxy cacheprobe --help
@@ -86,6 +89,40 @@ The Cobra CLI groups server and diagnostic tools under one executable:
 No-argument startup remains compatible with Docker and systemd. `--version` is also supported on the root and `serve` commands. Version and help never load configuration or contact SAP. Known legacy single-dash flags (such as `-version`, `-no-tui`, `-models` and `-interval`) remain accepted, including `=value` forms. Flag values and tokens after `--` are not rewritten. Unlike the old parser, unexpected positional arguments are rejected instead of silently ignored; syntax errors exit 2, runtime errors exit 1. Put tool-specific flags after their subcommand; server flags work on both the root and `serve` commands.
 
 The standalone `go run ./cmd/aicore-tui` and `go run ./cmd/aicore-cacheprobe` entry points remain available and share the same tool commands. Configuration precedence remains defaults → JSON file → environment variables; no new configuration flags or Viper layer are introduced. `cacheprobe` sends real model requests and can incur usage charges.
+
+## Configure Coding Agents
+
+`./aicoreproxy configure` writes proxy settings for **Claude Code**, **Codex**, and **OpenCode** into their own config files. It supports selecting several agents at once and needs neither SAP credentials nor a running proxy.
+
+```bash
+./aicoreproxy configure                        # interactive multi-select, model choice, then a diff to confirm
+./aicoreproxy configure --agents claude-code,opencode --yes
+./aicoreproxy configure --status               # show the current configuration state
+./aicoreproxy configure --dry-run              # print the diff without writing anything
+./aicoreproxy configure --port 6655            # override the port used in generated URLs
+./aicoreproxy configure --discover             # keep only models a running proxy actually serves
+```
+
+Interactive selection accepts numbers (`1 3`), `all`, or an empty line to cancel. Non-interactive use requires `--agents` and `--yes`.
+
+| Agent | Files written | What it sets | Models |
+|---|---|---|---|
+| Claude Code | `~/.claude/settings.json` | `env.ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL` and the three `ANTHROPIC_DEFAULT_*_MODEL` slots | Claude only |
+| Codex | `~/.codex/config.toml`, `~/.codex/auth.json` | top-level `model` / `model_provider`, a `[model_providers.aicoreproxy]` table (`wire_api = "responses"`, `requires_openai_auth = true`), and API-key auth | GPT only |
+| OpenCode | `~/.config/opencode/opencode.jsonc` | `model` plus the `aicore-openai` and `aicore-anthropic` providers; `policies` allow rules when a deny-by-default policy exists | 3 GPT + 3 Claude |
+
+Details that matter:
+
+- **Merge, never overwrite.** Unrelated keys, comments, JSONC trailing commas, single-quoted TOML Windows paths and existing provider definitions are preserved. Codex top-level keys are inserted *before* the first `[table]` header, as TOML requires. Re-running is a no-op when nothing changed.
+- **Backups.** Every file that changes is copied to `<file>.bak.<timestamp>` before an atomic replace. `auth.json` is written with mode `0600` on Unix.
+- **Port.** Read from `server.port` in the config file, then `PORT`, then `--port` (default `3001`). `configure` uses a lightweight reader that does **not** validate SAP credentials.
+- **Paths.** Honours `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR` and `XDG_CONFIG_HOME`. On Windows, `~` is `%USERPROFILE%`. Higher-priority sources (project `.claude/settings*.json`, `OPENCODE_CONFIG_CONTENT`, managed policies in `%ProgramData%\opencode`) are reported as warnings.
+- **API keys are placeholders.** The proxy authenticates to SAP AI Core with its own credentials, so agents only need a non-empty value (`aicoreproxy`).
+- **Model overrides.** `--models "claude=claude-sonnet-4-6;gpt=gpt-6.1-sol,gpt-5.4"` replaces the curated list per family. Use `curl http://localhost:3001/openai/v1/models` to see which deployments are actually running.
+
+Verify inside each agent: `claude /status`, `codex config get model_provider` (plus `codex --strict-config`), and `opencode /reload` followed by `/models`. `curl http://localhost:3001/health` checks the proxy itself.
+
+The three per-agent sections below are the **manual/advanced reference**. In particular, the OpenCode example there lists a much larger model catalog than `configure` writes.
 
 ## Configuration
 
@@ -313,7 +350,7 @@ curl -X POST http://localhost:3001/openai/v1/chat/completions \
 
 ### Claude Code CLI
 
-Add to `~/.claude/settings.json`:
+Prefer `./aicoreproxy configure --agents claude-code` (see [Configure Coding Agents](#configure-coding-agents)). For manual setup, add to `~/.claude/settings.json`:
 
 ```json
 {
@@ -326,22 +363,21 @@ Add to `~/.claude/settings.json`:
 
 ### Codex CLI
 
-Edit `~/.codex/config.toml` to select the proxy provider and add its definition:
+Prefer `./aicoreproxy configure --agents codex`. For manual setup, edit `~/.codex/config.toml` to select the proxy provider and add its definition:
 
 ```toml
-# Top-level settings: place these before any [table] headers.
+# Top-level settings: TOML requires these before any [table] headers.
 model_provider = "aicoreproxy"
 model = "gpt-6.1-sol" # Optional: choose a model available in your SAP AI Core deployments.
 
 [model_providers.aicoreproxy]
-base_url = "http://localhost:6655/openai/v1"
+base_url = "http://localhost:3001/openai/v1"
 name = "AI Core Proxy"
 requires_openai_auth = true
-supports_websockets = false
 wire_api = "responses"
 ```
 
-Update existing `model_provider` and `model` settings rather than adding duplicate keys. The example assumes the proxy listens on port `6655`; if you use the default proxy port, change the URL to `http://localhost:3001/openai/v1`. `wire_api = "responses"` selects the Responses API, while `supports_websockets = false` keeps requests on HTTP/SSE.
+Update existing `model_provider` and `model` settings rather than adding duplicate keys, and replace `3001` with your actual proxy port. Keep the `/openai/v1` prefix: Codex appends `/responses` to `base_url`, so dropping it produces 404s. `wire_api = "responses"` is mandatory on current Codex versions (`"chat"` was removed in 0.95.0). `supports_websockets` is a legacy field — current Codex always uses HTTPS, and writing it can trip `codex --strict-config`.
 
 Also edit `~/.codex/auth.json` to use API-key authentication:
 
@@ -352,11 +388,11 @@ Also edit `~/.codex/auth.json` to use API-key authentication:
 }
 ```
 
-`auth_mode` must be `"apikey"`. `OPENAI_API_KEY` can be any non-empty value: Codex requires it because `requires_openai_auth = true`, but the proxy handles SAP AI Core authentication using its own configured credentials.
+`auth_mode` must be `"apikey"`. `OPENAI_API_KEY` can be any non-empty value: Codex requires it because `requires_openai_auth = true`, but the proxy handles SAP AI Core authentication using its own configured credentials. `requires_openai_auth` and a provider-level `env_key` are mutually exclusive — do not set both.
 
 ### OpenCode V2
 
-Merge the following into `~/.config/opencode/opencode.jsonc` for all projects, or into a project-local `opencode.jsonc`. Preserve unrelated settings and merge entries into an existing `providers` object rather than creating duplicate keys.
+Prefer `./aicoreproxy configure --agents opencode`, which writes a small curated set of GPT and Claude models. The full example below is the **manual/advanced reference**. Merge it into `~/.config/opencode/opencode.jsonc` for all projects, or into a project-local `opencode.jsonc`. Preserve unrelated settings and merge entries into an existing `providers` object rather than creating duplicate keys.
 
 ```jsonc
 {
@@ -368,7 +404,7 @@ Merge the following into `~/.config/opencode/opencode.jsonc` for all projects, o
       "name": "AI Core Proxy — OpenAI",
       "settings": {
         "apiKey": "any-value",
-        "baseURL": "http://localhost:6655/openai/v1",
+        "baseURL": "http://localhost:3001/openai/v1",
         "transport": "http"
       },
       "models": {
@@ -388,7 +424,7 @@ Merge the following into `~/.config/opencode/opencode.jsonc` for all projects, o
       "name": "AI Core Proxy — Anthropic",
       "settings": {
         "apiKey": "any-value",
-        "baseURL": "http://localhost:6655/anthropic/v1"
+        "baseURL": "http://localhost:3001/anthropic/v1"
       },
       "models": {
         "claude-haiku-4-5": {"limit": {"context": 200000, "input": 200000, "output": 64000}, "name": "Haiku 4.5"},
@@ -406,7 +442,7 @@ Merge the following into `~/.config/opencode/opencode.jsonc` for all projects, o
       "name": "AI Core Proxy — Gemini",
       "settings": {
         "apiKey": "any-value",
-        "baseURL": "http://localhost:6655/gemini/v1beta"
+        "baseURL": "http://localhost:3001/gemini/v1beta"
       },
       "models": {
         "gemini-2.5-flash": {"limit": {"context": 1000000, "input": 1000000, "output": 65536}},
@@ -422,7 +458,7 @@ Merge the following into `~/.config/opencode/opencode.jsonc` for all projects, o
       "package": "@opencode/ai/providers/openai-compatible",
       "settings": {
         "apiKey": "any-value",
-        "baseURL": "http://localhost:6655/litellm/v1"
+        "baseURL": "http://localhost:3001/litellm/v1"
       },
       "models": {
         "claude-haiku-4-5": {"limit": {"context": 200000, "output": 64000}, "name": "Haiku 4.5"},
@@ -458,7 +494,7 @@ Merge the following into `~/.config/opencode/opencode.jsonc` for all projects, o
 ```
 
 - The `aicore-*` keys are custom provider IDs; model references use `provider/model`, such as `aicore-anthropic/claude-sonnet-4-6`. `canonical` inherits the corresponding native provider's runtime and catalog defaults. Keep only the providers you need.
-- The example uses port `6655`; replace it with `3001` if the proxy uses its default port. `apiKey` can be any non-empty value because the proxy uses its own SAP AI Core credentials. No Codex-style `auth.json` edit is needed.
+- The example uses the default port `3001`; replace it if your proxy listens elsewhere. `apiKey` can be any non-empty value because the proxy uses its own SAP AI Core credentials. No Codex-style `auth.json` edit is needed.
 - OpenAI's `settings.transport: "http"` disables WebSockets and uses HTTP/SSE. The proxy supports the Responses API over HTTP, not a session WebSocket transport.
 - Model names and token limits are examples; configure only models available in your SAP AI Core deployments and verify their actual limits. Inheriting a catalog does not make every catalog model available through SAP. Use `/models` to select a model after saving.
 - If `agents.<name>.model` is already configured, it overrides the root `model` for that agent. Update those references too if you want all agents to use the proxy.
@@ -647,6 +683,7 @@ sap-ai-core-proxy/
 │   ├── cli/                         # Cobra commands and server startup
 │   ├── dashboard/                   # Shared remote dashboard runner
 │   ├── cacheprobe/                  # Shared prompt-cache probe runner
+│   ├── agentconfig/                 # Configure Claude Code / Codex / OpenCode proxy settings
 │   ├── config/config.go             # Load ~/.aicoreproxy/config.json + env overrides
 │   ├── version/version.go           # Build identity for -version, /version and both dashboards
 │   ├── usage/                       # Token accounting, /stats and Prometheus metrics

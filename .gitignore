@@ -35,3 +35,4 @@ requests/
 
 # WorkBuddy workspace metadata
 .workbuddy-ai/
+.workbuddy/

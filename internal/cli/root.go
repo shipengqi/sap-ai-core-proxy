@@ -65,7 +65,7 @@ func newRootCommand(serve func(bool) error) *cobra.Command {
 		_, err := fmt.Fprintln(cmd.OutOrStdout(), version.String())
 		return err
 	}
-	root.AddCommand(server, NewTUICommand(), NewCacheProbeCommand(), v)
+	root.AddCommand(server, NewTUICommand(), NewCacheProbeCommand(), NewConfigureCommand(), v)
 	return root
 }
 
