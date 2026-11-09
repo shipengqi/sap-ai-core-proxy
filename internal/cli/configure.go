@@ -14,7 +14,7 @@ func NewConfigureCommand() *cobra.Command {
 	var yes, dryRun, status, discover bool
 
 	cmd := command("configure", "Configure Claude Code, Codex and OpenCode to use this proxy")
-	cmd.Flags().StringVar(&agents, "agents", "", "comma-separated agents: claude-code,codex,opencode (default: interactive multi-select)")
+	cmd.Flags().StringVar(&agents, "agents", "", "comma-separated agents: claude-code,codex,opencode, or \"all\" (default: interactive multi-select)")
 	cmd.Flags().IntVar(&port, "port", 0, "proxy port; defaults to server.port from config.json, then PORT env, then 3001")
 	cmd.Flags().StringVar(&models, "models", "", "override curated models, e.g. \"claude=claude-sonnet-4-6;gpt=gpt-6.1-sol,gpt-5.4\"")
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip the interactive confirmation (required for non-interactive use)")

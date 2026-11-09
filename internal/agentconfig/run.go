@@ -3,15 +3,27 @@ package agentconfig
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+
+	"charm.land/huh/v2"
 )
 
 // Run owns the interactive flow: selection, model choice, diff review,
 // confirmation and the actual writes. It takes explicit streams so the whole
 // command is testable without a terminal or a real home directory.
+//
+// Interactions are driven by charm.land/huh/v2 forms. When the injected input
+// is not a terminal (a buffer, a pipe, Docker/CI) the forms automatically fall
+// back to huh's line-based "accessible" prompts instead of starting a Bubble
+// Tea program, so scripts and unit tests can still drive every step through
+// in/out. In that fallback the input is wrapped once in a line-delimited reader
+// shared by every form, because huh rebuilds a bufio.Scanner per prompt and
+// would otherwise drain and discard the answers meant for later forms. The
+// fully non-interactive path (--yes with --agents/--models) builds no form at all.
 func Run(in io.Reader, out io.Writer, opts Options) error {
 	env := DefaultEnv()
 	if opts.Port <= 0 {
@@ -30,30 +42,45 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 		}
 	}
 
-	reader := bufio.NewReader(in)
-	terminal := isTerminal(in)
+	// A Bubble Tea program needs a terminal. For every other reader we degrade
+	// to huh's accessible prompts while still honouring the injected streams.
+	//
+	// isTerminal must be called on the original reader (wrapping turns it into a
+	// non-*os.File). In accessible mode wrap in ONCE with a line-delimited reader
+	// shared by all three runForm calls: huh's PromptString builds a fresh
+	// bufio.Scanner on every question, and that Scanner greedily reads a 4096
+	// buffer then discards whatever it did not consume. Without a shared wrapper
+	// the first form's first prompt swallows the input for every later form, so
+	// they hit EOF and Confirm falls back to its default "N". TTY input is left
+	// untouched as a raw byte stream for tea.WithInput.
+	accessible := !isTerminal(in)
+	if accessible {
+		in = newLineDelimitedReader(in)
+	}
+
 	ids := opts.Agents
 	if len(ids) == 0 {
-		if !terminal {
-			return fmt.Errorf("interactive selection needs a terminal; pass --agents %s --yes", strings.Join(IDs(), ","))
-		}
-		_, _ = fmt.Fprintf(out, "Proxy URL: %s\n\nSelect agents to configure:\n", opts.BaseURL())
-		for i, agent := range All() {
-			_, _ = fmt.Fprintf(out, "  [%d] %-12s %s\n", i+1, agent.Name(), targetList(agent.Targets(env)))
-		}
-		_, _ = fmt.Fprint(out, "Selection (e.g. \"1 3\" or \"all\", empty to cancel): ")
-		line, err := readLine(reader)
+		_, _ = fmt.Fprintf(out, "Proxy URL: %s\n\n", opts.BaseURL())
+		options := agentOptions(env)
+		var selected []string
+		// huh v2.0.3 sizes a MultiSelect viewport as (height - title rows) even
+		// though the title is rendered outside the viewport. Without an explicit
+		// height the last option is clipped, so leave room for every row here.
+		field := huh.NewMultiSelect[string]().
+			Title("Select agents to configure").
+			Options(options...).
+			Value(&selected).
+			WithHeight(len(options) + 2)
+		aborted, err := runForm(in, out, accessible, field)
 		if err != nil {
 			return err
 		}
-		ids, err = parseSelection(line)
-		if err != nil {
-			return err
-		}
-		if len(ids) == 0 {
+		// An explicit abort, or confirming an empty selection, is a cancel.
+		if aborted || len(selected) == 0 {
 			_, _ = fmt.Fprintln(out, "Cancelled.")
 			return nil
 		}
+		ids = selected
 	}
 
 	agents := make([]Agent, 0, len(ids))
@@ -65,12 +92,28 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 		agents = append(agents, agent)
 	}
 
-	if terminal && !opts.Yes {
-		chosen, err := chooseModels(reader, out, opts, agents)
+	if !opts.Yes {
+		options, byValue := modelOptions(opts, agents)
+		var selected []string
+		// Same viewport sizing issue as the agent list: title plus description
+		// are two rows, so add two to keep every model visible.
+		field := huh.NewMultiSelect[string]().
+			Title("Select models").
+			Description("Enter keeps the curated defaults; ctrl+a selects all").
+			Options(options...).
+			Value(&selected).
+			WithHeight(len(options) + 2)
+		aborted, err := runForm(in, out, accessible, field)
 		if err != nil {
 			return err
 		}
-		if chosen != nil {
+		if aborted {
+			_, _ = fmt.Fprintln(out, "Cancelled.")
+			return nil
+		}
+		// An empty selection keeps the curated catalog; otherwise the chosen
+		// models replace it, grouped by family.
+		if chosen := groupModelChoices(selected, byValue); chosen != nil {
 			opts.Models = chosen
 		}
 	}
@@ -103,15 +146,17 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 		return nil
 	}
 	if !opts.Yes {
-		if !terminal {
-			return fmt.Errorf("confirmation needs a terminal; pass --yes to apply non-interactively")
-		}
-		_, _ = fmt.Fprint(out, "Write these files? [y/N]: ")
-		answer, err := readLine(reader)
+		var confirmed bool
+		field := huh.NewConfirm().
+			Title("Write these files?").
+			Affirmative("Yes").
+			Negative("No").
+			Value(&confirmed)
+		aborted, err := runForm(in, out, accessible, field)
 		if err != nil {
 			return err
 		}
-		if !strings.EqualFold(strings.TrimSpace(answer), "y") && !strings.EqualFold(strings.TrimSpace(answer), "yes") {
+		if aborted || !confirmed {
 			_, _ = fmt.Fprintln(out, "Cancelled.")
 			return nil
 		}
@@ -148,6 +193,164 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 	return nil
 }
 
+// runForm builds a huh form over the injected streams and runs it. Aborts are
+// normalised to a boolean so each interactive step can map them to the same
+// "Cancelled." message. WithInput/WithOutput guarantee the form never reaches
+// for os.Stdin/os.Stdout directly.
+func runForm(in io.Reader, out io.Writer, accessible bool, fields ...huh.Field) (bool, error) {
+	// Keep the keybinding row visible: it is the only hint that these are
+	// multi-selects (x/space toggles, ctrl+a selects all). Hiding it made a
+	// working multi-select look like a single-choice prompt.
+	form := huh.NewForm(huh.NewGroup(fields...)).
+		WithInput(in).
+		WithOutput(out).
+		WithAccessible(accessible).
+		WithShowHelp(true)
+	err := form.Run()
+	if isUserAbort(err) {
+		return true, nil
+	}
+	return false, err
+}
+
+// lineDelimitedReader adapts a non-TTY input stream so that each Read returns
+// at most one line (including its trailing '\n').
+//
+// huh v2's accessible mode builds a fresh bufio.Scanner on every prompt
+// (internal/accessibility/accessibility.go:PromptString). A Scanner fills a
+// 4096-byte buffer with one greedy Read and then throws away the short-lived
+// Scanner together with any bytes that the current question did not consume.
+// When Run shares one raw reader across several independent forms, the first
+// form's first prompt therefore swallows the answers intended for all later
+// forms, leaving them at EOF and making Confirm fall back to its default "N".
+//
+// A single long-lived bufio.Reader takes the stream line by line, while each
+// Read here hands out only one line, so every Scanner consumes exactly one
+// answer and the rest stays buffered for the next question. The instance MUST
+// be shared across all forms. It is for the accessible fallback only; TTY input
+// is passed to tea.WithInput as a raw byte stream and must never be wrapped.
+type lineDelimitedReader struct {
+	source  *bufio.Reader
+	pending []byte
+	done    bool
+	err     error
+}
+
+func newLineDelimitedReader(in io.Reader) *lineDelimitedReader {
+	return &lineDelimitedReader{source: bufio.NewReader(in)}
+}
+
+func (r *lineDelimitedReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if len(r.pending) == 0 && !r.done {
+		line, err := r.source.ReadBytes('\n')
+		// ReadBytes returns a whole line (possibly longer than the Scanner's
+		// 4096-byte buffer), and also the final line even without a '\n'.
+		r.pending = line
+		if err != nil {
+			// Remember the error but do NOT return it on a Read that still
+			// carries data: emit the pending bytes first and defer the
+			// EOF/error to the next Read once everything has been delivered.
+			r.done = true
+			r.err = err
+		}
+	}
+	if len(r.pending) > 0 {
+		n := copy(p, r.pending)
+		r.pending = r.pending[n:]
+		return n, nil
+	}
+	return 0, r.err
+}
+
+// isUserAbort reports whether err represents a huh user abort (Ctrl+C in the
+// Bubble Tea renderer). Accessible mode never produces it, but the mapping is
+// kept in one place so every interactive step stays consistent and testable.
+func isUserAbort(err error) bool {
+	return errors.Is(err, huh.ErrUserAborted)
+}
+
+// agentOptions renders the agent list for the selection form. The option key is
+// the human-readable label; the option value is the agent ID that gets stored.
+func agentOptions(env Env) []huh.Option[string] {
+	all := All()
+	options := make([]huh.Option[string], 0, len(all))
+	for _, agent := range all {
+		label := fmt.Sprintf("%-12s %s", agent.Name(), shortTargetList(env, agent.Targets(env)))
+		options = append(options, huh.NewOption(label, agent.ID()))
+	}
+	return options
+}
+
+// shortTargetList keeps an option label well under the form's default width.
+// A wrapped label consumes an extra viewport row, which is enough to push the
+// last agent off screen. Full paths are still shown in the diff before writing.
+func shortTargetList(env Env, targets []Target) string {
+	if len(targets) == 0 {
+		return ""
+	}
+	shorten := func(path string) string {
+		if env.Home != "" && strings.HasPrefix(path, env.Home+string(os.PathSeparator)) {
+			return "~" + path[len(env.Home):]
+		}
+		return path
+	}
+	label := shorten(targets[0].Path)
+	if len(targets) > 1 {
+		label += fmt.Sprintf(" (+%d more)", len(targets)-1)
+	}
+	return label
+}
+
+// modelChoice remembers which family a selectable model belongs to.
+type modelChoice struct {
+	family Family
+	id     string
+}
+
+// modelOptions builds the flat, numbered list of selectable models for the
+// chosen agents (mirroring the old curated catalog) plus a lookup keyed by a
+// unique encoded value so selected IDs can be regrouped by family afterwards.
+func modelOptions(opts Options, agents []Agent) ([]huh.Option[string], map[string]modelChoice) {
+	var families []Family
+	seen := map[Family]bool{}
+	for _, agent := range agents {
+		for _, family := range agentFamilies(agent.ID()) {
+			if !seen[family] {
+				seen[family] = true
+				families = append(families, family)
+			}
+		}
+	}
+	var options []huh.Option[string]
+	byValue := map[string]modelChoice{}
+	for _, family := range families {
+		for _, m := range ModelsFor(opts, family) {
+			value := string(family) + "\x00" + m.ID
+			byValue[value] = modelChoice{family: family, id: m.ID}
+			options = append(options, huh.NewOption(m.ID, value))
+		}
+	}
+	return options, byValue
+}
+
+// groupModelChoices turns the selected encoded values back into a per-family
+// model map. An empty selection returns nil so Run keeps the curated defaults.
+func groupModelChoices(selected []string, byValue map[string]modelChoice) map[Family][]string {
+	grouped := map[Family][]string{}
+	for _, value := range selected {
+		if choice, ok := byValue[value]; ok {
+			grouped[choice.family] = append(grouped[choice.family], choice.id)
+		}
+	}
+	if len(grouped) == 0 {
+		return nil
+	}
+	return grouped
+}
+
 func printStatus(out io.Writer, opts Options, env Env) error {
 	_, _ = fmt.Fprintf(out, "Proxy URL: %s\n", opts.BaseURL())
 	for _, agent := range All() {
@@ -181,14 +384,6 @@ func managedMarker(id string) []byte {
 	}
 }
 
-func targetList(targets []Target) string {
-	paths := make([]string, 0, len(targets))
-	for _, t := range targets {
-		paths = append(paths, t.Path)
-	}
-	return strings.Join(paths, ", ")
-}
-
 func isTerminal(in io.Reader) bool {
 	file, ok := in.(*os.File)
 	if !ok {
@@ -199,85 +394,6 @@ func isTerminal(in io.Reader) bool {
 		return false
 	}
 	return stat.Mode()&os.ModeCharDevice != 0
-}
-
-func readLine(reader *bufio.Reader) (string, error) {
-	line, err := reader.ReadString('\n')
-	if err != nil && err != io.EOF {
-		return "", err
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
-// parseSelection accepts numbers, comma/space separated, or "all".
-func parseSelection(line string) ([]string, error) {
-	line = strings.TrimSpace(line)
-	if line == "" {
-		return nil, nil
-	}
-	if strings.EqualFold(line, "all") {
-		return IDs(), nil
-	}
-	all := IDs()
-	var selected []string
-	for _, field := range strings.FieldsFunc(line, func(r rune) bool {
-		return r == ',' || r == ' ' || r == '\t'
-	}) {
-		var n int
-		if _, err := fmt.Sscanf(field, "%d", &n); err != nil || n < 1 || n > len(all) {
-			return nil, fmt.Errorf("invalid selection %q (choose 1-%d or all)", field, len(all))
-		}
-		selected = append(selected, all[n-1])
-	}
-	return selected, nil
-}
-
-// chooseModels lets each agent pick from its own families. Returning nil keeps
-// the curated catalog (the default when the user just presses Enter).
-func chooseModels(reader *bufio.Reader, out io.Writer, opts Options, agents []Agent) (map[Family][]string, error) {
-	var families []Family
-	seen := map[Family]bool{}
-	for _, agent := range agents {
-		for _, family := range agentFamilies(agent.ID()) {
-			if !seen[family] {
-				seen[family] = true
-				families = append(families, family)
-			}
-		}
-	}
-	type entry struct {
-		family Family
-		id     string
-	}
-	var entries []entry
-	_, _ = fmt.Fprintln(out, "\nModels:")
-	for _, family := range families {
-		for _, m := range ModelsFor(opts, family) {
-			entries = append(entries, entry{family, m.ID})
-			_, _ = fmt.Fprintf(out, "  [%d] %s\n", len(entries), m.ID)
-		}
-	}
-	_, _ = fmt.Fprint(out, "Selection (Enter = keep the defaults, e.g. \"1 3\"): ")
-	line, err := readLine(reader)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(line) == "" {
-		return nil, nil
-	}
-	chosen := map[Family][]string{}
-	for _, field := range strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
-		var n int
-		if _, err := fmt.Sscanf(field, "%d", &n); err != nil || n < 1 || n > len(entries) {
-			return nil, fmt.Errorf("invalid model selection %q", field)
-		}
-		e := entries[n-1]
-		chosen[e.family] = append(chosen[e.family], e.id)
-	}
-	if len(chosen) == 0 {
-		return nil, nil
-	}
-	return chosen, nil
 }
 
 func agentFamilies(id string) []Family {
