@@ -3,6 +3,7 @@ module github.com/shipengqi/sap-ai-core-proxy
 go 1.26.0
 
 require (
+	charm.land/bubbletea/v2 v2.0.2
 	charm.land/huh/v2 v2.0.3
 	github.com/gin-gonic/gin v1.12.0
 	github.com/spf13/cobra v1.10.2
@@ -14,7 +15,6 @@ require (
 
 require (
 	charm.land/bubbles/v2 v2.0.0 // indirect
-	charm.land/bubbletea/v2 v2.0.2 // indirect
 	charm.land/lipgloss/v2 v2.0.1 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect

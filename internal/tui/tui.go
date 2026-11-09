@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/format"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/stats"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/version"
@@ -32,32 +34,30 @@ func Interactive() bool {
 		os.Getenv("TERM") != "" && os.Getenv("TERM") != "dumb"
 }
 
-// Run starts the display-only dashboard. It never reads terminal input.
-// The caller owns cancellation; the dashboard deliberately does not subscribe
-// to process-wide signals because it shares a process with the HTTP server.
+// Run starts the display-only dashboard. It never reads terminal input and
+// never installs process-wide signal handlers: the caller owns cancellation,
+// and this program shares a process with the HTTP server.
 func Run(ctx context.Context, base string, interval time.Duration, logs *LogBuffer) {
-	fetcher := stats.New(base)
-	first := true
-	for {
-		snap := fetcher.Fetch(ctx)
-		width, height := terminalSize()
-		if first {
-			fmt.Print("\033[2J")
-			first = false
-		}
-		// Clear the whole frame before repainting. Moving home and clearing only
-		// below the final cursor left suffixes from longer previous log rows on
-		// screen, visually splicing unrelated JSON records together.
-		fmt.Print("\033[H\033[2J" + render(fetcher.Base(), snap, logs, width, height))
-		t := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			fmt.Print("\033[0m\n")
-			return
-		case <-t.C:
-		}
+	width, height := terminalSize()
+	m := dashboardModel{
+		base:     base,
+		interval: interval,
+		logs:     logs,
+		fetcher:  stats.New(base),
+		ctx:      ctx,
+		width:    width,
+		height:   height,
 	}
+	p := tea.NewProgram(m,
+		tea.WithInput(nil), // never put the shared terminal into raw mode
+		tea.WithOutput(os.Stdout),
+		tea.WithoutSignalHandler(), // the HTTP server owns SIGINT/SIGTERM
+		tea.WithContext(ctx),
+	)
+	// Restore attributes and the cursor on a clean exit. An abrupt SIGINT kills
+	// the whole process, so callers should still run `reset` if that happens.
+	defer func() { fmt.Print(reset + "\033[?25h\n") }()
+	_, _ = p.Run()
 }
 
 func render(base string, s stats.Snapshot, logs *LogBuffer, width, height int) string {
