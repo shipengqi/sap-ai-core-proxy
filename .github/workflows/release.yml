@@ -1,14 +1,24 @@
 name: Release
 
+# Step 2 of the release flow. Fires when the pull request opened by
+# bump-version.yml is merged into main: builds and publishes the binaries and
+# Docker image, pushes the v<version> tag and creates the GitHub Release.
+#
+# The only difference from a package release is what gets published — GoReleaser
+# builds the Go binaries and images instead of publishing to a registry. It
+# derives the version, the image tags and the release name from the git tag, so
+# the tag must be pushed before GoReleaser runs. Pushing it does not re-trigger
+# this workflow: tag pushes are no longer a trigger.
+
 on:
-  push:
-    tags: ["v*"]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (e.g. v1.2.3)"
-        required: true
-        type: string
+  # `branches` matches the pull request's *base* branch.
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -16,28 +26,54 @@ permissions:
 
 jobs:
   release:
+    # Closing the release PR without merging must not publish anything.
+    # `head.repo` keeps a fork with a branch named release/v* from triggering it.
+    if: >-
+      github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'release/v')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out the merged release commit
+        uses: actions/checkout@v7
         with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          token: ${{ secrets.RELEASE_TOKEN }}
           fetch-depth: 0
+
+      - name: Read the version from VERSION
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          branch="${{ github.event.pull_request.head.ref }}"
+          expected="${branch#release/v}"
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::Invalid version in VERSION: $version"
+            exit 1
+          fi
+          if [ "$version" != "$expected" ]; then
+            echo "::error::VERSION ($version) does not match branch ($expected)"
+            exit 1
+          fi
+          echo "VERSION=${version}" >> "$GITHUB_ENV"
+          echo "Publishing v${version}"
+
+      - name: Tag the release
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
+            echo "Tag v${VERSION} already exists — skipping (re-run)."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "v${VERSION}"
+          git push origin "v${VERSION}"
 
       - uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Set tag for manual dispatch
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          git tag "${{ github.event.inputs.tag }}" || true
-          git push origin "${{ github.event.inputs.tag }}" || true
-
-      # - uses: docker/login-action@v3
-      #   with:
-      #     registry: ghcr.io
-      #     username: ${{ github.actor }}
-      #     password: ${{ secrets.RELEASE_TOKEN }}
 
       - uses: docker/login-action@v4
         with:

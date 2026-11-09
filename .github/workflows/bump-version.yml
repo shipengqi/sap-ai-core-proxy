@@ -1,12 +1,12 @@
 name: Bump Version
 
-# Step 1 of the release flow. No version number is typed in: pick patch, minor
-# or major and the next version is derived from the VERSION file on main.
+# Step 1 of the release flow. Pick a bump type and this opens a pull request
+# whose only change is VERSION — the next version is derived from the VERSION
+# file on main, so no version number is typed in. Merging that pull request
+# fires .github/workflows/release.yml, which builds and publishes the binaries
+# and image, pushes the v<version> tag and creates the GitHub Release.
 #
-# This opens a release PR whose only change is VERSION. Merging it runs the
-# create-release job below, which tags v<version> with RELEASE_TOKEN so the
-# Release workflow fires (tags pushed with GITHUB_TOKEN do not trigger workflows).
-# Nothing here pushes to main directly.
+# Nothing here pushes to main: the bump reaches main by merging the pull request.
 
 on:
   workflow_dispatch:
@@ -17,9 +17,6 @@ on:
         default: patch
         type: choice
         options: [patch, minor, major]
-  pull_request:
-    types: [closed]
-    branches: [main]
 
 # Two concurrent bumps would read the same VERSION and produce disagreeing
 # branches, so let them queue instead of racing.
@@ -32,16 +29,18 @@ permissions:
   pull-requests: write
 
 jobs:
-  create-pr:
-    if: github.event_name == 'workflow_dispatch'
+  bump:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - name: Check out main
+        uses: actions/checkout@v7
         with:
           ref: main
           token: ${{ secrets.RELEASE_TOKEN }}
           fetch-depth: 0 # tags are needed to reject an already-released version
 
+      # Only VERSION changes here, and there is deliberately no build: the
+      # binaries are built in Release, on the commit that lands on main.
       - name: Compute the next version
         env:
           BUMP: ${{ inputs.bump }}
@@ -82,7 +81,7 @@ jobs:
           echo "VERSION=${next}" >> "$GITHUB_ENV"
           echo "BUMP_TYPE=${BUMP}" >> "$GITHUB_ENV"
 
-      - name: Push the release branch and open the PR
+      - name: Push the release branch and open the pull request
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
@@ -109,55 +108,12 @@ jobs:
           body=$(printf '%s\n' \
             "Bumps \`VERSION\` to **v${VERSION}** (bump type: \`${BUMP_TYPE}\`)." \
             "" \
-            "Merging this PR tags \`v${VERSION}\`, which triggers \`.github/workflows/release.yml\` to build and publish the binaries and image." \
+            "Merging this pull request triggers \`.github/workflows/release.yml\`, which builds and publishes the binaries and image, pushes the \`v${VERSION}\` tag and creates the GitHub Release." \
             "" \
-            "Only the version file changes here — the code was reviewed in the PRs that introduced it.")
+            "Only the version file changes here — the code was reviewed in the pull requests that introduced it.")
 
           gh pr create \
             --base main \
             --head "$branch" \
             --title "chore: release v${VERSION}" \
             --body "$body"
-
-  create-release:
-    if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.merged == true &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      startsWith(github.event.pull_request.head.ref, 'release/v')
-    runs-on: ubuntu-latest
-    steps:
-      # Tag the exact merge commit, not whatever main has moved on to meanwhile.
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
-          token: ${{ secrets.RELEASE_TOKEN }}
-          fetch-depth: 0
-
-      - name: Verify VERSION matches the release branch
-        run: |
-          set -euo pipefail
-          branch="${{ github.event.pull_request.head.ref }}"
-          expected="${branch#release/v}"
-          version="$(tr -d '[:space:]' < VERSION)"
-          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
-            echo "::error::Invalid version in VERSION: $version"
-            exit 1
-          fi
-          if [ "$version" != "$expected" ]; then
-            echo "::error::VERSION ($version) does not match branch ($expected)"
-            exit 1
-          fi
-          echo "VERSION=${version}" >> "$GITHUB_ENV"
-
-      - name: Create and push tag
-        run: |
-          set -euo pipefail
-          if git rev-parse -q --verify "refs/tags/v${VERSION}" >/dev/null; then
-            echo "::error::Tag v${VERSION} already exists"
-            exit 1
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "v${VERSION}"
-          git push origin "v${VERSION}"

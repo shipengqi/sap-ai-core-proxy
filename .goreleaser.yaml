@@ -73,6 +73,7 @@ changelog:
   filters:
     exclude:
       - "^chore: bump version"
+      - "^chore: release"
   groups:
     - title: Features
       regexp: '^feat(\([^)]+\))?!?:'
