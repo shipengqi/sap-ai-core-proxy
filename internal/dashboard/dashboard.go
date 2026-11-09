@@ -23,27 +23,14 @@ func Run(ctx context.Context, out io.Writer, opts Options) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	fetcher := stats.NewWithVersion(opts.URL)
-	for {
-		snap := fetcher.Fetch(ctx)
-		if !opts.Plain {
-			if _, err := fmt.Fprint(out, "\033[H\033[2J"); err != nil {
-				return err
-			}
-		}
-		if _, err := fmt.Fprint(out, render(fetcher.Base(), snap)); err != nil {
-			return err
-		}
-		if opts.Plain || ctx.Err() != nil {
-			return nil
-		}
-		t := time.NewTimer(opts.Interval)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return nil
-		case <-t.C:
-		}
+	// --plain or non-terminal output: keep the original full repaint, which is
+	// pipe-friendly and produces clean text in logs/tests. --plain renders one
+	// frame and exits; non-terminal without --plain loops with full repaints.
+	if opts.Plain || !isTerminalWriter(out) {
+		return runRepaint(ctx, out, fetcher, opts.Interval, opts.Plain)
 	}
+	// Real terminal: use Bubble Tea's diff renderer for flicker-free updates.
+	return runInteractive(ctx, out, fetcher, opts.Interval)
 }
 
 // render draws one frame. build is the proxy's self-reported version; it is

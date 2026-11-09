@@ -2,9 +2,13 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -38,14 +42,63 @@ func runServer(noTUI bool) error {
 	r := router.New(client, deployments, cfg.Server.LogLevel == "debug", cfg.Server.Metrics, cfg.Server.AnthropicAutoCache)
 	addr := fmt.Sprintf(":%d", cfg.Server.Port)
 	slog.Info("server starting", "addr", addr, "version", version.Get().Version)
+	signalCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	ctx, cancel := context.WithCancel(signalCtx)
+	defer cancel()
+	server := &http.Server{Addr: addr, Handler: r, ReadHeaderTimeout: 10 * time.Second}
+	var panel func() error
 	if interactiveTUI {
-		go tui.Run(context.Background(), "http://localhost"+addr, 2*time.Second, logBuffer)
+		panel = func() error {
+			return tui.Run(ctx, cancel, "http://localhost"+addr, 2*time.Second, logBuffer)
+		}
 	}
-	if err := r.Run(addr); err != nil {
+	if err := runHTTPServer(ctx, cancel, server, 5*time.Second, panel); err != nil {
+		// The panel has stopped; errors must no longer disappear into its buffer.
+		if interactiveTUI {
+			setupLogger(cfg.Server.LogLevel, nil)
+		}
 		slog.Error("server error", "err", err)
 		return reportedError{err}
 	}
 	return nil
+}
+
+// runHTTPServer owns shutdown and waits for terminal restoration before returning.
+func runHTTPServer(ctx context.Context, cancel context.CancelFunc, server *http.Server, timeout time.Duration, panel func() error) error {
+	serverDone := make(chan error, 1)
+	go func() { serverDone <- server.ListenAndServe() }()
+	var panelDone chan error
+	if panel != nil {
+		panelDone = make(chan error, 1)
+		go func() { panelDone <- panel() }()
+	}
+	var serverErr, panelErr error
+	serverFinished, panelFinished := false, panel == nil
+	select {
+	case <-ctx.Done():
+	case serverErr = <-serverDone:
+		serverFinished = true
+	case panelErr = <-panelDone:
+		panelFinished = true
+	}
+	cancel()
+	shutdownCtx, stop := context.WithTimeout(context.Background(), timeout)
+	defer stop()
+	shutdownErr := server.Shutdown(shutdownCtx)
+	if shutdownErr != nil {
+		shutdownErr = errors.Join(shutdownErr, server.Close())
+	}
+	if !serverFinished {
+		serverErr = <-serverDone
+	}
+	if !panelFinished {
+		panelErr = <-panelDone
+	}
+	if errors.Is(serverErr, http.ErrServerClosed) {
+		serverErr = nil
+	}
+	return errors.Join(serverErr, panelErr, shutdownErr)
 }
 
 func setupLogger(level string, output *tui.LogBuffer) {

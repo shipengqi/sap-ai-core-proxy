@@ -2,10 +2,14 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/format"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/stats"
@@ -32,35 +36,63 @@ func Interactive() bool {
 		os.Getenv("TERM") != "" && os.Getenv("TERM") != "dumb"
 }
 
-// Run starts the display-only dashboard. It never reads terminal input.
-// The caller owns cancellation; the dashboard deliberately does not subscribe
-// to process-wide signals because it shares a process with the HTTP server.
-func Run(ctx context.Context, base string, interval time.Duration, logs *LogBuffer) {
-	fetcher := stats.New(base)
-	first := true
-	for {
-		snap := fetcher.Fetch(ctx)
-		width, height := terminalSize()
-		if first {
-			fmt.Print("\033[2J")
-			first = false
+// Run reads navigation keys and forwards Ctrl-C to the server's lifecycle owner.
+// It returns only after Bubble Tea has restored the shared terminal.
+func Run(ctx context.Context, cancel context.CancelFunc, base string, interval time.Duration, logs *LogBuffer) error {
+	width, height := terminalSize()
+	m := dashboardModel{
+		base:     base,
+		interval: interval,
+		logs:     logs,
+		fetcher:  stats.New(base),
+		ctx:      ctx,
+		cancel:   cancel,
+		width:    width,
+		height:   height,
+	}
+	p := tea.NewProgram(m,
+		tea.WithInput(os.Stdin),
+		tea.WithOutput(os.Stdout),
+		tea.WithoutSignalHandler(), // the HTTP server owns SIGINT/SIGTERM
+		tea.WithContext(ctx),
+	)
+	_, err := p.Run()
+	return programError(ctx, err)
+}
+
+func programError(ctx context.Context, err error) error {
+	if ctx.Err() != nil && errors.Is(err, tea.ErrProgramKilled) && errors.Is(err, ctx.Err()) && onlyCancellation(err, ctx.Err()) {
+		return nil
+	}
+	return err
+}
+
+func onlyCancellation(err, cause error) bool {
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, child := range wrapped.Unwrap() {
+			if !onlyCancellation(child, cause) {
+				return false
+			}
 		}
-		// Clear the whole frame before repainting. Moving home and clearing only
-		// below the final cursor left suffixes from longer previous log rows on
-		// screen, visually splicing unrelated JSON records together.
-		fmt.Print("\033[H\033[2J" + render(fetcher.Base(), snap, logs, width, height))
-		t := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			fmt.Print("\033[0m\n")
-			return
-		case <-t.C:
-		}
+		return true
+	case interface{ Unwrap() error }:
+		return onlyCancellation(wrapped.Unwrap(), cause)
+	default:
+		return err == tea.ErrProgramKilled || err == cause
 	}
 }
 
 func render(base string, s stats.Snapshot, logs *LogBuffer, width, height int) string {
+	var lines []diagnosticLogLine
+	if logs != nil {
+		lines = formatLogRecords(logs.Tail(500))
+	}
+	frame, _ := renderLogFrame(base, s, lines, width, height, 0, false)
+	return frame
+}
+
+func renderLogFrame(base string, s stats.Snapshot, lines []diagnosticLogLine, width, height, offset int, paused bool) (string, int) {
 	var b strings.Builder
 	status, statusColor := "HEALTHY", green
 	if s.Down() {
@@ -92,26 +124,37 @@ func render(base string, s stats.Snapshot, logs *LogBuffer, width, height int) s
 	for _, e := range s.Errors {
 		b.WriteString("  " + red + "× " + reset + e.Error() + "\n")
 	}
-	used := visibleLines(b.String())
-	// Log chrome occupies five rows: spacer, title, spacer, pre-footer spacer,
-	// and footer. Subtract it explicitly so visual breathing room never pushes
-	// the frame beyond the terminal height.
+	width, height = max(1, width), max(1, height)
+	header := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+	if height < len(header)+6 {
+		// Tight screens prioritize title/status and logs over secondary metrics.
+		header = header[1:]
+		header = header[:min(len(header), max(0, height-6))]
+	}
+	b.Reset()
+	for _, text := range header {
+		b.WriteString(ansi.Truncate(text, width, "") + "\n")
+	}
 	const logChromeRows = 5
-	rows := height - used - logChromeRows
-	if rows < 1 {
-		rows = 1
+	rows := max(0, height-len(header)-logChromeRows)
+	mode := "FOLLOW"
+	if paused {
+		mode = "PAUSED · frozen history"
 	}
-	b.WriteString("\n  " + bold + white + "DIAGNOSTIC LOGS" + reset + "  " + dim + "auto-follow · health/stats polls hidden" + reset + "\n\n")
-	entries := []diagnosticLogLine(nil)
-	if logs != nil {
-		// Wrap complete records instead of truncating them. Taking a generous tail
-		// before wrapping keeps the newest physical screen rows and makes the error
-		// suffix (usually the useful part) visible without joining unrelated logs.
-		entries = wrapDiagnosticLogLines(formatLogRecords(logs.Tail(500)), max(10, width-8))
-		if len(entries) > rows {
-			entries = entries[len(entries)-rows:]
+	title := "  " + bold + white + "DIAGNOSTIC LOGS" + reset + "  " + dim + mode + " · health/stats polls hidden" + reset
+	if width < 40 {
+		shortMode := "FOLLOW"
+		if paused {
+			shortMode = "PAUSED"
 		}
+		title = "  " + bold + white + shortMode + " LOGS" + reset
 	}
+	b.WriteString("\n" + title + "\n\n")
+	entries := wrapDiagnosticLogLines(lines, max(1, width-8))
+	offset = min(max(0, offset), max(0, len(entries)-rows))
+	end := len(entries) - offset
+	start := max(0, end-rows)
+	entries = entries[start:end]
 	for i := 0; i < rows; i++ {
 		entry := diagnosticLogLine{}
 		if i < len(entries) {
@@ -119,8 +162,31 @@ func render(base string, s stats.Snapshot, logs *LogBuffer, width, height int) s
 		}
 		b.WriteString("  " + logLevelColor(entry.Level) + entry.Text + reset + "\n")
 	}
-	b.WriteString("\n  " + dim + "Updated " + format.Clock(s.FetchedAt) + "  •  refreshes automatically  •  Ctrl-C to exit" + reset + "\n")
-	return b.String()
+	help := "PgUp/PgDn ↑/↓ scroll  •  End follow  •  Ctrl-C exit"
+	footerMode := "FOLLOW"
+	if paused {
+		footerMode = "PAUSED"
+	}
+	if width >= 100 {
+		help = "Updated " + format.Clock(s.FetchedAt) + "  •  " + footerMode + "  •  " + help
+	} else if width < 56 {
+		help = footerMode + " PgUp/Dn ↑/↓ End:live Ctrl-C:exit"
+	} else {
+		help = footerMode + "  •  " + help
+	}
+	if width < 40 {
+		help = "^C exit End live"
+	}
+	b.WriteString("\n  " + dim + help + reset + "\n")
+	frame := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+	if len(frame) > height {
+		// Extremely small screens show the exit hint instead of overflowing.
+		frame = frame[len(frame)-height:]
+	}
+	for i, text := range frame {
+		frame[i] = ansi.Truncate(text, width, "")
+	}
+	return strings.Join(frame, "\n") + "\n", rows
 }
 func renderCompression(s stats.Snapshot) string {
 	var before, after, compressed, skipped int64
@@ -174,16 +240,12 @@ func wrapDiagnosticLogLines(lines []diagnosticLogLine, width int) []diagnosticLo
 	}
 	var wrapped []diagnosticLogLine
 	for _, line := range lines {
-		runes := []rune(strings.ReplaceAll(strings.TrimSuffix(line.Text, "\r"), "\t", "    "))
-		if len(runes) == 0 {
-			wrapped = append(wrapped, diagnosticLogLine{Level: line.Level})
-			continue
+		for text := range strings.SplitSeq(line.Text, "\n") {
+			text = strings.ReplaceAll(strings.TrimSuffix(text, "\r"), "\t", "    ")
+			for row := range strings.SplitSeq(ansi.Hardwrap(text, width, true), "\n") {
+				wrapped = append(wrapped, diagnosticLogLine{Text: row, Level: line.Level})
+			}
 		}
-		for len(runes) > width {
-			wrapped = append(wrapped, diagnosticLogLine{Text: string(runes[:width]), Level: line.Level})
-			runes = runes[width:]
-		}
-		wrapped = append(wrapped, diagnosticLogLine{Text: string(runes), Level: line.Level})
 	}
 	return wrapped
 }
