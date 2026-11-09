@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/shipengqi/sap-ai-core-proxy/cmd/aicore-tui/format"
-	"github.com/shipengqi/sap-ai-core-proxy/cmd/aicore-tui/stats"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/format"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/stats"
 )
 
 type Options struct {
@@ -22,7 +22,7 @@ type Options struct {
 func Run(ctx context.Context, out io.Writer, opts Options) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	fetcher := stats.New(opts.URL)
+	fetcher := stats.NewWithVersion(opts.URL)
 	for {
 		snap := fetcher.Fetch(ctx)
 		if !opts.Plain {
