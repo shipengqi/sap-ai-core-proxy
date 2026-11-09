@@ -61,11 +61,16 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 	ids := opts.Agents
 	if len(ids) == 0 {
 		_, _ = fmt.Fprintf(out, "Proxy URL: %s\n\n", opts.BaseURL())
+		options := agentOptions(env)
 		var selected []string
+		// huh v2.0.3 sizes a MultiSelect viewport as (height - title rows) even
+		// though the title is rendered outside the viewport. Without an explicit
+		// height the last option is clipped, so leave room for every row here.
 		field := huh.NewMultiSelect[string]().
 			Title("Select agents to configure").
-			Options(agentOptions(env)...).
-			Value(&selected)
+			Options(options...).
+			Value(&selected).
+			WithHeight(len(options) + 2)
 		aborted, err := runForm(in, out, accessible, field)
 		if err != nil {
 			return err
@@ -90,11 +95,14 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 	if !opts.Yes {
 		options, byValue := modelOptions(opts, agents)
 		var selected []string
+		// Same viewport sizing issue as the agent list: title plus description
+		// are two rows, so add two to keep every model visible.
 		field := huh.NewMultiSelect[string]().
 			Title("Select models").
-			Description("Enter keeps the curated defaults").
+			Description("Enter keeps the curated defaults; ctrl+a selects all").
 			Options(options...).
-			Value(&selected)
+			Value(&selected).
+			WithHeight(len(options) + 2)
 		aborted, err := runForm(in, out, accessible, field)
 		if err != nil {
 			return err
@@ -190,11 +198,14 @@ func Run(in io.Reader, out io.Writer, opts Options) error {
 // "Cancelled." message. WithInput/WithOutput guarantee the form never reaches
 // for os.Stdin/os.Stdout directly.
 func runForm(in io.Reader, out io.Writer, accessible bool, fields ...huh.Field) (bool, error) {
+	// Keep the keybinding row visible: it is the only hint that these are
+	// multi-selects (x/space toggles, ctrl+a selects all). Hiding it made a
+	// working multi-select look like a single-choice prompt.
 	form := huh.NewForm(huh.NewGroup(fields...)).
 		WithInput(in).
 		WithOutput(out).
 		WithAccessible(accessible).
-		WithShowHelp(false)
+		WithShowHelp(true)
 	err := form.Run()
 	if isUserAbort(err) {
 		return true, nil
@@ -267,10 +278,30 @@ func agentOptions(env Env) []huh.Option[string] {
 	all := All()
 	options := make([]huh.Option[string], 0, len(all))
 	for _, agent := range all {
-		label := fmt.Sprintf("%-12s %s", agent.Name(), targetList(agent.Targets(env)))
+		label := fmt.Sprintf("%-12s %s", agent.Name(), shortTargetList(env, agent.Targets(env)))
 		options = append(options, huh.NewOption(label, agent.ID()))
 	}
 	return options
+}
+
+// shortTargetList keeps an option label well under the form's default width.
+// A wrapped label consumes an extra viewport row, which is enough to push the
+// last agent off screen. Full paths are still shown in the diff before writing.
+func shortTargetList(env Env, targets []Target) string {
+	if len(targets) == 0 {
+		return ""
+	}
+	shorten := func(path string) string {
+		if env.Home != "" && strings.HasPrefix(path, env.Home+string(os.PathSeparator)) {
+			return "~" + path[len(env.Home):]
+		}
+		return path
+	}
+	label := shorten(targets[0].Path)
+	if len(targets) > 1 {
+		label += fmt.Sprintf(" (+%d more)", len(targets)-1)
+	}
+	return label
 }
 
 // modelChoice remembers which family a selectable model belongs to.
@@ -351,14 +382,6 @@ func managedMarker(id string) []byte {
 	default:
 		return []byte(OpenCodeOpenAIID)
 	}
-}
-
-func targetList(targets []Target) string {
-	paths := make([]string, 0, len(targets))
-	for _, t := range targets {
-		paths = append(paths, t.Path)
-	}
-	return strings.Join(paths, ", ")
 }
 
 func isTerminal(in io.Reader) bool {

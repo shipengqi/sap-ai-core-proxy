@@ -408,3 +408,42 @@ func TestLineDelimitedReader(t *testing.T) {
 		}
 	})
 }
+
+// Long absolute paths in option labels wrap inside huh's 80-column form and
+// consume a viewport row, which pushed the last agent off screen. Keep one
+// compact option per registered agent so the multi-select stays complete.
+func TestAgentOptionsListsEveryAgentCompactly(t *testing.T) {
+	home := isolatedHome(t)
+	env := Env{Home: home, Cwd: home, Getenv: os.Getenv}
+	options := agentOptions(env)
+	if len(options) != len(IDs()) {
+		t.Fatalf("got %d options, want one per agent (%d)", len(options), len(IDs()))
+	}
+	for i, agent := range All() {
+		label := options[i].Key
+		if !strings.Contains(label, agent.Name()) {
+			t.Errorf("option %d missing agent name %q: %q", i, agent.Name(), label)
+		}
+		if len(label) > 80 {
+			t.Errorf("option %d is %d chars, wider than the default 80-column form: %q", i, len(label), label)
+		}
+		if options[i].Value != agent.ID() {
+			t.Errorf("option %d stores %q, want agent ID %q", i, options[i].Value, agent.ID())
+		}
+	}
+}
+
+// Every agent must also be visible in the line-based (non-TTY) fallback, not
+// just in the Bubble Tea renderer.
+func TestAccessibleAgentPromptShowsAllThree(t *testing.T) {
+	isolatedHome(t)
+	var out bytes.Buffer
+	if err := Run(strings.NewReader(""), &out, Options{Port: 3001}); err != nil {
+		t.Fatalf("empty input must cancel cleanly: %v", err)
+	}
+	for _, name := range []string{"Claude Code", "Codex", "OpenCode"} {
+		if !strings.Contains(out.String(), name) {
+			t.Errorf("accessible prompt is missing %q:\n%s", name, out.String())
+		}
+	}
+}
