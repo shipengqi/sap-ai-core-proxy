@@ -19,9 +19,7 @@ type snapshotMsg stats.Snapshot
 // tickMsg asks for the next poll once the refresh interval has elapsed.
 type tickMsg struct{}
 
-// dashboardModel renders the standalone panel. Like the in-process panel it is
-// display-only: signal handling stays with signal.NotifyContext in Run, and no
-// terminal input is consumed.
+// dashboardModel renders the standalone panel and handles terminal Ctrl-C keys.
 type dashboardModel struct {
 	base     string
 	interval time.Duration
@@ -29,6 +27,7 @@ type dashboardModel struct {
 	ctx      context.Context
 	snap     stats.Snapshot
 	ready    bool
+	cancel   context.CancelFunc
 }
 
 func (m dashboardModel) Init() tea.Cmd {
@@ -44,6 +43,13 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Tick(m.interval, func(time.Time) tea.Msg { return tickMsg{} })
 	case tickMsg:
 		return m, m.Init()
+	case tea.KeyPressMsg:
+		if msg.String() == "ctrl+c" {
+			if m.cancel != nil {
+				m.cancel()
+			}
+			return m, tea.Quit
+		}
 	}
 	return m, nil
 }
@@ -59,9 +65,11 @@ func (m dashboardModel) View() tea.View {
 // lines that changed instead of clearing and redrawing the whole screen every
 // interval. Only used when out is a real terminal.
 func runInteractive(ctx context.Context, out io.Writer, fetcher *stats.Fetcher, interval time.Duration) error {
-	m := dashboardModel{base: fetcher.Base(), interval: interval, fetcher: fetcher, ctx: ctx}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	m := dashboardModel{base: fetcher.Base(), interval: interval, fetcher: fetcher, ctx: ctx, cancel: cancel}
 	p := tea.NewProgram(m,
-		tea.WithInput(nil),
+		tea.WithInput(os.Stdin),
 		tea.WithOutput(out),
 		tea.WithoutSignalHandler(),
 		tea.WithContext(ctx),
@@ -69,10 +77,30 @@ func runInteractive(ctx context.Context, out io.Writer, fetcher *stats.Fetcher, 
 	_, err := p.Run()
 	// Cancelling the context is how Run stops on Ctrl-C; Bubble Tea reports it
 	// as ErrProgramKilled. That is a normal exit, not a failure.
-	if errors.Is(err, tea.ErrProgramKilled) || ctx.Err() != nil {
+	return programError(ctx, err)
+}
+
+func programError(ctx context.Context, err error) error {
+	if ctx.Err() != nil && errors.Is(err, tea.ErrProgramKilled) && errors.Is(err, ctx.Err()) && onlyCancellation(err, ctx.Err()) {
 		return nil
 	}
 	return err
+}
+
+func onlyCancellation(err, cause error) bool {
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, child := range wrapped.Unwrap() {
+			if !onlyCancellation(child, cause) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return onlyCancellation(wrapped.Unwrap(), cause)
+	default:
+		return err == tea.ErrProgramKilled || err == cause
+	}
 }
 
 // runRepaint keeps the original behaviour for redirected output (pipes, files,

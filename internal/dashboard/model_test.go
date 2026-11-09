@@ -3,16 +3,60 @@ package dashboard
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
+
 	"github.com/shipengqi/sap-ai-core-proxy/internal/tui/stats"
 )
 
 func statsFetcherFor(url string) *stats.Fetcher { return stats.NewWithVersion(url) }
+
+func TestProgramErrorPreservesConcurrentFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	failure := errors.New("terminal write failed")
+	for _, err := range []error{
+		tea.ErrProgramKilled,
+		fmt.Errorf("%w: %w", tea.ErrProgramKilled, tea.ErrProgramPanic),
+		fmt.Errorf("%w: %w", tea.ErrProgramKilled, failure),
+		errors.Join(tea.ErrProgramKilled, context.Canceled, tea.ErrProgramPanic),
+		errors.Join(tea.ErrProgramKilled, context.Canceled, failure),
+	} {
+		if got := programError(ctx, err); got != err {
+			t.Fatalf("concurrent cancellation swallowed %v", err)
+		}
+	}
+	err := fmt.Errorf("%w: %w", tea.ErrProgramKilled, context.Canceled)
+	if got := programError(ctx, err); got != nil {
+		t.Fatalf("expected cancellation returned %v", got)
+	}
+	if got := programError(context.Background(), err); got != err {
+		t.Fatal("uncanceled owner masked cancellation from elsewhere")
+	}
+}
+
+func TestDashboardModelCtrlCRequestsQuit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := dashboardModel{cancel: cancel}
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl})
+	if ctx.Err() == nil {
+		t.Fatal("Ctrl-C must cancel in-flight standalone fetches")
+	}
+	if cmd == nil {
+		t.Fatal("Ctrl-C must request a clean standalone panel exit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Fatal("Ctrl-C command must quit Bubble Tea")
+	}
+}
 
 // TestRunRepaintPlainExitsAfterOneFrame confirms that --plain mode renders
 // exactly one frame and returns, matching the original contract that pipe

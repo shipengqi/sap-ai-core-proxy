@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -15,9 +16,7 @@ type snapshotMsg stats.Snapshot
 // tickMsg asks for the next poll once the refresh interval has elapsed.
 type tickMsg struct{}
 
-// dashboardModel is a display-only Bubble Tea model. It deliberately reads no
-// input: this process also runs the HTTP server, and putting the terminal into
-// raw mode would swallow the Ctrl-C that stops that server.
+// dashboardModel owns a frozen log view; the server owns process cancellation.
 type dashboardModel struct {
 	base     string
 	interval time.Duration
@@ -28,6 +27,10 @@ type dashboardModel struct {
 	width    int
 	height   int
 	ready    bool
+	cancel   context.CancelFunc
+	lines    []diagnosticLogLine
+	paused   bool
+	offset   int
 }
 
 func fetchCmd(ctx context.Context, f *stats.Fetcher) tea.Cmd {
@@ -41,13 +44,45 @@ func (m dashboardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case snapshotMsg:
 		m.snap = stats.Snapshot(v)
 		m.ready = true
+		if !m.paused {
+			m.captureLogs()
+		}
+		m.clampOffset()
 		return m, tea.Tick(m.interval, func(time.Time) tea.Msg { return tickMsg{} })
 	case tickMsg:
 		return m, fetchCmd(m.ctx, m.fetcher)
 	case tea.WindowSizeMsg:
 		if v.Width > 0 && v.Height > 0 {
 			m.width, m.height = v.Width, v.Height
+			m.clampOffset()
 		}
+	case tea.KeyPressMsg:
+		if v.String() == "ctrl+c" {
+			if m.cancel != nil {
+				m.cancel()
+			}
+			return m, tea.Quit
+		}
+		_, rows := renderLogFrame(m.base, m.snap, m.lines, m.width, m.height, m.offset, m.paused)
+		switch v.Code {
+		case tea.KeyUp:
+			m.paused = true
+			m.offset++
+		case tea.KeyDown:
+			m.paused = true
+			m.offset--
+		case tea.KeyPgUp:
+			m.paused = true
+			m.offset += rows
+		case tea.KeyPgDown:
+			m.paused = true
+			m.offset -= rows
+		case tea.KeyEnd:
+			m.paused = false
+			m.offset = 0
+			m.captureLogs()
+		}
+		m.clampOffset()
 	}
 	return m, nil
 }
@@ -56,12 +91,19 @@ func (m dashboardModel) View() tea.View {
 	if !m.ready {
 		return tea.NewView("")
 	}
-	width, height := m.width, m.height
-	// Bubble Tea's signal handler is disabled here, so SIGWINCH may never turn
-	// into a WindowSizeMsg. Re-reading the size every frame keeps the layout
-	// correct after a resize without owning a process-wide signal handler.
-	if w, h := terminalSize(); w > 0 && h > 0 {
-		width, height = w, h
+	frame, _ := renderLogFrame(m.base, m.snap, m.lines, m.width, m.height, m.offset, m.paused)
+	// A trailing newline adds a blank row and makes Bubble Tea redraw overflow.
+	return tea.NewView(strings.TrimSuffix(frame, "\n"))
+}
+
+func (m *dashboardModel) captureLogs() {
+	if m.logs != nil {
+		m.lines = formatLogRecords(m.logs.Tail(500))
 	}
-	return tea.NewView(render(m.base, m.snap, m.logs, width, height))
+}
+
+func (m *dashboardModel) clampOffset() {
+	_, rows := renderLogFrame(m.base, m.snap, m.lines, m.width, m.height, m.offset, m.paused)
+	count := len(wrapDiagnosticLogLines(m.lines, max(1, m.width-8)))
+	m.offset = min(max(0, m.offset), max(0, count-rows))
 }
