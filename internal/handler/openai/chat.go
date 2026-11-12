@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/shipengqi/sap-ai-core-proxy/internal/catalogue"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/diagnostics"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
@@ -86,6 +87,24 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	if catalogue.IsGlm(modelStr) {
 		h.chatCompletionsGlm(c, modelStr, raw, streaming)
 		return
+	}
+
+	// Compression runs once on the OpenAI-shaped body, before any body builder
+	// or capability fallback, so a retry and the /responses bridge rebuild from
+	// the same compressed bytes. It covers the whole tool history, not just the
+	// live turn: the transform is deterministic, so the prefix the provider
+	// caches stays byte-identical on the next turn.
+	if compress.Enabled() {
+		var report compress.Report
+		raw, report = compress.CompressOpenAIRequest(raw)
+		compress.Observe(usage.SurfaceOpenAI, report)
+		if report.BlocksCompressed > 0 {
+			slog.Debug("compressed tool outputs", "model", modelStr,
+				"blocks", report.BlocksCompressed,
+				"bytes_before", report.OriginalBytes,
+				"bytes_after", report.CompressedBytes,
+				"strategy", report.Strategy)
+		}
 	}
 
 	if streaming {

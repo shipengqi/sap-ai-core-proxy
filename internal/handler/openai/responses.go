@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/shipengqi/sap-ai-core-proxy/internal/compress"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/proxy"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/sapclient"
 	"github.com/shipengqi/sap-ai-core-proxy/internal/stream"
@@ -117,6 +119,29 @@ func (h *Handler) CreateResponse(c *gin.Context) {
 	}
 	c.Set("model", req.Model)
 	c.Set("resolved_model", dep.EffectiveModelName())
+
+	// Codex sends tool results as function_call_output items in "input". Compress
+	// before the body reaches either the streaming or the buffered call, so both
+	// paths send identical bytes. With previous_response_id the upstream owns the
+	// history; only the incremental input is rewritten, which leaves that prefix
+	// untouched and still saves tokens on the new tool output.
+	if compress.Enabled() {
+		var payload map[string]json.RawMessage
+		if json.Unmarshal(body, &payload) == nil {
+			compressed, report := compress.CompressOpenAIRequest(payload)
+			compress.Observe(usage.SurfaceOpenAI, report)
+			if report.BlocksCompressed > 0 {
+				if encoded, err := json.Marshal(compressed); err == nil {
+					body = encoded
+					slog.Debug("compressed tool outputs", "model", req.Model,
+						"blocks", report.BlocksCompressed,
+						"bytes_before", report.OriginalBytes,
+						"bytes_after", report.CompressedBytes,
+						"strategy", report.Strategy)
+				}
+			}
+		}
+	}
 	remember := func(data []byte) {
 		var response struct {
 			ID string `json:"id"`

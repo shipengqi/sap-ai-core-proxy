@@ -25,8 +25,10 @@ type Server struct {
 	// request content — only counters.
 	Metrics bool `json:"metrics"`
 	// CompressLogs enables request-wide log compression: every recognisable
-	// tool_result log in the request — the live zone and the history alike — is
-	// shrunk by one deterministic rule before the request goes upstream.
+	// tool output log in the request — Anthropic tool_result blocks, OpenAI
+	// role=tool messages and Responses function_call_output items, live zone
+	// and history alike — is shrunk by one deterministic rule before the
+	// request goes upstream.
 	//
 	// It defaults to false on purpose. The saving only materialises when the
 	// text really is a log, and a wrong guess changes what the model sees, so

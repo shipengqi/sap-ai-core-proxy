@@ -140,7 +140,7 @@ The three per-agent sections below are the **manual/advanced reference**. In par
 | `server.port` | No | `3001` | Listen port |
 | `server.log_level` | No | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
 | `server.metrics` | No | `true` | Register `GET /metrics`, `GET /stats`, and the OTLP receiver `POST /otel/v1/metrics` |
-| `server.compress_logs` | No | `false` | Deterministically compress every recognisable `tool_result` log in the request, history included. The transform is a pure function of the input text, so a rewritten history is byte-identical from turn to turn and the prompt cache keeps hitting; the model therefore sees compressed history logs in long sessions. Leave disabled unless validated |
+| `server.compress_logs` | No | `false` | Deterministically compress every recognisable tool output log in the request, history included: Anthropic `tool_result` blocks, OpenAI `role=tool` messages and Responses `function_call_output` items (Codex). The transform is a pure function of the input text, so a rewritten history is byte-identical from turn to turn and the prompt cache keeps hitting; the model therefore sees compressed history logs in long sessions. Leave disabled unless validated |
 | `server.anthropic_auto_cache` | No | `false` | Add `{"type":"ephemeral"}` cache control to the final tool sent to Claude Bedrock only when the client provided no `cache_control` anywhere in its request |
 
 ### Environment Variable Overrides
@@ -688,7 +688,7 @@ sap-ai-core-proxy/
 │   ├── version/version.go           # Build identity for -version, /version and both dashboards
 │   ├── usage/                       # Token accounting, /stats and Prometheus metrics
 │   ├── diagnostics/                 # Cache attribution and /stats/cache
-│   ├── compress/                    # Deterministic tool_result log compression and /stats/compress
+│   ├── compress/                    # Deterministic tool output log compression (Anthropic + OpenAI shapes) and /stats/compress
 │   ├── sapclient/
 │   │   ├── auth.go                  # OAuth2 client-credentials + singleflight token cache
 │   │   ├── client.go                # Signed HTTP client (injects Bearer + AI-Resource-Group)

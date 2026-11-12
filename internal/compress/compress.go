@@ -1,5 +1,8 @@
-// Package compress shrinks the tool_result logs of an outbound inference
-// request.
+// Package compress shrinks the tool output logs of an outbound inference
+// request. CompressRequest handles the Anthropic wire shape (tool_result
+// content blocks); CompressOpenAIRequest handles the OpenAI Chat Completions
+// and Responses shapes (role=tool messages and function_call_output items).
+// Both share one pure text transform, one Report and one kill switch.
 //
 // It applies one deterministic rule to *every* tool_result block in the
 // request — the block in the live zone and the blocks already sitting in the
@@ -58,6 +61,9 @@ const (
 	skipBadContent   = "bad_content"
 	skipPlainContent = "plain_content"
 	skipNoToolResult = "no_tool_result"
+	// skipNoToolOutput is the OpenAI-shaped counterpart: no role=tool message
+	// and no function_call_output item was found.
+	skipNoToolOutput = "no_tool_output"
 	skipTooSmall     = "too_small"
 	skipNotLog       = "not_log"
 	skipNoGain       = "no_gain"
